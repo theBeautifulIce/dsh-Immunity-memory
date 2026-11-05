@@ -17,16 +17,18 @@ import { randomUUID } from 'node:crypto'
 import {
   LAYERS,
   LAYER_IDS,
-  MEMORY_TEMPLATES,
   NOTEBOOK_IDS,
   activeTemplate,
+  allTemplates,
   clone,
+  consolidationTargetFor,
   getPath,
   layerEnabled,
   layerInfo,
+  normalizeCustomTemplates,
   normalizeSettings,
   promptBudget,
-  templateById,
+  sanitizeCustomTemplate,
 } from './settings.js'
 import { emptyState, message, STORE_VERSION } from './store.js'
 import { createSearchEngine } from './search.js'
@@ -451,8 +453,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         firstAt: signal.firstAt,
         lastAt: signal.lastAt,
         breakdown: { create: signal.create ?? 0, update: signal.update ?? 0, hit: signal.hit ?? 0 },
-        suggestedLayer: active.consolidation.targetLayer,
-        suggestedTtlDays: active.consolidation.ttlDays,
+        suggestedLayer: consolidationTargetFor(item.layer, active),
+        permanent: true,
         state: record?.state ?? 'new',
       })
     }
@@ -488,8 +490,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
 
   /**
    * 固化审计的最终动作：智能体确认后调用。
-   * approve 会把层级提升到 targetLayer、写入有限保鲜期并留审计；
-   * reject 只记录理由，等新的强化信号再重新进入候选。
+   * approve 会把层级提升到 L1（思想核心）或 L3（本能行为）——两者都不可变、
+   * 永久有效，并清空保鲜期；reject 只记录理由，等新的强化信号再重新进入候选。
    */
   async function applyConsolidation(id, decision, options = {}, actor = 'agent') {
     const current = await ensureLoaded()
@@ -519,28 +521,23 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       return { decision: 'reject', record: records[id], item: decorate(item) }
     }
     const targetLayer = options.targetLayer === undefined
-      ? active.consolidation.targetLayer
+      ? consolidationTargetFor(item.layer, active)
       : String(options.targetLayer)
-    if (!LAYER_IDS.includes(targetLayer)) {
-      throw createError('INVALID_LAYER', `固化目标层 ${targetLayer} 不存在`)
+    if (targetLayer !== 'L1' && targetLayer !== 'L3') {
+      throw createError('INVALID_LAYER', '固化目标只能是 L1 思想核心或 L3 本能行为')
     }
-    const targetInfo = layerInfo(targetLayer)
-    if (targetInfo.immutable) throw createError('READ_ONLY', `${targetLayer} 是不可变层，不能作为固化目标`)
     if (!layerEnabled(active, targetLayer)) throw createError('LAYER_DISABLED', `${targetLayer} 已在设置里关闭`)
-    const ttlDays = options.ttlDays === undefined
-      ? Math.max(1, active.consolidation.ttlDays)
-      : Math.max(1, Math.round(Number(options.ttlDays) || active.consolidation.ttlDays))
     if (records[id]?.state !== 'candidate') {
       throw createError('NOT_CANDIDATE', `条目 ${id} 不在固化候选状态，请先扫描强化信号`)
     }
     const fromLayer = item.layer
     item.layer = targetLayer
-    item.ttlDays = ttlDays
+    item.ttlDays = null
+    item.expiresAt = null
     item.importance = Math.max(item.importance, active.consolidation.minImportance)
     item.updatedAt = now
     item.version = (item.version ?? 1) + 1
-    item.expiresAt = expiresAtFor(item, active)
-    if (item.status === 'conflicted' && !layerInfo(targetLayer).conflictable) item.status = 'active'
+    if (item.status === 'conflicted') item.status = 'active'
     records[id] = {
       state: 'approved',
       at: now,
@@ -548,12 +545,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       note,
       fromLayer,
       toLayer: targetLayer,
-      ttlDays,
+      permanent: true,
       signals: current.meta.reinforcement?.[id]?.count ?? 0,
       score: (current.meta.reinforcement?.[id]?.count ?? 0) * (1 + item.importance / 10),
     }
     indexItem(item)
-    audit('consolidation.approved', `${id} ${fromLayer} → ${targetLayer} ${item.title}（保鲜 ${ttlDays} 天${note === '' ? '' : `；${note}`}）`, actor)
+    audit('consolidation.approved', `${id} ${fromLayer} → ${targetLayer} ${item.title}（永久固化${note === '' ? '' : `；${note}`}）`, actor)
     await persist()
     return { decision: 'approve', record: records[id], item: decorate(item) }
   }
@@ -704,7 +701,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const current = await ensureLoaded()
     const active = settings()
     assertEnabled(active)
-    const layer = normalizeLayer(input.layer ?? active.write.defaultLayer)
+    // 写入哪一层由调用方（智能体 / 用户）按内容判断；智能体不得依赖服务端默认层。
+    let layer
+    if (input.layer !== undefined) {
+      layer = normalizeLayer(input.layer)
+    } else if (actor === 'agent') {
+      throw createError('LAYER_REQUIRED', 'memory_write 必须由智能体显式选择可修改层（L2/L4/L5/L6/L7）')
+    } else {
+      layer = 'L4'
+    }
     assertLayerWritable(active, layer)
     const type = input.type === 'note' ? 'note' : 'memory'
     const notebook = type === 'note' ? normalizeNotebook(input.notebook) : null
@@ -745,7 +750,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       // 同一条事实被反复强调，也是固化信号。
       reinforce(duplicate, 'create')
     }
-    // 保鲜期：L6/L7 默认层或显式 ttlDays 的条目到期后由清理任务归档。
+    // 保鲜期：可修改层的条目到期后由清理任务归档；不可变层恒为永久。
     item.expiresAt = expiresAtFor(item, active)
     reinforce(item, 'create')
     current.items.push(item)
@@ -1424,6 +1429,76 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     return buildDigest(now)
   }
 
+  /** 内置 + 自定义模板；自定义模板由用户随时新增、编辑、删除、切换。 */
+  function templates() {
+    const active = settings()
+    return { active: activeTemplate(active).id, list: allTemplates(active) }
+  }
+
+  async function saveTemplate(input = {}, actor = 'user') {
+    const current = await ensureLoaded()
+    const next = normalizeSettings(current.settings)
+    const sanitized = sanitizeCustomTemplate(input)
+    if (sanitized === undefined) {
+      throw createError('INVALID_TEMPLATE', '模板需要 1-40 字名称、1-4000 字头部，条数 1-30，字符预算 100-8000')
+    }
+    if (input.id !== undefined && sanitized.id === undefined) {
+      throw createError('INVALID_TEMPLATE_ID', '模板 id 只能使用小写字母、数字、下划线和短横线，且不能与内置模板重名')
+    }
+    const list = [...(next.prompt.customTemplates ?? [])]
+    if (sanitized.id !== undefined) {
+      const existing = list.findIndex((template) => template.id === sanitized.id)
+      if (existing >= 0) {
+        list[existing] = { ...sanitized, id: sanitized.id, custom: true }
+      } else {
+        const builtin = allTemplates(next).some((template) => template.id === sanitized.id && template.custom !== true)
+        if (builtin) throw createError('BUILTIN_TEMPLATE', '内置模板不可覆盖，请使用新的模板 id')
+        if (list.length >= 50) throw createError('TEMPLATE_LIMIT', '自定义模板最多 50 个')
+        list.push({ ...sanitized, id: sanitized.id, custom: true })
+      }
+    } else {
+      if (list.length >= 50) throw createError('TEMPLATE_LIMIT', '自定义模板最多 50 个')
+      const id = `tpl_${randomUUID().slice(0, 8)}`
+      list.push({ ...sanitized, id, custom: true })
+      sanitized.id = id
+    }
+    next.prompt.customTemplates = list
+    next.prompt.template = sanitized.id
+    // 切换模板时关闭预算覆盖，否则新模板的 topN / maxChars 不会生效。
+    next.prompt.overrideBudget = false
+    current.settings = next
+    audit('template.save', `模板 ${sanitized.name}（${sanitized.id}）已保存并切换`, actor)
+    await persist()
+    return templates()
+  }
+
+  async function deleteTemplate(id, actor = 'user') {
+    const current = await ensureLoaded()
+    const next = normalizeSettings(current.settings)
+    const target = allTemplates(next).find((template) => template.id === id)
+    if (target === undefined) throw createError('NOT_FOUND', `找不到模板 ${id}`)
+    if (target.custom !== true) throw createError('BUILTIN_TEMPLATE', '内置模板不可删除')
+    next.prompt.customTemplates = (next.prompt.customTemplates ?? []).filter((template) => template.id !== id)
+    if (next.prompt.template === id) next.prompt.template = 'default'
+    current.settings = next
+    audit('template.delete', `自定义模板 ${target.name}（${id}）已删除`, actor)
+    await persist()
+    return templates()
+  }
+
+  async function applyTemplate(id, actor = 'user') {
+    const current = await ensureLoaded()
+    const next = normalizeSettings(current.settings)
+    const target = allTemplates(next).find((template) => template.id === id)
+    if (target === undefined) throw createError('NOT_FOUND', `找不到模板 ${id}`)
+    next.prompt.template = id
+    next.prompt.overrideBudget = false
+    current.settings = next
+    audit('template.apply', `已切换到模板 ${target.name}（${id}）`, actor)
+    await persist()
+    return templates()
+  }
+
   const api = {
     // 读取
     status,
@@ -1437,7 +1512,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     meta: () => currentState().meta,
     injectionStats,
     usageStats,
-    templates: () => ({ active: activeTemplate(settings()).id, list: MEMORY_TEMPLATES }),
+    templates,
+    saveTemplate,
+    deleteTemplate,
+    applyTemplate,
     consolidationCandidates,
     applyConsolidation,
     // 检索/索引诊断
@@ -1661,8 +1739,8 @@ function normalizeTtl(value, active, layer) {
 }
 
 function normalizeLayer(value) {
-  const layer = LAYER_IDS.includes(value) ? value : 'L5'
-  return layer
+  if (!LAYER_IDS.includes(value)) throw createError('INVALID_LAYER', `未知分层 ${value}`)
+  return value
 }
 
 function normalizeNotebook(value) {

@@ -172,6 +172,22 @@ try {
     assert.ok(body.value.text.includes('长期记忆'))
   })
 
+  await test('templates.save / apply / delete 可管理自定义模板', async () => {
+    const saved = await call('templates.save', {
+      name: 'API 模板',
+      header: '## API 自定义模板\n只注入与当前任务相关的条目。',
+      topN: 3,
+      maxChars: 520,
+    })
+    const id = saved.body.value.active
+    assert.ok(id.startsWith('tpl_'))
+    assert.ok(saved.body.value.list.some((entry) => entry.id === id && entry.custom === true))
+    const applied = await call('templates.apply', { id: 'default' })
+    assert.equal(applied.body.value.active, 'default')
+    const deleted = await call('templates.delete', { id })
+    assert.equal(deleted.body.value.list.some((entry) => entry.id === id), false)
+  })
+
   await test('audit.list 记录过前面的写操作', async () => {
     const { body } = await call('audit.list', { limit: 10 })
     assert.ok(body.value.audit.length >= 1)

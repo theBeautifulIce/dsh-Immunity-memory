@@ -217,6 +217,7 @@ await test('引擎直接跑在 SQLite 上（启动加载不递归）', async () 
     // 这一步就是曾经把栈打爆的地方：读库时要拿设置，设置又触发读库。
     engine.reload()
     const item = await engine.createItem({
+      layer: 'L5',
       title: 'SQLite 集成',
       content: '引擎直接写进 SQLite，验证启动加载不递归并且能读回。',
       tags: ['集成'],

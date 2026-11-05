@@ -106,6 +106,7 @@ await test('旧数据缺少保鲜期时加载会补全', async () => {
 let firstId = ''
 await test('写入一条中文记忆', async () => {
   const item = await engine.createItem({
+    layer: 'L5',
     title: '项目使用 pnpm 工作区',
     content: '记忆插件仓库使用 pnpm 管理 packages/* 下的子包，不要混用 npm。',
     tags: ['构建', 'pnpm'],
@@ -121,7 +122,7 @@ await test('写入一条中文记忆', async () => {
 
 await test('过短正文被拒绝', async () => {
   await assert.rejects(
-    () => engine.createItem({ content: '短' }, 'agent'),
+    () => engine.createItem({ layer: 'L5', content: '短' }, 'agent'),
     (error) => error.code === 'TOO_SHORT',
   )
 })
@@ -139,11 +140,23 @@ await test('记事本条目落在对应笔记本', async () => {
 
 await test('重复内容会被标记 duplicateOf', async () => {
   const duplicate = await engine.createItem({
+    layer: 'L5',
     title: '项目使用 pnpm 工作区（副本）',
     content: '记忆插件仓库使用 pnpm 管理 packages/* 下的子包，不要混用 npm。',
     ttlDays: 30,
   }, 'agent')
   assert.equal(duplicate.duplicateOf, firstId)
+})
+
+await test('智能体写入必须显式选择层级', async () => {
+  await assert.rejects(
+    () => engine.createItem({ title: '未指定层级', content: '智能体写入没有选择层级，应由引擎拒绝而非落到某个默认层。', ttlDays: 30 }, 'agent'),
+    (error) => error.code === 'LAYER_REQUIRED',
+  )
+  await assert.rejects(
+    () => engine.createItem({ layer: 'L9', title: '非法层级', content: '不存在的层级必须报错。', ttlDays: 30 }, 'agent'),
+    (error) => error.code === 'INVALID_LAYER',
+  )
 })
 
 await test('L0 灵魂层默认只读', async () => {
@@ -256,7 +269,7 @@ await test('过期条目会被清理任务归档为 expired', async () => {
 
 await test('可修改层写入必须填写保鲜期', async () => {
   await assert.rejects(
-    () => engine.createItem({ title: '没有保鲜期', content: '这条记忆没有填写保鲜期，应当被拒绝写入。' }, 'agent'),
+    () => engine.createItem({ layer: 'L5', title: '没有保鲜期', content: '这条记忆没有填写保鲜期，应当被拒绝写入。' }, 'agent'),
     (error) => error.code === 'TTL_REQUIRED',
   )
   await assert.rejects(
@@ -284,6 +297,40 @@ await test('模板热切换立即改变注入预算', async () => {
   assert.equal(stats.topN, 10)
   assert.ok(stats.layers.some((layer) => layer.id === 'L4'))
   await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { template: 'default' } }))
+})
+
+await test('自定义模板可新增、切换、删除', async () => {
+  const saved = await engine.saveTemplate({
+    name: '我的模板',
+    header: '## 我的长期记忆\n只使用与当前任务直接相关的条目。',
+    topN: 4,
+    maxChars: 640,
+  }, 'user')
+  assert.equal(saved.active.startsWith('tpl_'), true)
+  assert.ok(saved.list.some((entry) => entry.id === saved.active && entry.custom === true))
+  const stats = engine.injectionStats()
+  assert.equal(stats.template.id, saved.active)
+  assert.equal(stats.topN, 4)
+  assert.ok(stats.text.includes('我的长期记忆'))
+  const edited = await engine.saveTemplate({
+    id: saved.active,
+    name: '我的模板（改）',
+    header: '## 修改后的长期记忆\n优先级更高。',
+    topN: 5,
+    maxChars: 700,
+  }, 'user')
+  assert.equal(edited.list.find((entry) => entry.id === saved.active).name, '我的模板（改）')
+  assert.equal(engine.injectionStats().topN, 5)
+  await engine.reload()
+  assert.equal(engine.injectionStats().template.id, saved.active)
+  await engine.applyTemplate('default', 'user')
+  assert.equal(engine.injectionStats().template.id, 'default')
+  const afterDelete = await engine.deleteTemplate(saved.active, 'user')
+  assert.equal(afterDelete.list.some((entry) => entry.id === saved.active), false)
+  await assert.rejects(
+    () => engine.deleteTemplate('default', 'user'),
+    (error) => error.code === 'BUILTIN_TEMPLATE',
+  )
 })
 
 await test('智能体检索会记录用量账本', async () => {
@@ -318,6 +365,7 @@ await test('关闭审计时用量账本不保存查询原文', async () => {
 
 await test('反复强化的记忆可审计固化到目标层', async () => {
   const item = await engine.createItem({
+    layer: 'L5',
     title: '固定使用 pnpm',
     content: '本仓库所有子包统一使用 pnpm，不要用 npm 或 yarn。',
     importance: 8,
@@ -333,13 +381,35 @@ await test('反复强化的记忆可审计固化到目标层', async () => {
   const candidate = candidates.find((entry) => entry.id === item.id)
   assert.ok(candidate, '应产生固化候选')
   assert.ok(candidate.signals >= 4)
-  assert.equal(candidate.suggestedLayer, 'L4')
+  assert.equal(candidate.suggestedLayer, 'L3')
   // 固化必须先经维护任务生成候选记录，再走审计确认，不能直接跳过审计。
   await engine.runMaintenance({ tasks: ['consolidate'] })
-  const result = await engine.applyConsolidation(item.id, 'approve', { note: '反复确认，提升为学习行为' }, 'agent')
-  assert.equal(result.item.layer, 'L4')
-  assert.ok(result.item.ttlDays >= 1)
-  assert.ok(engine.auditList().some((entry) => entry.action === 'consolidation.approved' && entry.detail.includes(item.id)))
+  const result = await engine.applyConsolidation(item.id, 'approve', { note: '反复确认，固化到本能行为' }, 'agent')
+  assert.equal(result.item.layer, 'L3')
+  assert.equal(result.item.ttlDays, null)
+  assert.equal(result.item.expiresAt, null)
+  assert.ok(engine.auditList().some((entry) => entry.action === 'consolidation.approved' && entry.detail.includes('永久固化')))
+})
+
+await test('L2 思想流动固化到 L1 思想核心并永久保留', async () => {
+  const item = await engine.createItem({
+    layer: 'L2',
+    title: '缓存一致性优先',
+    content: '跨进程缓存必须优先保证一致性，宁可多一次回源也不要返回脏数据。',
+    importance: 7,
+    ttlDays: 30,
+  }, 'agent')
+  for (let index = 0; index < 3; index += 1) {
+    await engine.updateItem(item.id, { title: `缓存一致性优先（确认 ${index + 2}）`, ttlDays: 30 }, 'user')
+  }
+  const candidate = engine.consolidationCandidates().find((entry) => entry.id === item.id)
+  assert.ok(candidate)
+  assert.equal(candidate.suggestedLayer, 'L1')
+  await engine.runMaintenance({ tasks: ['consolidate'] })
+  const result = await engine.applyConsolidation(item.id, 'approve', { note: '长期原则' }, 'agent')
+  assert.equal(result.item.layer, 'L1')
+  assert.equal(result.item.ttlDays, null)
+  assert.equal(result.item.expiresAt, null)
 })
 
 // ---------------------------------------------------------------- 输出 ----

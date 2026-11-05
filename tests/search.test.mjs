@@ -46,10 +46,10 @@ async function test(title, run) {
 }
 
 // 造数据：pnpm 相关、缓存相关、图谱相关
-const pnpmDoc = await engine.createItem({ title: '仓库构建', content: '这个仓库用 pnpm 管理依赖，pnpm 的 workspace 配置在根目录。', tags: ['构建'], importance: 7, ttlDays: 30 }, 'agent')
-const cacheDoc = await engine.createItem({ title: '缓存说明', content: '缓存 缓存 缓存 的说明，缓存命中率要监控。', tags: ['性能'], importance: 5, ttlDays: 30 }, 'agent')
-const otherDoc = await engine.createItem({ title: '账号资产', content: '测试账号只保存在本机。', tags: ['资产'], importance: 5, ttlDays: 30 }, 'agent')
-const graphDoc = await engine.createItem({ title: '无关的图谱节点', content: '这段文字和查询没有任何词面重合。', tags: ['图谱'], importance: 4, ttlDays: 30 }, 'agent')
+const pnpmDoc = await engine.createItem({ layer: 'L5', title: '仓库构建', content: '这个仓库用 pnpm 管理依赖，pnpm 的 workspace 配置在根目录。', tags: ['构建'], importance: 7, ttlDays: 30 }, 'agent')
+const cacheDoc = await engine.createItem({ layer: 'L5', title: '缓存说明', content: '缓存 缓存 缓存 的说明，缓存命中率要监控。', tags: ['性能'], importance: 5, ttlDays: 30 }, 'agent')
+const otherDoc = await engine.createItem({ layer: 'L5', title: '账号资产', content: '测试账号只保存在本机。', tags: ['资产'], importance: 5, ttlDays: 30 }, 'agent')
+const graphDoc = await engine.createItem({ layer: 'L5', title: '无关的图谱节点', content: '这段文字和查询没有任何词面重合。', tags: ['图谱'], importance: 4, ttlDays: 30 }, 'agent')
 
 // 直接插一条关系边：pnpmDoc → graphDoc
 store.raw().prepare(

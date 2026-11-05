@@ -208,6 +208,11 @@ window.__ModuleLoader__.load({
       .mp-kpi b { display:block; font-size:18px; line-height:1.2 }
       .mp-consolidate-row { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px; padding:8px 10px;
         display:flex; flex-direction:column; gap:6px }
+      .mp-template-manage { border:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.2)); border-radius:8px;
+        padding:8px 10px; display:flex; flex-direction:column; gap:8px }
+      .mp-template-row { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap }
+      .mp-template-editor { display:flex; flex-direction:column; gap:8px; border-top:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.2));
+        padding-top:8px }
       .mp-ttl-alert { border-left:3px solid var(--dsw-alias-state-warning-primary,#b45309); padding:5px 8px;
         background:rgba(180,83,9,.08); border-radius:6px; font-size:11px; color:var(--dsw-alias-state-warning-primary,#b45309) }
       .mp-editor { flex:1 1 420px; min-width:300px; display:flex; flex-direction:column; gap:10px;
@@ -352,7 +357,7 @@ window.__ModuleLoader__.load({
 
     /**
      * 顶部注入预算卡：默认只看总 token，展开后按层拆分。
-     * 模板切换直接写 settings.prompt.template，系统提示词下一轮就按新模板生成。
+     * 模板切换走 templates.apply；系统提示词下一轮就按新模板生成。
      */
     function InjectionCard({ api, lang, boot, notify, onChanged }) {
       const txt = (zh, en) => (lang === 'zh' ? zh : en)
@@ -360,7 +365,10 @@ window.__ModuleLoader__.load({
       const templates = boot.templates?.list ?? []
       const [expanded, setExpanded] = useState(false)
       const [saving, setSaving] = useState(false)
+      const [managing, setManaging] = useState(false)
+      const [draft, setDraft] = useState(null)
       const [templateId, setTemplateId] = useState(boot.settings?.prompt?.template ?? injection.template?.id ?? 'default')
+      const customTemplates = templates.filter((entry) => entry.custom === true)
 
       useEffect(() => {
         setTemplateId(boot.settings?.prompt?.template ?? injection.template?.id ?? 'default')
@@ -370,8 +378,62 @@ window.__ModuleLoader__.load({
         setTemplateId(next)
         setSaving(true)
         try {
-          await api('settings.save', { patch: { prompt: { template: next } } })
+          await api('templates.apply', { id: next })
           notify(txt('模板已切换，下一轮对话立即生效', 'Template switched; takes effect on the next turn'))
+          await onChanged()
+        } catch (error) {
+          setTemplateId(boot.settings?.prompt?.template ?? 'default')
+          notify(error.message, 'error')
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      function openCreateTemplate() {
+        setManaging(true)
+        setDraft({
+          name: txt('我的模板', 'My template'),
+          header: txt('## 我的长期记忆\n下面是与当前对话相关的历史记忆，只在确实相关时使用。', '## My long-term memory\nRelevant memories from earlier sessions; use only when actually relevant.'),
+          topN: 8,
+          maxChars: 1400,
+        })
+      }
+
+      function openEditTemplate(entry) {
+        setManaging(true)
+        setDraft({
+          id: entry.id,
+          name: labelOf(entry.name),
+          header: entry.header,
+          topN: entry.topN,
+          maxChars: entry.maxChars,
+        })
+      }
+
+      async function saveTemplate() {
+        if (draft === null) return
+        setSaving(true)
+        try {
+          await api('templates.save', draft)
+          notify(txt('模板已保存并切换，下一轮对话立即生效', 'Template saved and applied from the next turn'))
+          setDraft(null)
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      async function removeTemplate(entry) {
+        if (typeof window !== 'undefined' && !window.confirm(txt(
+          `删除模板「${labelOf(entry.name)}」？使用它的会话会回退到通用模板。`,
+          `Delete template "${labelOf(entry.name)}"? Sessions using it fall back to General.`))) return
+        setSaving(true)
+        try {
+          await api('templates.delete', { id: entry.id })
+          notify(txt('模板已删除', 'Template deleted'))
+          if (draft?.id === entry.id) setDraft(null)
           await onChanged()
         } catch (error) {
           notify(error.message, 'error')
@@ -407,7 +469,13 @@ window.__ModuleLoader__.load({
               title: txt('记忆模板（保存后立即生效）', 'Memory template (applies immediately)'),
               onChange: (event) => switchTemplate(event.target.value),
             }, templates.map((entry) => h('option', { key: entry.id, value: entry.id },
-              `${labelOf(entry.name)}${entry.id === templateId ? '' : ''}`))),
+              `${labelOf(entry.name)}${entry.custom === true ? txt('（自定义）', ' (custom)') : ''}`))),
+            h('button', {
+              type: 'button',
+              className: 'mp-btn',
+              disabled: saving,
+              onClick: () => setManaging((value) => !value),
+            }, managing ? txt('收起模板管理', 'Hide templates') : txt('管理模板', 'Manage templates')),
             h('button', {
               type: 'button',
               className: 'mp-btn',
@@ -415,6 +483,88 @@ window.__ModuleLoader__.load({
             }, expanded ? txt('收起分层', 'Hide layers') : txt('展开分层', 'Show layers')))),
         h('div', { className: 'mp-hint' },
           `${txt('模板', 'template')} ${activeLabel} · ${txt('估算口径', 'estimate')}：CJK 1 字≈1 token，其它 4 字符≈1 token${injection.enabled ? '' : txt(' · 注入已关闭', ' · injection is off')}`),
+        managing
+          ? h('div', { className: 'mp-template-manage' },
+            h('div', { className: 'mp-toolbar', style: { justifyContent: 'space-between' } },
+              h('span', { className: 'mp-label' }, txt('自定义模板', 'Custom templates')),
+              h('button', {
+                type: 'button',
+                className: 'mp-btn is-primary',
+                disabled: saving,
+                onClick: openCreateTemplate,
+              }, txt('新建模板', 'New template'))),
+            customTemplates.length === 0
+              ? h('div', { className: 'mp-hint' }, txt('还没有自定义模板。新建后可在上方下拉框随时切换。', 'No custom templates yet. Create one and switch to it from the dropdown above.'))
+              : customTemplates.map((entry) => h('div', { key: entry.id, className: 'mp-template-row' },
+                h('div', null,
+                  h('div', { style: { fontWeight: 600 } }, labelOf(entry.name)),
+                  h('div', { className: 'mp-hint' }, `${entry.id} · topN ${entry.topN} · ${entry.maxChars} chars`)),
+                h('div', { className: 'mp-toolbar' },
+                  draft?.id === entry.id ? null : h('button', {
+                    type: 'button',
+                    className: 'mp-btn',
+                    onClick: () => openEditTemplate(entry),
+                  }, txt('编辑', 'Edit')),
+                  h('button', {
+                    type: 'button',
+                    className: 'mp-btn is-danger',
+                    disabled: saving,
+                    onClick: () => removeTemplate(entry),
+                  }, txt('删除', 'Delete'))))),
+            draft !== null
+              ? h('div', { className: 'mp-template-editor' },
+                h('div', { className: 'mp-grid2' },
+                  h('label', { className: 'mp-field' },
+                    h('span', { className: 'mp-label' }, txt('模板名称', 'Name')),
+                    h('input', {
+                      className: 'mp-input',
+                      maxLength: 40,
+                      value: draft.name,
+                      onChange: (event) => setDraft({ ...draft, name: event.target.value }),
+                    })),
+                  h('label', { className: 'mp-field' },
+                    h('span', { className: 'mp-label' }, txt('注入条数', 'Top N')),
+                    h('input', {
+                      className: 'mp-input',
+                      type: 'number',
+                      min: 1,
+                      max: 30,
+                      value: draft.topN,
+                      onChange: (event) => setDraft({ ...draft, topN: Number(event.target.value) }),
+                    })),
+                  h('label', { className: 'mp-field' },
+                    h('span', { className: 'mp-label' }, txt('字符预算', 'Max chars')),
+                    h('input', {
+                      className: 'mp-input',
+                      type: 'number',
+                      min: 100,
+                      max: 8000,
+                      value: draft.maxChars,
+                      onChange: (event) => setDraft({ ...draft, maxChars: Number(event.target.value) }),
+                    }))),
+                h('label', { className: 'mp-field' },
+                  h('span', { className: 'mp-label' }, txt('头部说明（Markdown）', 'Header (Markdown)')),
+                  h('textarea', {
+                    className: 'mp-textarea',
+                    rows: 5,
+                    maxLength: 4000,
+                    value: draft.header,
+                    onChange: (event) => setDraft({ ...draft, header: event.target.value }),
+                  })),
+                h('div', { className: 'mp-toolbar' },
+                  h('button', {
+                    type: 'button',
+                    className: 'mp-btn is-primary',
+                    disabled: saving || draft.name.trim() === '' || draft.header.trim() === '',
+                    onClick: saveTemplate,
+                  }, saving ? txt('保存中…', 'Saving…') : txt('保存并切换', 'Save and apply')),
+                  h('button', {
+                    type: 'button',
+                    className: 'mp-btn',
+                    onClick: () => setDraft(null),
+                  }, txt('取消', 'Cancel'))))
+              : null)
+          : null,
         h('div', { className: 'mp-meter', title: `${charPercent.toFixed(1)}%` },
           headerPercent > 0 ? h('span', {
             className: 'is-header',
@@ -639,7 +789,8 @@ window.__ModuleLoader__.load({
           content: '',
           tags: '',
           importance: settings.write.defaultImportance,
-          layer: settings.write.defaultLayer,
+          // 用户新建时先选 L4，可在下拉框里改；智能体写入则由它自己判断层级。
+          layer: 'L4',
           notebook,
           ttlDays: kind === 'note' ? '' : String(settings.write.defaultTtlDays ?? 30),
           pinned: false,
@@ -929,7 +1080,9 @@ window.__ModuleLoader__.load({
               value: draft.layer,
               disabled: readOnly,
               onChange: (event) => update('layer', event.target.value),
-            }, LAYER_FALLBACK.map((entry) => h('option', { key: entry.id, value: entry.id }, `${entry.id} ${labelOf(entry.name)}`)))),
+            }, LAYER_FALLBACK
+              .filter((entry) => WRITABLE_LAYER_IDS.includes(entry.id) || entry.id === draft.layer)
+              .map((entry) => h('option', { key: entry.id, value: entry.id }, `${entry.id} ${labelOf(entry.name)}`)))),
           h('label', { className: 'mp-field' },
             h('span', { className: 'mp-label' }, txt('重要度', 'Importance')),
             h('input', {
@@ -1156,7 +1309,6 @@ window.__ModuleLoader__.load({
             decision,
             note,
             targetLayer: candidate.suggestedLayer,
-            ttlDays: candidate.suggestedTtlDays,
           })
           notify(decision === 'approve'
             ? txt('已固化并写入审计', 'Consolidated and audited')
@@ -1176,8 +1328,8 @@ window.__ModuleLoader__.load({
             h('div', null,
               h('div', { className: 'mp-card-title' }, txt('固化审计', 'Consolidation audit')),
               h('div', { className: 'mp-hint' }, txt(
-                `窗口 ${settings.windowDays ?? 14} 天内写入/更新/命中达到 ${settings.threshold ?? 4} 次的记忆会成为候选；智能体或你确认后才提升到 ${settings.targetLayer ?? 'L4'}，并写入审计日志。`,
-                `Memories with ${settings.threshold ?? 4} writes/updates/hits within ${settings.windowDays ?? 14} days become candidates; only an explicit approval moves them to ${settings.targetLayer ?? 'L4'}, with an audit record.`))),
+                `窗口 ${settings.windowDays ?? 14} 天内写入/更新/命中达到 ${settings.threshold ?? 4} 次的记忆会成为候选；确认后永久固化到 L1 思想核心或 L3 本能行为（不可变、无保鲜期），并写入审计日志。`,
+                `Memories with ${settings.threshold ?? 4} writes/updates/hits within ${settings.windowDays ?? 14} days become candidates; approval permanently consolidates them into L1 core thoughts or L3 instincts (immutable, no TTL), with an audit record.`))),
             h('button', { type: 'button', className: 'mp-btn', disabled: loading, onClick: scan },
               loading ? txt('扫描中…', 'Scanning…') : txt('扫描强化信号', 'Scan signals'))),
           candidates.length === 0
@@ -1192,8 +1344,8 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'mp-chip' }, `${candidate.signals} 次信号`),
                   h('span', { className: 'mp-hint' }, `${candidate.windowDays} 天`)),
                 h('div', { className: 'mp-hint' }, txt(
-                  `写入 ${candidate.breakdown?.create ?? 0} · 更新 ${candidate.breakdown?.update ?? 0} · 命中 ${candidate.breakdown?.hit ?? 0}；建议 → ${candidate.suggestedLayer}，保鲜 ${candidate.suggestedTtlDays} 天`,
-                  `create ${candidate.breakdown?.create ?? 0} · update ${candidate.breakdown?.update ?? 0} · hit ${candidate.breakdown?.hit ?? 0}; suggested ${candidate.suggestedLayer}, TTL ${candidate.suggestedTtlDays} days`)),
+                  `写入 ${candidate.breakdown?.create ?? 0} · 更新 ${candidate.breakdown?.update ?? 0} · 命中 ${candidate.breakdown?.hit ?? 0}；建议 → ${candidate.suggestedLayer}（永久，不再过期）`,
+                  `create ${candidate.breakdown?.create ?? 0} · update ${candidate.breakdown?.update ?? 0} · hit ${candidate.breakdown?.hit ?? 0}; suggested ${candidate.suggestedLayer} (permanent, never expires)`)),
                 h('div', { className: 'mp-toolbar' },
                   h('button', { type: 'button', className: 'mp-btn is-primary', disabled: loading, onClick: () => decide(candidate, 'approve') },
                     txt('审计通过并固化', 'Approve & consolidate')),
@@ -1205,8 +1357,8 @@ window.__ModuleLoader__.load({
             `自动应用：${settings.autoApply === true ? '开启（维护任务会直接固化）' : '关闭（必须逐条审计）'} · 最低重要度 ${settings.minImportance ?? 6} · 单轮最多 ${settings.maxCandidates ?? 20} 条。`,
             `Auto-apply: ${settings.autoApply === true ? 'on (maintenance consolidates directly)' : 'off (every candidate needs an audit)'} · min importance ${settings.minImportance ?? 6} · max ${settings.maxCandidates ?? 20} per scan.`)),
           h('div', { className: 'mp-hint' }, txt(
-            '固化动作会记录在维护页的审计日志里（consolidation.proposed / approved / rejected），包含时间、操作者、层级变化和保鲜期。',
-            'Decisions are recorded in the audit log (consolidation.proposed / approved / rejected) with time, actor, layer change and TTL.')))
+            '固化动作会记录在维护页的审计日志里（consolidation.proposed / approved / rejected），包含时间、操作者与层级变化；固化后即永久保留。',
+            'Decisions are recorded in the audit log (consolidation.proposed / approved / rejected) with time, actor and layer change; consolidated items are kept permanently.')))
       )
     }
 
@@ -1591,6 +1743,8 @@ window.__ModuleLoader__.load({
       { id: 'L6', name: { zh: '轮转记忆', en: 'Rotating memory' } },
       { id: 'L7', name: { zh: '情境感知', en: 'Session context' } },
     ]
+    // 新建/移动只允许可修改层；不可变层只能通过固化进入。
+    const WRITABLE_LAYER_IDS = ['L2', 'L4', 'L5', 'L6', 'L7']
     const NOTEBOOK_FALLBACK = [
       { id: 'memory', name: { zh: '记忆记事本', en: 'Memory notes' } },
       { id: 'daily', name: { zh: '日常记事本', en: 'Daily notes' } },

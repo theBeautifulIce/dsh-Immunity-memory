@@ -234,7 +234,7 @@ await test('memory_forget 删除后检索不到', async () => {
 
 await test('工具返回值是无损 JSON', async () => {
   const samples = [
-    ['memory_write', { content: '无损 JSON 校验：这条记忆用于验证工具返回值序列化。', ttlDays: 30 }],
+    ['memory_write', { layer: 'L5', content: '无损 JSON 校验：这条记忆用于验证工具返回值序列化。', ttlDays: 30 }],
     ['memory_search', { query: '无损 JSON' }],
     ['memory_stats', {}],
   ]

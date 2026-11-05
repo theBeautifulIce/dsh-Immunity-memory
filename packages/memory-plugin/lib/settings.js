@@ -131,15 +131,79 @@ export const MEMORY_TEMPLATES = [
 ]
 
 export const TEMPLATE_IDS = MEMORY_TEMPLATES.map((template) => template.id)
+const MAX_CUSTOM_TEMPLATES = 50
+
+/**
+ * 校验并收敛一条用户自定义模板。
+ *
+ * 内置模板只读；自定义模板只影响注入头部与预算，不参与写入/固化，
+ * 因此这里不引入任何层级或 TTL 语义，避免 UI 承诺不存在的功能。
+ */
+export function sanitizeCustomTemplate(raw) {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const name = String(raw.name ?? '').trim().slice(0, 40)
+  const header = String(raw.header ?? '').trim().slice(0, 4000)
+  const desc = String(raw.desc ?? '').trim().slice(0, 120)
+  const topN = Math.round(Number(raw.topN))
+  const maxChars = Math.round(Number(raw.maxChars))
+  if (name === '' || header === '') return undefined
+  if (!Number.isFinite(topN) || topN < 1 || topN > 30) return undefined
+  if (!Number.isFinite(maxChars) || maxChars < 100 || maxChars > 8000) return undefined
+  const id = typeof raw.id === 'string' && /^[a-z0-9][a-z0-9_-]{1,39}$/.test(raw.id)
+    ? raw.id
+    : undefined
+  if (id !== undefined && TEMPLATE_IDS.includes(id)) return undefined
+  return {
+    id,
+    name,
+    desc,
+    header,
+    topN,
+    maxChars,
+    custom: true,
+  }
+}
+
+/** 从设置里收敛自定义模板数组：丢弃非法项、内置 id 与重复 id。 */
+export function normalizeCustomTemplates(value) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  const seen = new Set()
+  for (const raw of value) {
+    const template = sanitizeCustomTemplate(raw)
+    if (template === undefined || template.id === undefined) continue
+    if (seen.has(template.id)) continue
+    seen.add(template.id)
+    out.push(template)
+    if (out.length >= MAX_CUSTOM_TEMPLATES) break
+  }
+  return out
+}
+
+/** 内置 + 自定义模板。 */
+export function allTemplates(settings) {
+  return [...MEMORY_TEMPLATES, ...(settings?.prompt?.customTemplates ?? [])]
+}
 
 /** 按 id 取模板；未知 id 回退通用模板。 */
-export function templateById(id) {
-  return MEMORY_TEMPLATES.find((template) => template.id === id) ?? MEMORY_TEMPLATES[0]
+export function templateById(id, settings = null) {
+  const list = allTemplates(settings)
+  return list.find((template) => template.id === id) ?? MEMORY_TEMPLATES[0]
 }
 
 /** 当前生效的模板。 */
 export function activeTemplate(settings) {
-  return templateById(settings?.prompt?.template)
+  return templateById(settings?.prompt?.template, settings)
+}
+
+/**
+ * 固化目标层：L1 思想核心 / L3 本能行为，均为不可变、永久。
+ * `auto` 按来源层判断：思想流动 L2 → L1，其余学习/目标/临时层 → L3。
+ */
+export function consolidationTargetFor(itemLayer, settings) {
+  const configured = settings?.consolidation?.targetLayer
+  if (configured === 'L1' || configured === 'L3') return configured
+  return itemLayer === 'L2' ? 'L1' : 'L3'
 }
 
 /** 注入预算：默认跟随模板，打开 overrideBudget 后才读 prompt.topN / maxChars。 */
@@ -190,7 +254,6 @@ export const DEFAULT_SETTINGS = {
   write: {
     minContentLength: 8,
     dedupeThreshold: 0.9,
-    defaultLayer: 'L5',
     defaultImportance: 5,
     allowImmutableEdit: false,
     // 可修改层必须填写保鲜期，这是硬约束，不提供关闭开关。
@@ -211,6 +274,8 @@ export const DEFAULT_SETTINGS = {
     template: 'default',
     topN: 6,
     maxChars: 1200,
+    // 用户自定义模板；内置模板见 MEMORY_TEMPLATES。
+    customTemplates: [],
     // 默认跟随模板预算；打开后才用上面的 topN / maxChars 覆盖。
     overrideBudget: false,
   },
@@ -218,8 +283,8 @@ export const DEFAULT_SETTINGS = {
     enabled: true,
     threshold: 4,
     windowDays: 14,
-    targetLayer: 'L4',
-    ttlDays: 90,
+    // auto：L2 → L1 思想核心，其余 → L3 本能行为；也可显式锁定 L1 / L3。
+    targetLayer: 'auto',
     minImportance: 6,
     maxCandidates: 20,
     // 必须由智能体调用 memory_consolidate 明确批准，维护任务只产生候选。
@@ -254,14 +319,6 @@ const LANGUAGE_OPTIONS = [
   { value: 'zh', label: { zh: '中文', en: 'Chinese' } },
   { value: 'en', label: { zh: 'English', en: 'English' } },
 ]
-
-const LAYER_OPTIONS = LAYERS.map((layer) => ({ value: layer.id, label: layer.name }))
-
-const TEMPLATE_OPTIONS = MEMORY_TEMPLATES.map((template) => ({
-  value: template.id,
-  label: template.name,
-  hint: template.desc,
-}))
 
 const SORT_OPTIONS = [
   { value: 'updated', label: { zh: '最近更新', en: 'Recently updated' } },
@@ -507,13 +564,6 @@ export const SETTINGS_SCHEMA = [
     desc: { zh: '新建记忆时的默认行为', en: 'Defaults applied when creating memories' },
     fields: [
       {
-        path: 'write.defaultLayer',
-        type: 'select',
-        options: LAYER_OPTIONS,
-        label: { zh: '默认分层', en: 'Default layer' },
-        hint: { zh: '模型调用 memory_write 且未指定分层时使用。', en: 'Used when memory_write omits the layer.' },
-      },
-      {
         path: 'write.defaultImportance',
         type: 'number',
         min: 1,
@@ -573,15 +623,8 @@ export const SETTINGS_SCHEMA = [
   {
     id: 'prompt',
     title: { zh: '提示词注入', en: 'Prompt injection' },
-    desc: { zh: '把长期记忆注入系统提示词', en: 'Inject long-term memory into the system prompt' },
+    desc: { zh: '把长期记忆注入系统提示词；模板在记忆页顶部切换和自定义', en: 'Inject long-term memory; switch and edit templates at the top of the memory page' },
     fields: [
-      {
-        path: 'prompt.template',
-        type: 'select',
-        options: TEMPLATE_OPTIONS,
-        label: { zh: '记忆模板', en: 'Memory template' },
-        hint: { zh: '开发 / QQ 机器人 / 通用三套模板；切换后下一轮对话立即生效。', en: 'Development, QQ bot or general; applies from the next turn.' },
-      },
       {
         path: 'prompt.inject',
         type: 'boolean',
@@ -650,19 +693,13 @@ export const SETTINGS_SCHEMA = [
       {
         path: 'consolidation.targetLayer',
         type: 'select',
-        options: LAYER_OPTIONS.filter((option) => !['L0', 'L1', 'L3'].includes(option.value)),
-        label: { zh: '默认固化层', en: 'Target layer' },
-        hint: { zh: '智能体批准时若未指定层级，固化到该层。', en: 'Used when approval omits a layer.' },
-      },
-      {
-        path: 'consolidation.ttlDays',
-        type: 'number',
-        min: 1,
-        max: 3650,
-        step: 1,
-        unit: { zh: '天', en: 'days' },
-        label: { zh: '固化后保鲜期', en: 'TTL after consolidation' },
-        hint: { zh: '固化后的记忆仍有保鲜期，到期后按常规维护处理。', en: 'Consolidated memories still expire and are maintained normally.' },
+        options: [
+          { value: 'auto', label: { zh: '自动（思想 L2→L1，其余→L3）', en: 'Auto (thought L2→L1, others→L3)' } },
+          { value: 'L1', label: { zh: 'L1 思想核心（不可变、永久）', en: 'L1 Core thoughts (immutable, permanent)' } },
+          { value: 'L3', label: { zh: 'L3 本能行为（不可变、永久）', en: 'L3 Instincts (immutable, permanent)' } },
+        ],
+        label: { zh: '固化目标层', en: 'Consolidation target' },
+        hint: { zh: '固化只进入不可变层，不再写保鲜期，也不会被清理。', en: 'Consolidation only moves items into immutable layers, with no TTL and no cleanup.' },
       },
       {
         path: 'consolidation.minImportance',
@@ -896,6 +933,12 @@ export function normalizeSettings(raw = {}) {
     const value = coerceField(field, candidate)
     if (value !== undefined) setPath(next, field.path, value)
   }
+  // 模板不是 schema 里的静态下拉：自定义模板 + 当前模板 id 必须整体保留。
+  next.prompt.customTemplates = normalizeCustomTemplates(source.prompt?.customTemplates)
+  const requestedTemplate = source.prompt?.template
+  if (typeof requestedTemplate === 'string' && allTemplates(next).some((template) => template.id === requestedTemplate)) {
+    next.prompt.template = requestedTemplate
+  }
   return next
 }
 
@@ -911,6 +954,12 @@ export function applySettingsPatch(current, patch) {
     const candidate = getPath(patch, field.path)
     const value = coerceField(field, candidate)
     if (value !== undefined) setPath(base, field.path, value)
+  }
+  // 兼容旧客户端：模板切换以前走 settings.save 的 prompt.template。
+  const requestedTemplate = getPath(patch, 'prompt.template')
+  if (typeof requestedTemplate === 'string'
+    && allTemplates(base).some((template) => template.id === requestedTemplate)) {
+    base.prompt.template = requestedTemplate
   }
   return base
 }

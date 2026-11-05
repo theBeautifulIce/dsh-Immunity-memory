@@ -9,6 +9,7 @@ import { LAYERS, NOTEBOOKS, NOTEBOOK_IDS } from './settings.js'
 import { message } from './store.js'
 
 const LAYER_ENUM = LAYERS.map((layer) => layer.id)
+const WRITABLE_LAYER_ENUM = LAYERS.filter((layer) => layer.immutable !== true).map((layer) => layer.id)
 
 const itemSchema = {
   type: 'object',
@@ -194,10 +195,10 @@ const consolidateOutput = {
       return text(`固化候选 ${value.candidates.length} 条（需智能体审计后 approve/reject）：\n`
         + value.candidates.map((candidate, index) => `${index + 1}. ${candidate.id} [${candidate.layer}] ${candidate.title}`
           + `，信号 ${candidate.signals} 次（写入 ${candidate.breakdown?.create ?? 0}/更新 ${candidate.breakdown?.update ?? 0}/命中 ${candidate.breakdown?.hit ?? 0}）`
-          + ` → 建议 ${candidate.suggestedLayer}，保鲜 ${candidate.suggestedTtlDays} 天`).join('\n'))
+          + ` → 建议 ${candidate.suggestedLayer}（永久，不再过期）`).join('\n'))
     }
     if (value?.decision === 'approve') {
-      return text(`已固化 ${value.item?.id}：${value.record?.fromLayer} → ${value.record?.toLayer}，保鲜 ${value.record?.ttlDays} 天，已写入审计。`)
+      return text(`已固化 ${value.item?.id}：${value.record?.fromLayer} → ${value.record?.toLayer}（不可变、永久），已写入审计。`)
     }
     if (value?.decision === 'reject') {
       return text(`已记录拒绝固化 ${value.item?.id}；出现新的强化信号后会重新进入候选。`)
@@ -230,23 +231,27 @@ export function registerTools(ctx, engine, log) {
 
   register({
     name: 'memory_write',
-    description: 'Save a durable memory or notebook entry for later sessions. Use it for user preferences, project facts, decisions and anything worth recalling after this conversation. Prefer one focused fact per call.',
+    description: 'Save a durable memory or notebook entry for later sessions. Use it for user preferences, project facts, decisions and anything worth recalling after this conversation. Decide the mutable layer yourself from the meaning of the content; there is no server-side default layer. Prefer one focused fact per call.',
     parameters: {
       type: 'object',
       properties: {
         content: { type: 'string', description: 'The fact or note to keep, in the user\'s language.' },
         title: { type: 'string', description: 'Short title. Generated from content when omitted.' },
-        layer: { type: 'string', enum: LAYER_ENUM, description: 'Memory layer. Defaults to the configured default (L5 目标记忆). Use L6 for items that should expire.' },
+        layer: {
+          type: 'string',
+          enum: WRITABLE_LAYER_ENUM,
+          description: 'Choose the layer yourself by meaning: L2 evolving thoughts, L4 project learnings, L5 goals/preferences, L6 short-lived facts, L7 current context. Required; immutable L0/L1/L3 are not writable.',
+        },
         type: { type: 'string', enum: ['memory', 'note'], description: 'memory = long-term memory, note = notebook entry.' },
         notebook: { type: 'string', enum: NOTEBOOKS.map((notebook) => notebook.id), description: 'Notebook id, only for type=note.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Short tags for retrieval.' },
         importance: { type: 'number', description: '1-10, default 5. Higher means it survives longer and ranks higher.' },
         ttlDays: {
           type: 'number',
-          description: 'Freshness period in days. Required for mutable layers L2/L4/L5/L6/L7 (writes fail without it); immutable layers L0/L1/L3 ignore it. Use L6/L7 for facts that should expire.',
+          description: 'Freshness period in days. Required for every memory in a mutable layer (writes fail without it). Choose according to how long the fact stays true; notes ignore it.',
         },
       },
-      required: ['content'],
+      required: ['content', 'layer'],
     },
     output: writeOutput,
     async execute(args, exec) {
@@ -306,7 +311,7 @@ export function registerTools(ctx, engine, log) {
         content: { type: 'string' },
         tags: { type: 'array', items: { type: 'string' } },
         importance: { type: 'number', description: '1-10.' },
-        layer: { type: 'string', enum: LAYER_ENUM },
+        layer: { type: 'string', enum: WRITABLE_LAYER_ENUM, description: 'Move to another mutable layer when the meaning changes.' },
         status: { type: 'string', enum: ['active', 'archived', 'expired', 'conflicted'] },
         pinned: { type: 'boolean', description: 'Pinned items are never auto-archived or auto-expired.' },
         ttlDays: {
@@ -359,14 +364,13 @@ export function registerTools(ctx, engine, log) {
 
   register({
     name: 'memory_consolidate',
-    description: 'Review and act on memory consolidation: list candidates that were repeatedly written, updated or retrieved, then approve moving a stable fact to a higher layer with a finite freshness period, or reject it. Every decision is audited.',
+    description: 'Review and act on memory consolidation: list candidates that were repeatedly written, updated or retrieved, then approve moving a stable fact into L1 core thoughts or L3 instincts (both immutable and permanent), or reject it. Every decision is audited.',
     parameters: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['list', 'approve', 'reject'], description: 'list = show pending candidates; approve/reject = record an audited decision.' },
         id: { type: 'string', description: 'Candidate item id (required for approve/reject).' },
-        targetLayer: { type: 'string', enum: LAYER_ENUM, description: 'Target layer for approve; defaults to the configured consolidation layer.' },
-        ttlDays: { type: 'number', description: 'Freshness period in days for the consolidated item.' },
+        targetLayer: { type: 'string', enum: ['L1', 'L3'], description: 'L1 core thoughts or L3 instincts; both immutable and permanent. Defaults to auto by source layer.' },
         note: { type: 'string', description: 'Audit note: why it should or should not be consolidated.' },
       },
       required: ['action'],
@@ -382,7 +386,6 @@ export function registerTools(ctx, engine, log) {
       if (id === '') throw new Error('approve/reject 必须提供 id')
       return await engine.applyConsolidation(id, action, {
         targetLayer: args?.targetLayer,
-        ttlDays: args?.ttlDays,
         note: args?.note,
       }, 'agent')
     },

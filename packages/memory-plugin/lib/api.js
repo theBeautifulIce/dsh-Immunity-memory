@@ -47,6 +47,9 @@ export const API_METHODS = [
   'consolidation.candidates',
   'consolidation.apply',
   'templates.list',
+  'templates.save',
+  'templates.delete',
+  'templates.apply',
   'audit.list',
   'data.export',
   'data.import',
@@ -169,12 +172,24 @@ function createMethods(engineOf, context = {}) {
       if (id === '') throw createError('INVALID_ARGUMENT', '缺少 id')
       return engine().applyConsolidation(id, decision, {
         targetLayer: params?.targetLayer,
-        ttlDays: params?.ttlDays,
         note: params?.note,
       }, String(params?.actor ?? 'user'))
     },
     'templates.list'() {
       return engine().templates()
+    },
+    async 'templates.save'(params) {
+      return engine().saveTemplate(params ?? {}, 'user')
+    },
+    async 'templates.delete'(params) {
+      const id = String(params?.id ?? '')
+      if (id === '') throw createError('INVALID_ARGUMENT', '缺少模板 id')
+      return engine().deleteTemplate(id, 'user')
+    },
+    async 'templates.apply'(params) {
+      const id = String(params?.id ?? '')
+      if (id === '') throw createError('INVALID_ARGUMENT', '缺少模板 id')
+      return engine().applyTemplate(id, 'user')
     },
     'audit.list'(params) {
       return { audit: engine().auditList(params?.limit ?? 50) }

@@ -49,6 +49,7 @@ try {
 
   await test('创建条目会写进 Go 服务的 SQLite', async () => {
     const item = await engine.createItem({
+      layer: 'L5',
       title: 'Go 服务集成',
       content: '这条记忆通过 Go 服务写入 SQLite，并由 FTS5 建立全文索引。',
       tags: ['集成', 'go'],
