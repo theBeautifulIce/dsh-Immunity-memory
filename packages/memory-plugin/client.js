@@ -1129,6 +1129,11 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mp-card-title' }, txt('存储', 'Storage')),
           h('div', { className: 'mp-code' }, storage.path ?? ''),
           h('div', { className: 'mp-hint' },
+            `${txt('引擎', 'engine')} ${storage.engine === 'sqlite' ? 'SQLite (node:sqlite)' : 'JSON'}`
+            + (storage.tables === undefined || storage.tables === null
+              ? ''
+              : ` · memories ${storage.tables.memories} / events ${storage.tables.events} / assets ${storage.tables.assets} / changelog ${storage.tables.changelog}`)),
+          h('div', { className: 'mp-hint' },
             `${txt('文件', 'file')} ${storage.exists === true ? txt('存在', 'exists') : txt('尚未创建', 'not created yet')} · ${formatBytes(storage.bytes)} · ${storage.modifiedAt === null ? '' : formatTime(storage.modifiedAt)}`),
           h('div', { className: 'mp-toolbar' },
             h('button', { type: 'button', className: 'mp-btn', onClick: exportData }, txt('导出 JSON', 'Export JSON')),

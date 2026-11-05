@@ -14,7 +14,8 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { Config, normalizeSettings } from './lib/settings.js'
-import { createStore, message } from './lib/store.js'
+import { message } from './lib/store.js'
+import { createStorage } from './lib/storage.js'
 import { createEngine } from './lib/engine.js'
 import { API_PATH, LEGACY_API_PATH, mountApi, setTrustedHosts } from './lib/api.js'
 import { registerTools } from './lib/tools.js'
@@ -39,12 +40,23 @@ export function apply(ctx, config) {
   // store 的路径 / 备份份数依赖设置，而设置由引擎持有：先留一个引用位，避免构造顺序死锁。
   const ref = { engine: null }
   let store
+  let storageKind = 'json'
   try {
-    store = createStore(ctx, log, () => ref.engine?.getSettings?.() ?? normalizeSettings(config ?? {}))
+    const created = createStorage(ctx, log, () => ref.engine?.getSettings?.() ?? normalizeSettings(config ?? {}))
+    store = created.store
+    storageKind = created.kind
   } catch (error) {
     log('error', `初始化存储失败：${message(error)}`)
     return
   }
+  // 插件卸载时关掉 SQLite 连接（JSON 存储没有 close）。
+  ctx.effect(() => () => {
+    try {
+      store.close?.()
+    } catch {
+      /* 已关闭 */
+    }
+  }, 'memory-plugin:storage')
 
   const initialSettings = normalizeSettings(config ?? {})
   const engine = createEngine({
@@ -55,13 +67,22 @@ export function apply(ctx, config) {
   })
   ref.engine = engine
 
+  // 显式加载一次：SQLite 存储打开时要读设置，引擎的 getSettings 此时不能反过来加载状态
+  // （否则递归）。这里一次性把状态读进来，之后 getSettings 直接返回存档里的设置。
+  try {
+    engine.reload()
+  } catch (error) {
+    log('warn', `读取记忆库失败，按空库继续：${message(error)}`)
+  }
+
   // 桌面端的宿主日志不落在插件能读的地方；关键路径同时写一份到数据目录，
   // 出问题时可以直接看 <storageDir>/plugin.log。
   const debug = createDebugLog(store, log)
   debug('apply: start')
+  debug(`runtime: node=${process.versions.node} electron=${process.versions.electron ?? '-'} sqlite=${sqliteProbe()} storage=${storageKind}`)
 
   ctx.effect(() => registerTools(ctx, engine, log), 'memory-plugin:tools')
-  log('info', `记忆库已就绪：${store.path}`)
+  log('info', `记忆库已就绪（${storageKind}）：${store.path}`)
 
   // 提示词注入：让模型知道有长期记忆可用，并给出最相关的一小段摘要。
   ctx.effect(() => ctx.systemPrompt.section({
@@ -132,38 +153,53 @@ function attachApi(ctx, engine, debug) {
 
     let holder = webServer[API_HOLDER_KEY]
     if (holder === undefined || holder === null) {
-      holder = { engine: null, dispose: null, path: null }
+      holder = { engine: null, dispose: null, path: null, alive: false }
       try {
         webServer[API_HOLDER_KEY] = holder
         debug('attach: holder created')
       } catch (error) {
         // 有些服务对象冻结/代理，写不进去就退回本代自用（路由仍然能工作）
-        holder = { engine: null, dispose: null, path: null }
+        holder = { engine: null, dispose: null, path: null, alive: false }
         debug(`attach: holder 写入失败，改用局部 holder：${message(error)}`)
       }
     }
     holder.engine = engine
 
-    // 只有"同一个接口路径"才算可复用：插件升级可能换了前缀，旧 holder 指向的是旧路径。
-    if (holder.dispose !== null && holder.path === API_PATH) {
+    // 只有"路径相同且路由还活着"才算可复用。holder.dispose 非空并不能证明路由还在：
+    // 激活失败的 fiber 被释放时路由会消失，但 holder 上的闭包对象还留着。
+    if (holder.alive === true && holder.path === API_PATH) {
       debug(`attach: 复用已有路由 ${API_PATH}`)
       return
     }
-    if (holder.dispose !== null && holder.path !== API_PATH) {
+    if (holder.dispose !== null) {
       try {
         holder.dispose()
       } catch {
-        // 旧路径的释放失败不影响新路径注册
+        // 旧路由的释放失败不影响重新注册
       }
       holder.dispose = null
       holder.path = null
-      debug('attach: 释放了旧路径的路由')
+      holder.alive = false
+      debug('attach: 释放了上一代的路由')
     }
 
     const disposers = []
     const apiLog = (level, text) => debug(`api ${level}: ${text}`)
     try {
-      disposers.push(ctx.effect(() => mountApi(webServer, () => holder.engine, apiLog), 'memory-plugin:api'))
+      const routeEffect = ctx.effect(() => {
+        const routeDispose = mountApi(webServer, () => holder.engine, apiLog)
+        holder.alive = true
+        debug(`attach: 路由已激活 ${API_PATH}`)
+        return () => {
+          holder.alive = false
+          try {
+            routeDispose?.()
+          } catch {
+            // 已经释放
+          }
+        }
+      }, 'memory-plugin:api')
+      disposers.push(routeEffect)
       holder.dispose = () => {
         for (const dispose of disposers) {
           try {
@@ -174,10 +210,14 @@ function attachApi(ctx, engine, debug) {
         }
         holder.dispose = null
         holder.path = null
+        holder.alive = false
       }
       holder.path = API_PATH
       debug(`attach: 注册成功 ${API_PATH}`)
     } catch (error) {
+      // 路径可能被更早的一代占着：那条路由同样通过 holder.engine 取当前引擎，
+      // 所以只要它还在服务，数据就是新的。
+      holder.alive = holder.path === API_PATH
       debug(`attach: 注册失败 ${API_PATH}：${message(error)}`)
       return
     }
@@ -227,6 +267,19 @@ function createDebugLog(store, log) {
     } catch {
       /* 诊断写不了就算了 */
     }
+  }
+}
+
+
+/** 探测宿主进程是否自带 SQLite（Node 22.5+ 的 node:sqlite）。 */
+function sqliteProbe() {
+  try {
+    const getBuiltin = process.getBuiltinModule
+    if (typeof getBuiltin !== 'function') return 'no-getBuiltinModule'
+    const mod = getBuiltin('node:sqlite')
+    return typeof mod?.DatabaseSync === 'function' ? 'yes' : 'no-DatabaseSync'
+  } catch (error) {
+    return `no: ${error instanceof Error ? error.message : String(error)}`
   }
 }
 

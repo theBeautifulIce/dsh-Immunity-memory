@@ -57,6 +57,8 @@ run('引擎测试', ['tests/engine.test.mjs'])
 
 run('工具测试', ['tests/tools.test.mjs'])
 
+run('SQLite 存储测试', ['tests/sqlite.test.mjs'])
+
 if (!FAST) {
   console.log('\n== 接口测试 ==')
   run('接口测试', ['tests/api.test.mjs'])

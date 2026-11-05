@@ -627,10 +627,10 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     importData,
     promptDigest,
     // 设置
-    getSettings: () => {
-      ensure()
-      return clone(settings())
-    },
+    // 注意：这里刻意不调用 ensure()。SQLite 存储在打开时要读 storage.backupKeep，
+    // 而它拿设置会回调到这里；如果 getSettings 再去加载状态就会与 load 递归
+    // （RangeError: Maximum call stack size exceeded）。启动时由 index.js 显式 reload()。
+    getSettings: () => clone(settings()),
     replaceSettings: (next) => {
       const current = ensure()
       current.settings = normalizeSettings(next)

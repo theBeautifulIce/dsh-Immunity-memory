@@ -86,9 +86,9 @@ export function createStore(ctx, log, getSettings) {
     info() {
       try {
         const stat = statSync(path)
-        return { path, dir: dirname(path), exists: true, bytes: stat.size, modifiedAt: stat.mtime.toISOString() }
+        return { engine: 'json', path, dir: dirname(path), exists: true, bytes: stat.size, modifiedAt: stat.mtime.toISOString() }
       } catch {
-        return { path, dir: dirname(path), exists: false, bytes: 0, modifiedAt: null }
+        return { engine: 'json', path, dir: dirname(path), exists: false, bytes: 0, modifiedAt: null }
       }
     },
     /**
@@ -169,3 +169,4 @@ export function removeQuietly(file) {
 export function message(error) {
   return error instanceof Error ? error.message : String(error)
 }
+

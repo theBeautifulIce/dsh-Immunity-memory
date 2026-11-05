@@ -28,9 +28,13 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 
 ## 数据
 
-默认写入 `%USERPROFILE%\.dsh\storages\dsh-memory-plugin\store.json`（可用 `DSH_HOME` 覆盖，
-也可在设置页「存储」分组里改成任意目录）。写盘使用「临时文件 + rename」，并保留若干份
-`store.json.bak-N`。
+默认写入 **SQLite**：`%USERPROFILE%\.dsh\storages\dsh-memory-plugin\memory.sqlite3`
+（可用 `DSH_HOME` 覆盖，也可在设置页「存储」分组里改目录/引擎）。表结构对齐设计文档 §7.2：
+`memories` / `events` / `assets` / `relationships` / `changelog` / `config`；每次打开库前
+轮转 `memory.sqlite3.bak-N`。早期版本的 `store.json` 会在首次启动时自动迁移进数据库。
+
+设置 `storage.engine = json`（或宿主缺少 `node:sqlite`）时退回单 JSON 文件
+`store.json`，写入用「临时文件 + rename」并保留 `store.json.bak-N`。
 
 ## 设置项
 

@@ -5,7 +5,7 @@
 
 - 宿主侧：记忆引擎、6 个 agent 工具、系统提示词注入、定时维护、HTTP 接口
 - 客户端侧：`设置 → 记忆` 一页搞定浏览、搜索、编辑、新建、批量操作、全部设置项、维护与导入导出
-- 纯 JavaScript，无构建步骤、无原生依赖，数据存成单个 JSON 文件（原子写 + 自动备份轮转）
+- 纯 JavaScript，无构建步骤、无原生依赖；记忆存在 **SQLite**（`node:sqlite`，零依赖），表结构对齐设计文档 §7.2，JSON 单文件作为显式可选/运行时回退
 
 ## 快速开始
 
@@ -18,7 +18,7 @@
 #    “记住：这个仓库的测试命令是 node tests/api.test.mjs”
 ```
 
-记忆库文件：`%USERPROFILE%\.dsh\storages\dsh-memory-plugin\store.json`（路径可在设置页「存储」分组里改）。
+记忆库：`%USERPROFILE%\.dsh\storages\dsh-memory-plugin\memory.sqlite3`（表：memories / events / assets / relationships / changelog / config；路径与引擎可在设置页「存储」分组里改）。早期版本用的是同目录下的 `store.json`，首次启动会自动迁移进 SQLite。
 
 ## 仓库结构
 
@@ -39,7 +39,9 @@
 │     ├─ client.js       # 客户端设置页（无构建，React.createElement）
 │     ├─ lib/
 │     │  ├─ settings.js  # 设置结构、分层与记事本定义、归一化
-│     │  ├─ store.js     # JSON 文件存储（原子写、备份轮转）
+│     │  ├─ sqlite.js    # SQLite 存储（node:sqlite，按设计 §7.2 建表）
+│     │  ├─ storage.js   # 存储选择：SQLite 优先，JSON 回退
+│     │  ├─ store.js     # JSON 存储（显式可选引擎 / 回退）
 │     │  ├─ engine.js    # 记忆引擎：增删改查、检索、冲突、维护、导出
 │     │  ├─ api.js       # HTTP 接口 /dsh-memory-plugin/api/v2（供设置页调用）
 │     │  └─ tools.js     # 6 个 agent 工具的注册
@@ -47,9 +49,12 @@
 │     ├─ icon.svg
 │     └─ cordis.patch.yml
 ├─ scripts/
-│  └─ check.mjs          # 一键跑全部自检
+│  ├─ check.mjs          # 一键跑全部自检
+│  └─ inspect-db.mjs     # 只读查看 SQLite 记忆库（表、行数、分层、最近条目）
 └─ tests/
    ├─ engine.test.mjs    # 引擎单元测试
+   ├─ tools.test.mjs     # 工具 schema 与执行测试
+   ├─ sqlite.test.mjs    # SQLite 存储层（含旧 JSON 迁移、递归回归）
    ├─ api.test.mjs       # 接口端到端测试（真实 http server）
    └─ client.render.mjs  # 设置页渲染冒烟测试（真实 react-dom/server）
 ```
@@ -59,8 +64,11 @@
 ```pwsh
 node scripts/check.mjs          # 全部测试
 node tests/engine.test.mjs      # 只跑引擎
+node tests/tools.test.mjs       # 只跑工具
+node tests/sqlite.test.mjs      # 只跑 SQLite 存储
 node tests/api.test.mjs         # 只跑接口
 node tests/client.render.mjs    # 只跑界面渲染
+node scripts/inspect-db.mjs     # 看当前记忆库（加 --rows 列最近条目）
 ```
 
 ## 功能一览
@@ -85,3 +93,4 @@ node tests/client.render.mjs    # 只跑界面渲染
 ## 许可
 
 MIT
+

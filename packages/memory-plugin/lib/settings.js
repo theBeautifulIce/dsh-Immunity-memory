@@ -95,6 +95,7 @@ export const DEFAULT_SETTINGS = {
     showLayerBadges: true,
   },
   storage: {
+    engine: 'sqlite',
     dir: '',
     backupKeep: 3,
   },
@@ -214,6 +215,16 @@ export const SETTINGS_SCHEMA = [
     desc: { zh: '数据文件位置与备份', en: 'Data file location and backups' },
     fields: [
       {
+        path: 'storage.engine',
+        type: 'select',
+        options: [
+          { value: 'sqlite', label: { zh: 'SQLite（默认，设计文档方案）', en: 'SQLite (default, per the design)' } },
+          { value: 'json', label: { zh: 'JSON 单文件（兼容/排障）', en: 'Single JSON file (compatibility/debug)' } },
+        ],
+        label: { zh: '存储引擎', en: 'Storage engine' },
+        hint: { zh: '默认使用 SQLite（memories / events / assets / relationships / changelog 表）；改回 JSON 需要重载插件。', en: 'SQLite by default (memories / events / assets / relationships / changelog tables); reload the plugin after switching back to JSON.' },
+      },
+      {
         path: 'storage.dir',
         type: 'text',
         placeholder: { zh: '留空表示 <DSH_HOME>/storages/dsh-memory-plugin', en: 'Empty means <DSH_HOME>/storages/dsh-memory-plugin' },
@@ -228,7 +239,7 @@ export const SETTINGS_SCHEMA = [
         step: 1,
         unit: { zh: '份', en: 'files' },
         label: { zh: '保留备份份数', en: 'Backups to keep' },
-        hint: { zh: '每次保存前轮转一份 store.bak-N.json；0 表示不备份。', en: 'Rotate a store.bak-N.json before each save; 0 disables.' },
+        hint: { zh: '每次打开记忆库前轮转一份 backup（memory.sqlite3.bak-N 或 store.json.bak-N）；0 表示不备份。', en: 'Rotate one backup before the store opens (memory.sqlite3.bak-N or store.json.bak-N); 0 disables.' },
       },
     ],
   },
