@@ -1,8 +1,11 @@
 /**
- * 记忆引擎：八层记忆 + 记事本 + 加权检索 + 反思维护。
+ * 记忆引擎：八层记忆 + 记事本 + 混合检索 + 反思维护。
  *
- * 纯内存对象 + 一个 JSON 文件，没有原生依赖，因此 Windows / macOS / Linux 都能直接跑。
- * 所有对外方法都是同步的：数据量在几万条以内时同步足够快，也省掉了并发写入的排序问题。
+ * 职责边界：
+ *   - 本文件负责业务规则（分层权限、去重、冲突、维护流程、统计、导入导出）；
+ *   - 检索细节交给 lib/search.js（FTS5 + 倒排 + 语义 + 图谱 + 融合）；
+ *   - 持久化交给 lib/sqlite.js 或 lib/store.js；
+ *   - 批量数学交给 lib/native.js（Rust 原生核心，缺失时 JS 兜底）。
  *
  * 分层语义（来自设计文档）：
  *   L0 灵魂层 / L1 思想核心 / L3 本能行为 —— 不可变，默认只读；
@@ -22,6 +25,11 @@ import {
   normalizeSettings,
 } from './settings.js'
 import { emptyState, message, STORE_VERSION } from './store.js'
+import { createSearchEngine } from './search.js'
+import { fallbackCosineBatch, fallbackDedupe, fallbackImportance } from './fallback-math.js'
+import { jaccard, tokenize } from './text.js'
+
+export { jaccard, tokenize }
 
 export const ITEM_TYPES = ['memory', 'note']
 export const ITEM_STATUSES = ['active', 'archived', 'expired', 'conflicted']
@@ -34,12 +42,38 @@ const DEDUPE_SCAN_LIMIT = 1200
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
 
 /** 新建一条记忆/记事本条目。 */
-export function createEngine({ store, getSettings, initialSettings, log }) {
+export async function createEngine({ store, getSettings, initialSettings, log, native }) {
   let state
+  /** id → item 的索引，检索时避免每次重建 Map。 */
+  let itemMap = new Map()
 
   // 设置归属：存档里有就以存档为准（用户在设置页改的），否则用行配置里的初始值。
   const fallbackSettings = () => normalizeSettings(initialSettings ?? getSettings?.() ?? {})
   const settings = () => normalizeSettings(state?.settings ?? fallbackSettings())
+
+  // 检索层：FTS5 / 倒排 + 语义 + 图谱 + 融合
+  // 原生核心缺失时用纯 JS 兜底：功能一致，只是批量计算慢一些。
+  const nativeCore = native ?? {
+    cosine: async (query, matrix, count, dim) => fallbackCosineBatch(query, matrix, count, dim),
+    importance: async (items, now) => fallbackImportance(items, now),
+    dedupe: async (items, threshold) => fallbackDedupe(items, threshold),
+    similar: async () => [],
+    health: () => ({ available: false, fallback: true, reason: 'native core not provided' }),
+  }
+  const searchEngine = createSearchEngine({ store, native: nativeCore, getSettings: settings, log })
+  const reindexAll = () => {
+    itemMap = new Map((state?.items ?? []).map((item) => [item.id, item]))
+    searchEngine.rebuild(state?.items ?? [])
+  }
+  const indexItem = (item) => {
+    if (item === undefined) return
+    itemMap.set(item.id, item)
+    searchEngine.upsert(item)
+  }
+  const unindexItem = (id) => {
+    itemMap.delete(id)
+    searchEngine.remove(id)
+  }
 
   /** 读取并修复磁盘上的状态。 */
   function hydrate(raw) {
@@ -76,19 +110,58 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     return next
   }
 
-  function ensure() {
-    if (state === undefined) state = hydrate(store.read())
+  // 远程存储（Go 服务）走 load/apply；本地回退走 read/write。
+  const remote = typeof store.load === 'function' && typeof store.apply === 'function'
+
+  /** 首次加载：远程存储是异步的（HTTP 到 Go 服务）。 */
+  async function ensureLoaded() {
+    if (state === undefined) {
+      const raw = remote ? await store.load() : store.read()
+      state = hydrate(raw)
+      reindexAll()
+    }
     return state
   }
 
-  function persist() {
-    const current = ensure()
+  /** 同步读取已经加载好的状态（工厂里会先 ensureLoaded）。 */
+  function currentState() {
+    if (state === undefined) throw createError('NOT_READY', '记忆库尚未加载')
+    return state
+  }
+
+  /** 落盘：远程存储按行签名增量同步，本地存储整体写入。 */
+  async function persist() {
+    const current = currentState()
     current.updatedAt = new Date().toISOString()
-    store.write(current)
+    if (remote) return store.apply(current)
+    return store.write(current)
+  }
+
+  // 访问计数是启发式数据：按 1.5s 合并落盘，避免每次检索都写一次库。
+  let accessDirty = false
+  let accessTimer = null
+  function scheduleAccessPersist() {
+    accessDirty = true
+    if (accessTimer !== null) return
+    accessTimer = setTimeout(() => {
+      accessTimer = null
+      flushAccess().catch((error) => log('warn', `访问计数落盘失败：${message(error)}`))
+    }, 1500)
+    accessTimer.unref?.()
+  }
+  async function flushAccess() {
+    if (!accessDirty) return
+    accessDirty = false
+    try {
+      await persist()
+    } catch (error) {
+      accessDirty = true
+      throw error
+    }
   }
 
   function audit(action, detail, actor = 'system') {
-    const current = ensure()
+    const current = currentState()
     const keep = settings().maintenance.auditKeep
     if (!settings().privacy.auditLog || keep <= 0) {
       current.audit = []
@@ -101,7 +174,7 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
   // ---------------------------------------------------------------- 读取 ----
 
   function listItems(options = {}) {
-    const current = ensure()
+    const current = currentState()
     const active = settings()
     const pageSize = clampInt(options.limit, 1, active.retrieval.maxLimit, active.ui.pageSize)
     const offset = clampInt(options.offset, 0, Number.MAX_SAFE_INTEGER, 0)
@@ -116,48 +189,123 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     }
   }
 
-  function searchItems(options = {}) {
-    const current = ensure()
+  /**
+   * 混合检索（async：语义重排要等原生核心批量余弦）。
+   * 返回结构兼容旧版调用方：items 里带 score，同时新增 breakdown 便于调试。
+   */
+  async function searchItems(options = {}) {
+    const current = await ensureLoaded()
     const active = settings()
     const query = typeof options.query === 'string' ? options.query.trim() : ''
     const limit = clampInt(options.limit, 1, active.retrieval.maxLimit, active.retrieval.defaultLimit)
-    const scope = filterItems(current.items, { ...options, status: options.status ?? 'usable' }, active)
-    const now = Date.now()
-    const tokens = tokenize(query)
-    const minScore = query === '' ? 0 : clampNumber(options.minScore, 0, 1, active.retrieval.minScore)
-    const scored = []
-    for (const item of scope) {
-      const score = scoreItem(item, tokens, active, now)
-      if (query !== '' && score < minScore) continue
-      scored.push({ item, score })
+    const status = options.status ?? 'usable'
+    const started = Date.now()
+
+    if (query === '') {
+      // 空查询=按重要度/时间列一批，不需要经过索引
+      const scope = filterItems(current.items, { ...options, status }, active)
+      const sorted = sortItems(scope, options.sort ?? 'updated').slice(0, limit)
+      for (const item of sorted) {
+        item.accessCount = (item.accessCount ?? 0) + 1
+        item.lastAccessAt = new Date().toISOString()
+      }
+      if (sorted.length > 0) scheduleAccessPersist()
+      current.meta.searches = (current.meta.searches ?? 0) + 1
+      return {
+        items: sorted.map((item) => ({ ...decorate(item), score: round(scoreItem(item, new Set(), active, Date.now())) })),
+        total: scope.length,
+        query,
+        limit,
+        tokens: 0,
+        tookMs: Date.now() - started,
+        breakdown: 'listing',
+      }
     }
-    scored.sort((left, right) => right.score - left.score || left.item.title.localeCompare(right.item.title))
-    const top = scored.slice(0, limit)
-    // 命中即"被想起"：累计访问次数，供"记忆提升"使用。
-    for (const entry of top) {
-      entry.item.accessCount = (entry.item.accessCount ?? 0) + 1
-      entry.item.lastAccessAt = new Date().toISOString()
+
+    // 1) 有 Go 服务时：FTS5 + 语义 + 图谱 + 融合全部由 Go 完成
+    if (remote && typeof store.search === 'function') {
+      const result = await store.search({
+        query,
+        limit,
+        layer: options.layer,
+        type: options.type,
+        notebook: options.notebook,
+        tags: options.tags,
+        status,
+        weights: active.retrieval.weights,
+        semantic: active.retrieval.semantic !== false,
+        graph: active.retrieval.graph !== false,
+        graphDepth: active.retrieval.graphDepth,
+        graphSeeds: active.retrieval.graphSeeds,
+        graphMinWeight: active.retrieval.graphMinWeight,
+      })
+      const hits = []
+      for (const hit of result.hits ?? []) {
+        const item = itemMap.get(hit.id)
+        if (item === undefined) continue
+        item.accessCount = (item.accessCount ?? 0) + 1
+        item.lastAccessAt = new Date().toISOString()
+        hits.push({ ...decorate(item), score: round(hit.score), breakdown: hit.breakdown })
+      }
+      if (hits.length > 0) scheduleAccessPersist()
+      current.meta.searches = (current.meta.searches ?? 0) + 1
+      return {
+        items: hits,
+        total: result.total ?? hits.length,
+        query,
+        limit,
+        tokens: tokenize(query).size,
+        tookMs: Date.now() - started,
+        weights: result.weights,
+        cached: false,
+        breakdown: 'go',
+      }
     }
-    if (top.length > 0) persist()
-    current.meta.searches = (current.meta.searches ?? 0) + 1
-    return {
-      items: top.map((entry) => ({ ...decorate(entry.item), score: round(entry.score) })),
-      total: scored.length,
+
+    // 2) 回退：Node 内置倒排 + 语义 + 图谱
+    const result = await searchEngine.search({
+      items: itemMap,
       query,
       limit,
-      tokens: tokens.size,
+      layer: options.layer,
+      type: options.type,
+      notebook: options.notebook,
+      tags: options.tags,
+      status,
+    })
+    // 命中即"被想起"：累计访问次数，供"记忆提升"使用。
+    const hits = []
+    for (const hit of result.items) {
+      const item = itemMap.get(hit.item.id)
+      if (item === undefined) continue
+      item.accessCount = (item.accessCount ?? 0) + 1
+      item.lastAccessAt = new Date().toISOString()
+      hits.push({ ...decorate(item), score: round(hit.score), breakdown: hit.breakdown })
+    }
+    if (hits.length > 0) scheduleAccessPersist()
+    current.meta.searches = (current.meta.searches ?? 0) + 1
+    return {
+      items: hits,
+      total: result.total,
+      query,
+      limit,
+      tokens: tokenize(query).size,
+      tookMs: Date.now() - started,
+      weights: result.weights,
+      cached: result.cached === true,
+      breakdown: 'hybrid',
     }
   }
 
   function getItem(id) {
-    const item = ensure().items.find((candidate) => candidate.id === id)
+    const item = currentState().items.find((candidate) => candidate.id === id)
     return item === undefined ? undefined : decorate(item)
   }
 
   // ---------------------------------------------------------------- 写入 ----
 
-  function createItem(input = {}, actor = 'user') {
-    const current = ensure()
+  async function createItem(input = {}, actor = 'user') {
+    const current = await ensureLoaded()
     const active = settings()
     assertEnabled(active)
     const layer = normalizeLayer(input.layer ?? active.write.defaultLayer)
@@ -200,15 +348,16 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     // 保鲜期：L6/L7 默认层或显式 ttlDays 的条目到期后由清理任务归档。
     item.expiresAt = expiresAtFor(item, active)
     current.items.push(item)
+    indexItem(item)
     detectConflicts(current, item, active)
     audit('create', `${item.layer}/${item.type} ${item.title}`, actor)
     current.meta.writes = (current.meta.writes ?? 0) + 1
-    persist()
+    await persist()
     return decorate(item)
   }
 
-  function updateItem(id, patch = {}, actor = 'user') {
-    const current = ensure()
+  async function updateItem(id, patch = {}, actor = 'user') {
+    const current = await ensureLoaded()
     const active = settings()
     const index = current.items.findIndex((candidate) => candidate.id === id)
     if (index < 0) throw createError('NOT_FOUND', `找不到条目 ${id}`)
@@ -240,14 +389,15 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     next.version = (before.version ?? 1) + 1
     next.expiresAt = expiresAtFor(next, active)
     current.items[index] = normalizeItem(next) ?? before
+    indexItem(current.items[index])
     detectConflicts(current, current.items[index], active)
     audit('update', `${current.items[index].layer}/${current.items[index].title}`, actor)
-    persist()
+    await persist()
     return decorate(current.items[index])
   }
 
-  function deleteItems(ids, actor = 'user') {
-    const current = ensure()
+  async function deleteItems(ids, actor = 'user') {
+    const current = await ensureLoaded()
     const active = settings()
     const wanted = new Set((Array.isArray(ids) ? ids : [ids]).filter((id) => typeof id === 'string'))
     if (wanted.size === 0) return { deleted: 0 }
@@ -266,15 +416,16 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
       if (item.conflicts.length === 0 && item.status === 'conflicted') item.status = 'active'
     }
     if (removed.length > 0) {
+      for (const id of removed) unindexItem(id)
       audit('delete', `删除 ${removed.length} 条：${removed.slice(0, 5).join(', ')}`, actor)
-      persist()
+      await persist()
     }
     return { deleted: removed.length, ids: removed }
   }
 
   /** 批量操作：归档 / 恢复 / 置顶 / 取消置顶 / 提升 / 降低。 */
-  function bulkAction(ids, action, actor = 'user') {
-    const current = ensure()
+  async function bulkAction(ids, action, actor = 'user') {
+    const current = await ensureLoaded()
     const active = settings()
     const wanted = new Set((Array.isArray(ids) ? ids : [ids]).filter((id) => typeof id === 'string'))
     if (wanted.size === 0) throw createError('NO_IDS', '至少选择一条')
@@ -316,37 +467,74 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
       }
     }
     if (changed > 0) {
+      reindexAll()
       audit(action, `${action} ${changed} 条`, actor)
-      persist()
+      await persist()
     }
     return { action, changed }
   }
 
   // ------------------------------------------------------------ 维护任务 ----
 
-  function runMaintenance(options = {}) {
-    const current = ensure()
+  /**
+   * 维护任务（async：去重与重要性评分走原生核心批量计算）。
+   *
+   * 任务：
+   *   cleanup  过期清理（按 expiresAt）
+   *   rotate   轮转清理（按原生重要性评分，L6/L7 低分条目过期）
+   *   archive  归档（长期未更新且重要度低）
+   *   dedupe   去重/冲突（LSH 候选 + 精确 Jaccard，原生核心批量算）
+   *   reflect  反思提升（访问次数 + 重要性评分给出建议或自动提升）
+   *   compact  压缩审计日志
+   *   limits   资源上限（条目过多时删最旧的轮转记忆）
+   */
+  async function runMaintenance(options = {}) {
+    const current = await ensureLoaded()
     const active = settings()
     const now = Date.now()
     const wanted = Array.isArray(options.tasks) && options.tasks.length > 0
       ? options.tasks.filter((task) => typeof task === 'string')
-      : ['cleanup', 'archive', 'dedupe', 'reflect']
+      : ['cleanup', 'rotate', 'archive', 'dedupe', 'reflect']
     const report = { ranAt: new Date().toISOString(), tasks: [], totals: {} }
+    let dirty = false
 
     for (const task of wanted) {
       if (task === 'cleanup') {
         let expired = 0
         for (const item of current.items) {
-          if (item.status === 'expired') continue
-          if (item.pinned) continue
+          if (item.status === 'expired' || item.pinned) continue
           if (item.expiresAt === null) continue
           if (Date.parse(item.expiresAt) > now) continue
           item.status = 'expired'
           expired += 1
         }
-        if (expired > 0) persist()
+        if (expired > 0) {
+          dirty = true
+          await persist()
+        }
         current.meta.lastCleanup = new Date().toISOString()
         report.tasks.push({ task, changed: expired, note: `过期 ${expired} 条` })
+      } else if (task === 'rotate') {
+        const threshold = clampNumber(active.maintenance.rotateMinImportance, 0, 1, 0.3)
+        const candidates = current.items.filter(
+          (item) => (item.layer === 'L6' || item.layer === 'L7') && item.status === 'active' && !item.pinned,
+        )
+        let rotated = 0
+        if (candidates.length > 0) {
+          const scores = await nativeCore.importance(candidates.map(toImportanceInput), now / 1000)
+          candidates.forEach((item, index) => {
+            if ((scores[index] ?? 1) < threshold) {
+              item.status = 'expired'
+              rotated += 1
+            }
+          })
+        }
+        if (rotated > 0) {
+          dirty = true
+          await persist()
+        }
+        current.meta.lastRotate = new Date().toISOString()
+        report.tasks.push({ task, changed: rotated, note: `轮转清理 ${rotated} 条（重要性 < ${threshold}）` })
       } else if (task === 'archive') {
         const days = Math.max(1, active.maintenance.archiveAfterDays)
         let archived = 0
@@ -358,15 +546,24 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
           item.status = 'archived'
           archived += 1
         }
-        if (archived > 0) persist()
+        if (archived > 0) {
+          dirty = true
+          await persist()
+        }
         report.tasks.push({ task, changed: archived, note: `归档 ${archived} 条（>${days} 天未更新且重要度≤4）` })
       } else if (task === 'dedupe') {
-        const marked = dedupeAll(current, active)
-        if (marked > 0) persist()
-        report.tasks.push({ task, changed: marked, note: `标记 ${marked} 组疑似重复` })
+        const result = await dedupeAll(current, active)
+        if (result.changed > 0) {
+          dirty = true
+          await persist()
+        }
+        report.tasks.push({ task, changed: result.changed, note: `标记 ${result.changed} 组疑似重复（扫描 ${result.scanned} 条）` })
       } else if (task === 'reflect') {
-        const result = reflect(current, active)
-        if (result.changed > 0) persist()
+        const result = await reflect(current, active, now)
+        if (result.changed > 0) {
+          dirty = true
+          await persist()
+        }
         current.meta.lastReflect = new Date().toISOString()
         report.tasks.push({ task, changed: result.changed, note: result.note, suggestions: result.suggestions })
       } else if (task === 'compact') {
@@ -374,16 +571,36 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
         const before = current.audit.length
         current.audit = keep === 0 ? [] : current.audit.slice(-keep)
         report.tasks.push({ task, changed: before - current.audit.length, note: `清理审计日志 ${before - current.audit.length} 条` })
-        persist()
+        await persist()
+      } else if (task === 'limits') {
+        const maxItems = clampInt(active.maintenance.maxItems, 100, 1_000_000, 100_000)
+        let removed = 0
+        if (current.items.length > maxItems) {
+          const excess = current.items.length - Math.floor(maxItems * 0.9)
+          const oldest = current.items
+            .filter((item) => (item.layer === 'L6' || item.layer === 'L7') && !item.pinned && item.status === 'active')
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+            .slice(0, excess)
+          for (const item of oldest) {
+            item.status = 'expired'
+            removed += 1
+          }
+          if (removed > 0) {
+            dirty = true
+            await persist()
+          }
+        }
+        report.tasks.push({ task, changed: removed, note: `资源上限：共 ${current.items.length} 条，上限 ${maxItems}，处理 ${removed} 条` })
       } else {
         report.tasks.push({ task, changed: 0, note: '未知任务，已跳过' })
       }
     }
 
+    if (dirty) reindexAll()
     report.totals = summarize(current, active)
     current.meta.lastMaintenance = report.ranAt
     audit('maintenance', wanted.join(','), 'system')
-    persist()
+    await persist()
     return report
   }
 
@@ -425,48 +642,71 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     return marked
   }
 
-  function dedupeAll(current, active) {
+  /**
+   * 去重/冲突检测：把候选条目交给原生核心做 LSH 候选 + 精确 Jaccard，
+   * 再按设计文档的规则写回条目（L2 置 conflicted，其它层只标 duplicateOf）。
+   */
+  async function dedupeAll(current, active) {
     const threshold = active.maintenance.conflictThreshold
-    const tokensOf = new Map()
-    for (const item of current.items) tokensOf.set(item.id, tokenize(`${item.title} ${item.content}`))
-    let groups = 0
     const scan = current.items
       .filter((item) => item.status !== 'expired')
       .slice(0, DEDUPE_SCAN_LIMIT)
-    for (let index = 0; index < scan.length; index += 1) {
-      const left = scan[index]
-      const leftTokens = tokensOf.get(left.id)
-      if (leftTokens === undefined || leftTokens.size === 0) continue
-      let touched = false
-      for (let other = index + 1; other < scan.length; other += 1) {
-        const right = scan[other]
-        if (right.type !== left.type || right.layer !== left.layer) continue
-        const score = jaccard(leftTokens, tokensOf.get(right.id))
-        if (score < threshold) continue
+    if (scan.length < 2) return { changed: 0, scanned: scan.length }
+    const payload = scan.map((item) => ({
+      id: item.id,
+      tokens: [...tokenize(`${item.title} ${item.content}`)],
+    }))
+    const pairs = await nativeCore.dedupe(payload, threshold)
+    const byId = new Map(scan.map((item) => [item.id, item]))
+    let changed = 0
+    for (const pair of pairs) {
+      const left = byId.get(pair.a)
+      const right = byId.get(pair.b)
+      if (left === undefined || right === undefined) continue
+      if (left.type !== right.type) continue
+      if (layerInfo(left.layer).conflictable && layerInfo(right.layer).conflictable) {
         if (!left.conflicts.includes(right.id)) left.conflicts.push(right.id)
         if (!right.conflicts.includes(left.id)) right.conflicts.push(left.id)
-        touched = true
+        if (left.status === 'active') left.status = 'conflicted'
+        if (right.status === 'active') right.status = 'conflicted'
+        changed += 1
+      } else {
+        // 非冲突层：只记录"疑似重复"，不动状态
+        if (left.duplicateOf === undefined) left.duplicateOf = right.id
+        if (right.duplicateOf === undefined) right.duplicateOf = left.id
+        changed += 1
       }
-      if (touched) groups += 1
     }
-    return groups
+    return { changed, scanned: scan.length, pairs: pairs.length }
   }
 
-  function reflect(current, active) {
+  /** 反思提升：原生重要性评分 + 访问次数，给出建议或自动提升。 */
+  async function reflect(current, active, now) {
     const need = Math.max(1, active.maintenance.promoteAccessCount)
+    const candidates = current.items.filter((item) => item.status === 'active')
+    if (candidates.length === 0) return { changed: 0, note: '没有可反思的条目', suggestions: [] }
+    const scores = await nativeCore.importance(candidates.map(toImportanceInput), now / 1000)
     const suggestions = []
     let changed = 0
-    for (const item of current.items) {
-      if (item.status !== 'active') continue
-      if ((item.accessCount ?? 0) < need) continue
-      if (item.importance >= 10) continue
-      suggestions.push({ id: item.id, title: item.title, layer: item.layer, accessCount: item.accessCount, importance: item.importance })
+    candidates.forEach((item, index) => {
+      const score = scores[index] ?? 0
+      if ((item.accessCount ?? 0) < need && score < 0.7) return
+      if (item.importance >= 10) return
+      suggestions.push({
+        id: item.id,
+        title: item.title,
+        layer: item.layer,
+        accessCount: item.accessCount,
+        importance: item.importance,
+        score: round(score),
+      })
       if (active.maintenance.autoPromote) {
         item.importance = Math.min(10, item.importance + 1)
         item.updatedAt = new Date().toISOString()
         changed += 1
       }
-    }
+    })
+    suggestions.sort((left, right) => right.score - left.score)
     return {
       changed,
       note: active.maintenance.autoPromote
@@ -514,7 +754,7 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
   }
 
   function status() {
-    const current = ensure()
+    const current = currentState()
     const active = settings()
     return {
       version: STORE_VERSION,
@@ -522,6 +762,8 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
       enabled: active.enabled,
       storage: store.info(),
       stats: summarize(current, active),
+      search: searchEngine.stats(),
+      native: typeof nativeCore.health === 'function' ? nativeCore.health() : { available: false },
       layers: LAYERS,
       notebooks: NOTEBOOK_LIST,
       toolNames: TOOL_NAMES,
@@ -530,7 +772,7 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
   }
 
   function exportData() {
-    const current = ensure()
+    const current = currentState()
     return {
       format: 'dsh-memory-plugin',
       version: STORE_VERSION,
@@ -541,8 +783,8 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     }
   }
 
-  function importData(payload, mode = 'merge') {
-    const current = ensure()
+  async function importData(payload, mode = 'merge') {
+    const current = await ensureLoaded()
     const active = settings()
     const incoming = Array.isArray(payload?.items) ? payload.items : []
     if (incoming.length === 0) throw createError('EMPTY_IMPORT', '导入内容里没有 items')
@@ -567,16 +809,17 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
       current.items = [...replaced.values()]
     } else {
       current.items = [...current.items, ...imported]
+      reindexAll()
     }
     if (payload?.settings !== undefined && mode === 'replace') current.settings = normalizeSettings(payload.settings)
     audit('import', `导入 ${imported.length} 条（跳过 ${skipped}）`, 'user')
-    persist()
+    await persist()
     return { imported: imported.length, skipped, mode }
   }
 
   /** 提示词注入用的摘要文本。 */
   function promptDigest(now = Date.now()) {
-    const current = ensure()
+    const current = currentState()
     const active = settings()
     if (!active.enabled || !active.prompt.inject || active.prompt.topN <= 0) return ''
     const candidates = current.items.filter((item) => {
@@ -605,17 +848,27 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     return text
   }
 
-  return {
+  const api = {
     // 读取
     status,
     listItems,
     searchItems,
     getItem,
-    stats: () => summarize(ensure(), settings()),
+    stats: () => summarize(currentState(), settings()),
     layers: () => LAYERS,
     notebooks: () => NOTEBOOK_LIST,
-    auditList: (limit = 50) => ensure().audit.slice(-clampInt(limit, 1, 1000, 50)).reverse(),
-    meta: () => ensure().meta,
+    auditList: (limit = 50) => currentState().audit.slice(-clampInt(limit, 1, 1000, 50)).reverse(),
+    meta: () => currentState().meta,
+    // 检索/索引诊断
+    searchStats: () => searchEngine.stats(),
+    resetSearchStats: () => searchEngine.resetStats(),
+    graphNeighbors: (id, options) => searchEngine.graphNeighbors(id, options),
+    rebuildIndexes: () => {
+      const current = currentState()
+      reindexAll()
+      if (typeof store.rebuildIndexes === 'function') return store.rebuildIndexes(current.items)
+      return { fts: false, vectors: false, items: current.items.length }
+    },
     // 写入
     createItem,
     updateItem,
@@ -627,22 +880,26 @@ export function createEngine({ store, getSettings, initialSettings, log }) {
     importData,
     promptDigest,
     // 设置
-    // 注意：这里刻意不调用 ensure()。SQLite 存储在打开时要读 storage.backupKeep，
+    // 注意：这里刻意不调用 currentState()。存储打开时要读 storage.backupKeep，
     // 而它拿设置会回调到这里；如果 getSettings 再去加载状态就会与 load 递归
-    // （RangeError: Maximum call stack size exceeded）。启动时由 index.js 显式 reload()。
+    // （RangeError: Maximum call stack size exceeded）。启动时显式 await reload()。
     getSettings: () => clone(settings()),
-    replaceSettings: (next) => {
-      const current = ensure()
-      current.settings = normalizeSettings(next)
-      store.refreshPath()
-      persist()
-      return current.settings
+    replaceSettings: async (next) => {
+      await ensureLoaded()
+      currentState().settings = normalizeSettings(next)
+      store.refreshPath?.()
+      await persist()
+      return currentState().settings
     },
-    reload: () => {
+    reload: async () => {
       state = undefined
-      return ensure()
+      itemMap = new Map()
+      searchEngine.resetStats()
+      return ensureLoaded()
     },
   }
+  await api.reload()
+  return api
 }
 
 // ------------------------------------------------------------------ 工具函数 --
@@ -740,33 +997,16 @@ function recencyScore(iso, halfLifeDays, now) {
   return Math.pow(0.5, days / halfLife)
 }
 
-const CJK = /[\u3400-\u9fff\uf900-\ufaff]/
-const LATIN = /[a-z0-9][a-z0-9_+#.-]{1,}/g
-
-/** 分词：英文按词，中文按字 + 二元组。 */
-export function tokenize(text) {
-  const tokens = new Set()
-  const source = String(text ?? '').toLowerCase()
-  if (source === '') return tokens
-  let match
-  LATIN.lastIndex = 0
-  while ((match = LATIN.exec(source)) !== null) tokens.add(match[0])
-  const runs = source.match(/[\u3400-\u9fff\uf900-\ufaff]+/g) ?? []
-  for (const run of runs) {
-    for (let index = 0; index < run.length; index += 1) {
-      tokens.add(run[index])
-      if (index + 1 < run.length) tokens.add(run.slice(index, index + 2))
-    }
+/** 原生核心需要的时间戳是"秒"，条目里存的是 ISO 字符串。 */
+function toImportanceInput(item) {
+  const created = Date.parse(item.createdAt ?? '') / 1000
+  const lastAccess = Date.parse(item.lastAccessAt ?? item.updatedAt ?? item.createdAt ?? '') / 1000
+  return {
+    createdAt: Number.isFinite(created) ? created : Date.now() / 1000,
+    lastAccessAt: Number.isFinite(lastAccess) ? lastAccess : Date.now() / 1000,
+    accessCount: item.accessCount ?? 0,
+    relatedCount: Array.isArray(item.conflicts) ? item.conflicts.length : 0,
   }
-  return tokens
-}
-
-export function jaccard(left, right) {
-  if (left.size === 0 || right.size === 0) return 0
-  let shared = 0
-  const [small, large] = left.size <= right.size ? [left, right] : [right, left]
-  for (const token of small) if (large.has(token)) shared += 1
-  return shared / (left.size + right.size - shared)
 }
 
 function normalizeItem(raw) {
@@ -909,4 +1149,11 @@ import { NOTEBOOKS } from './settings.js'
 NOTEBOOK_LIST.push(...NOTEBOOKS)
 
 export { message, getPath }
+
+
+
+
+
+
+
 

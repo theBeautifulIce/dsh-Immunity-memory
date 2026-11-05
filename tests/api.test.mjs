@@ -21,7 +21,7 @@ const log = () => {}
 const ctx = { get: () => (name) => join(sandbox, name) }
 const ref = { engine: null }
 const store = createStore(ctx, log, () => ref.engine?.getSettings() ?? normalizeSettings({}))
-const engine = createEngine({ store, initialSettings: normalizeSettings({}), getSettings: () => normalizeSettings({}), log })
+const engine = await createEngine({ store, initialSettings: normalizeSettings({}), getSettings: () => normalizeSettings({}), log })
 ref.engine = engine
 
 const routes = []
@@ -217,3 +217,4 @@ try {
 } finally {
   await new Promise((resolve) => server.close(resolve))
 }
+

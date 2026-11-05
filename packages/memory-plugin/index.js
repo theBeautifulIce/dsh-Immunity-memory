@@ -17,6 +17,7 @@ import { Config, normalizeSettings } from './lib/settings.js'
 import { message } from './lib/store.js'
 import { createStorage } from './lib/storage.js'
 import { createEngine } from './lib/engine.js'
+import { createNativeCore } from './lib/native.js'
 import { API_PATH, LEGACY_API_PATH, mountApi, setTrustedHosts } from './lib/api.js'
 import { registerTools } from './lib/tools.js'
 
@@ -25,8 +26,12 @@ export const inject = ['tools', 'systemPrompt']
 export { Config }
 
 /** 宿主入口。 */
-export function apply(ctx, config) {
+export async function apply(ctx, config) {
   const logger = typeof ctx.logger === 'function' ? ctx.logger('memory-plugin') : ctx.logger
+  // 存储层选引擎（Go 探活失败等）发生在拿到 store 之前，此时 plugin.log 还没建立；
+  // 把 warn/error 同时写进 boot.log，否则线上只看得到"最终用了 sqlite"，看不到为什么。
+  const bootDir = join(process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '.', '.dsh'), 'storages', 'dsh-memory-plugin')
+  const bootFile = join(bootDir, 'boot.log')
   const log = (level, text) => {
     try {
       const write = logger?.[level]
@@ -35,6 +40,14 @@ export function apply(ctx, config) {
     } catch {
       // 日志失败不影响主流程
     }
+    if (level === 'warn' || level === 'error') {
+      try {
+        mkdirSync(bootDir, { recursive: true })
+        appendFileSync(bootFile, `${new Date().toISOString()} ${level} ${text}\n`)
+      } catch {
+        // 启动期日志失败不影响主流程
+      }
+    }
   }
 
   // store 的路径 / 备份份数依赖设置，而设置由引擎持有：先留一个引用位，避免构造顺序死锁。
@@ -42,7 +55,7 @@ export function apply(ctx, config) {
   let store
   let storageKind = 'json'
   try {
-    const created = createStorage(ctx, log, () => ref.engine?.getSettings?.() ?? normalizeSettings(config ?? {}))
+    const created = await createStorage(ctx, log, () => ref.engine?.getSettings?.() ?? normalizeSettings(config ?? {}))
     store = created.store
     storageKind = created.kind
   } catch (error) {
@@ -59,8 +72,29 @@ export function apply(ctx, config) {
   }, 'memory-plugin:storage')
 
   const initialSettings = normalizeSettings(config ?? {})
-  const engine = createEngine({
+  // 原生计算核心（Rust）：批量余弦 / 重要性 / 去重。关掉或不可用时引擎自动走 JS 兜底。
+  const native = initialSettings.performance?.nativeCore === false
+    ? null
+    : createNativeCore({ log })
+  ctx.effect(() => () => {
+    try {
+      native?.close()
+    } catch {
+      /* 已关闭 */
+    }
+  }, 'memory-plugin:native')
+  if (native !== null) {
+    const nativeStatus = await native.warmup()
+    if (nativeStatus.available) {
+      log('info', `原生核心已就绪（v${nativeStatus.version}，protocol ${nativeStatus.protocol}，pid ${nativeStatus.pid}）`)
+    } else {
+      log('warn', `原生核心不可用，改用 JS 兜底：${nativeStatus.lastError ?? '未知原因'}`)
+    }
+  }
+
+  const engine = await createEngine({
     store,
+    native,
     initialSettings,
     getSettings: () => initialSettings,
     log,
@@ -70,7 +104,7 @@ export function apply(ctx, config) {
   // 显式加载一次：SQLite 存储打开时要读设置，引擎的 getSettings 此时不能反过来加载状态
   // （否则递归）。这里一次性把状态读进来，之后 getSettings 直接返回存档里的设置。
   try {
-    engine.reload()
+    await engine.reload()
   } catch (error) {
     log('warn', `读取记忆库失败，按空库继续：${message(error)}`)
   }
@@ -99,27 +133,47 @@ export function apply(ctx, config) {
     },
   }), 'memory-plugin:prompt')
 
-  // 定时维护：过期清理 / 归档 / 去重 / 反思提升。
+  // 定时维护：过期清理 / 轮转 / 归档 / 去重 / 反思提升 / 资源上限。
   ctx.effect(() => {
     const current = engine.getSettings()
     if (!current.maintenance.autoRun) return () => {}
     const hours = Math.max(1, current.maintenance.intervalHours)
     const timer = setInterval(() => {
-      try {
-        const report = engine.runMaintenance({ tasks: ['cleanup', 'archive', 'dedupe', 'reflect', 'compact'] })
-        const changed = report.tasks.reduce((sum, task) => sum + (task.changed ?? 0), 0)
-        if (changed > 0) log('info', `定时维护完成：${report.tasks.map((task) => task.note).join('；')}`)
-        // 用户可能在设置页改了间隔或关掉了自动维护。
-        if (!engine.getSettings().maintenance.autoRun) clearInterval(timer)
-      } catch (error) {
-        log('warn', `定时维护失败：${message(error)}`)
-      }
+      ;(async () => {
+        try {
+          const report = await engine.runMaintenance({ tasks: ['limits', 'cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'compact'] })
+          const changed = report.tasks.reduce((sum, task) => sum + (task.changed ?? 0), 0)
+          if (changed > 0) log('info', `定时维护完成：${report.tasks.map((task) => task.note).join('；')}`)
+          // 用户可能在设置页改了间隔或关掉了自动维护。
+          if (!engine.getSettings().maintenance.autoRun) clearInterval(timer)
+        } catch (error) {
+          log('warn', `定时维护失败：${message(error)}`)
+        }
+      })()
     }, hours * 3600 * 1000)
     timer.unref?.()
     return () => clearInterval(timer)
   }, 'memory-plugin:maintenance')
 
-  attachApi(ctx, engine, debug)
+  // 定时自动备份（参考代码2 §3：数据库备份是"非常重要"项）。
+  ctx.effect(() => {
+    const current = engine.getSettings()
+    const hours = Math.max(1, current.storage.autoBackupHours ?? 24)
+    if (current.storage.autoBackup === false) return () => {}
+    if (typeof store.backup !== 'function') return () => {}
+    const timer = setInterval(() => {
+      try {
+        const result = store.backup('auto')
+        log('info', `自动备份完成：${result.path}`)
+      } catch (error) {
+        log('warn', `自动备份失败：${message(error)}`)
+      }
+    }, hours * 3600 * 1000)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, 'memory-plugin:backup')
+
+  attachApi(ctx, engine, store, debug)
 }
 
 
@@ -135,7 +189,7 @@ export function apply(ctx, config) {
  */
 const API_HOLDER_KEY = '__dshMemoryPluginApi'
 
-function attachApi(ctx, engine, debug) {
+function attachApi(ctx, engine, store, debug) {
   const attach = (via) => {
     debug(`attach(${via}): start`)
     const webServer = ctx.get('webServer')
@@ -187,7 +241,7 @@ function attachApi(ctx, engine, debug) {
     const apiLog = (level, text) => debug(`api ${level}: ${text}`)
     try {
       const routeEffect = ctx.effect(() => {
-        const routeDispose = mountApi(webServer, () => holder.engine, apiLog)
+        const routeDispose = mountApi(webServer, () => holder.engine, apiLog, { store })
         holder.alive = true
         debug(`attach: 路由已激活 ${API_PATH}`)
         return () => {
@@ -225,7 +279,7 @@ function attachApi(ctx, engine, debug) {
     // 旧前缀：只为了让早期文档里的地址继续可用，被占用就静默跳过。
     try {
       disposers.push(ctx.effect(
-        () => mountApi(webServer, () => holder.engine, apiLog, { path: LEGACY_API_PATH }),
+        () => mountApi(webServer, () => holder.engine, apiLog, { store, path: LEGACY_API_PATH }),
         'memory-plugin:api-legacy',
       ))
       debug(`attach: 注册成功（兼容前缀） ${LEGACY_API_PATH}`)
@@ -282,4 +336,6 @@ function sqliteProbe() {
     return `no: ${error instanceof Error ? error.message : String(error)}`
   }
 }
+
+
 

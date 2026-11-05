@@ -1,4 +1,4 @@
-# 依赖与构建产物（插件没有构建步骤，这里只挡掉可能出现的本地文件）
+# 依赖与本地文件
 node_modules/
 package-lock.json
 pnpm-lock.yaml.bak
@@ -12,7 +12,13 @@ store.json.bak-*
 coverage/
 *.log
 .tmp/
+.tmp2/
 tmp/
+
+# 本地构建产物（要提交的是 packages/memory-plugin/{bin,native}/ 下的发布二进制）
+native/memory-core/target/
+go-service/memory-service.exe
+*.pdb
 
 # 编辑器 / 系统文件
 .vscode/*
@@ -21,3 +27,8 @@ tmp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Go 构建/探活残留
+go-service/.probe/
+*~
+

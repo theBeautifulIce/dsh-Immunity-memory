@@ -25,7 +25,7 @@ const log = () => {}
 const ctx = { get: () => (name) => join(sandbox, name) }
 const ref = { engine: null }
 const store = createStore(ctx, log, () => ref.engine?.getSettings() ?? normalizeSettings({}))
-const engine = createEngine({ store, initialSettings: normalizeSettings({}), getSettings: () => normalizeSettings({}), log })
+const engine = await createEngine({ store, initialSettings: normalizeSettings({}), getSettings: () => normalizeSettings({}), log })
 ref.engine = engine
 
 // ------------------------------------------------------- JsonSchemaNode 校验 ----
@@ -231,6 +231,7 @@ await test('释放函数注销全部工具', () => {
 })
 
 console.log(`\n${passed} 项通过`)
+
 
 
 

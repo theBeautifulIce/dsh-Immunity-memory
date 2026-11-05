@@ -1054,6 +1054,26 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function backupNow() {
+        try {
+          const value = await api('backups.create', { tag: 'manual' })
+          const name = value.backup?.name ?? value.backup?.path ?? ''
+          notify(txt(`已备份：${name}`, `Backed up: ${name}`))
+        } catch (error) {
+          notify(error.message, 'error')
+        }
+      }
+
+      async function rebuildIndexes() {
+        try {
+          const value = await api('indexes.rebuild', {})
+          notify(txt(`索引已重建（${value.items ?? 0} 条）`, `Indexes rebuilt (${value.items ?? 0} items)`))
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        }
+      }
+
       async function importData() {
         let parsed
         try {
@@ -1075,6 +1095,7 @@ window.__ModuleLoader__.load({
 
       const storage = boot.storage ?? {}
       const tasks = [
+        { id: ['rotate'], label: txt('轮转清理', 'Rotate'), desc: txt('按重要性评分清理 L6/L7 低分条目（Go 服务批量评分）', 'Expire low-importance L6/L7 entries by importance score') },
         { id: ['cleanup'], label: txt('过期清理', 'Expire stale'), desc: txt('把超过保鲜期的条目标记为已过期', 'Mark entries past their TTL as expired') },
         { id: ['archive'], label: txt('归档', 'Archive'), desc: txt(`长期未更新且重要度≤4 的条目归档（>${boot.settings.maintenance.archiveAfterDays} 天）`, `Archive stale low-importance entries (>${boot.settings.maintenance.archiveAfterDays} days)`) },
         { id: ['dedupe'], label: txt('重复检测', 'Detect duplicates'), desc: txt('找出高度相似的条目并互相标记冲突', 'Mark near-duplicate entries as conflicts') },
@@ -1107,7 +1128,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'mp-btn is-primary',
               disabled: running,
-              onClick: () => run(['cleanup', 'archive', 'dedupe', 'reflect', 'compact']),
+              onClick: () => run(['limits', 'cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'compact']),
             }, running ? txt('运行中…', 'Running…') : txt('全部运行', 'Run all')),
             h('button', { type: 'button', className: 'mp-btn', onClick: previewPrompt },
               txt('预览提示词注入', 'Preview prompt injection'))),
@@ -1129,14 +1150,26 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mp-card-title' }, txt('存储', 'Storage')),
           h('div', { className: 'mp-code' }, storage.path ?? ''),
           h('div', { className: 'mp-hint' },
-            `${txt('引擎', 'engine')} ${storage.engine === 'sqlite' ? 'SQLite (node:sqlite)' : 'JSON'}`
-            + (storage.tables === undefined || storage.tables === null
+            `${txt('引擎', 'engine')} ${storage.engine === 'go'
+              ? 'Go 服务 (SQLite + FTS5)'
+              : storage.engine === 'sqlite' ? 'Node SQLite（回退）' : 'JSON'}`),
+          storage.service === undefined || storage.service === null
+            ? null
+            : h('div', { className: 'mp-hint' },
+              `Go 服务 pid ${storage.service.pid ?? '-'} · port ${storage.service.port ?? '-'} · v${storage.service.version ?? '-'}`),
+          h('div', { className: 'mp-hint' },
+            (storage.tables === undefined || storage.tables === null
               ? ''
-              : ` · memories ${storage.tables.memories} / events ${storage.tables.events} / assets ${storage.tables.assets} / changelog ${storage.tables.changelog}`)),
+              : `memories ${storage.tables.memories} · events ${storage.tables.events} · assets ${storage.tables.assets} · vectors ${storage.tables.vectors ?? 0} · changelog ${storage.tables.changelog}`)
+            + (boot.native === undefined || boot.native === null
+              ? ''
+              : ` · ${txt('原生核心', 'native core')} ${boot.native.available === true ? `v${boot.native.version ?? ''}` : 'JS 兜底'}`)),
           h('div', { className: 'mp-hint' },
             `${txt('文件', 'file')} ${storage.exists === true ? txt('存在', 'exists') : txt('尚未创建', 'not created yet')} · ${formatBytes(storage.bytes)} · ${storage.modifiedAt === null ? '' : formatTime(storage.modifiedAt)}`),
           h('div', { className: 'mp-toolbar' },
             h('button', { type: 'button', className: 'mp-btn', onClick: exportData }, txt('导出 JSON', 'Export JSON')),
+            h('button', { type: 'button', className: 'mp-btn', onClick: backupNow }, txt('立即备份', 'Back up now')),
+            h('button', { type: 'button', className: 'mp-btn', onClick: rebuildIndexes }, txt('重建索引', 'Rebuild index')),
             h('button', { type: 'button', className: 'mp-btn', onClick: loadAudit }, txt('刷新审计日志', 'Refresh audit'))),
           h('div', { className: 'mp-list-plain' },
             audit.length === 0

@@ -46,15 +46,40 @@ export const API_METHODS = [
   'audit.list',
   'data.export',
   'data.import',
+  'health',
+  'search.stats',
+  'indexes.rebuild',
+  'backups.list',
+  'backups.create',
+  'backups.restore',
+  'graph.neighbors',
 ]
 
 /**
  * 建立方法表。`engineOf()` 每次调用都返回"当前这一代"的引擎实例：
  * 路由可能比插件行活得更久（卸载不会自动撤销前缀路由），所以 handler 不能在
  * 注册时就把引擎锁死，否则重装后设置页读到的还是上一代的旧数据。
+ *
+ * `context.store` 是存储句柄（备份/健康检查用），`context.startedAt` 是插件启动时间。
  */
-function createMethods(engineOf) {
+function createMethods(engineOf, context = {}) {
   const engine = () => engineOf()
+  const store = context.store
+  const startedAt = context.startedAt ?? Date.now()
+
+  const createError = (code, text) => {
+    const error = new Error(text)
+    error.code = code
+    return error
+  }
+  const safeCall = (fn, fallback = null) => {
+    try {
+      return fn()
+    } catch {
+      return fallback
+    }
+  }
+
   const methods = {
     bootstrap() {
       const status = engine().status()
@@ -82,14 +107,14 @@ function createMethods(engineOf) {
       if (item === undefined) throw notFound(params?.id)
       return { item }
     },
-    'items.create'(params) {
-      const item = engine().createItem(params ?? {}, 'user')
+    async 'items.create'(params) {
+      const item = await engine().createItem(params ?? {}, 'user')
       return { item }
     },
-    'items.update'(params) {
+    async 'items.update'(params) {
       const id = String(params?.id ?? '')
       const patch = params?.patch ?? params ?? {}
-      const item = engine().updateItem(id, patch, 'user')
+      const item = await engine().updateItem(id, patch, 'user')
       return { item }
     },
     'items.delete'(params) {
@@ -101,14 +126,14 @@ function createMethods(engineOf) {
     'settings.get'() {
       return { settings: engine().getSettings(), schema: SETTINGS_SCHEMA }
     },
-    'settings.save'(params) {
+    async 'settings.save'(params) {
       const patch = params?.patch ?? {}
       const next = applySettingsPatch(engine().getSettings(), patch)
-      const settings = engine().replaceSettings(next)
+      const settings = await engine().replaceSettings(next)
       return { settings, stats: engine().stats() }
     },
-    'settings.reset'(params) {
-      const settings = engine().replaceSettings(normalizeSettings(params?.keepStorage === true
+    async 'settings.reset'(params) {
+      const settings = await engine().replaceSettings(normalizeSettings(params?.keepStorage === true
         ? { storage: engine().getSettings().storage }
         : {}))
       return { settings }
@@ -125,8 +150,90 @@ function createMethods(engineOf) {
     'data.export'() {
       return { export: engine().exportData() }
     },
-    'data.import'(params) {
-      const result = engine().importData(params?.data ?? params ?? {}, params?.mode === 'replace' ? 'replace' : 'merge')
+    async health() {
+      const status = engine().status()
+      const storage = status.storage ?? {}
+      // 远程（Go）实现是 Promise，Node SQLite 回退层是同步返回；两种都接住。
+      let db = null
+      try {
+        db = typeof store?.verify === 'function' ? await store.verify() : null
+      } catch {
+        db = null
+      }
+      let storageStats = null
+      try {
+        storageStats = typeof store?.stats === 'function' ? await store.stats() : null
+      } catch {
+        storageStats = null
+      }
+      // Go 服务的 info() 是同步的，表行数在异步 stats() 里；把它补进 storage.tables，
+      // 设置页的存储卡片两种引擎都能显示同样的表结构。
+      const tables = storage.tables ?? (storageStats
+        ? {
+            memories: storageStats.memories ?? 0,
+            events: storageStats.events ?? 0,
+            assets: storageStats.assets ?? 0,
+            relationships: storageStats.relationships ?? 0,
+            changelog: storageStats.changelog ?? 0,
+            vectors: storageStats.vectors ?? 0,
+          }
+        : null)
+      return {
+        ok: status.enabled !== false,
+        pluginVersion: status.pluginVersion,
+        storage: { engine: storage.engine ?? 'json', path: storage.path, bytes: storage.bytes ?? 0, fts: storage.fts === true, vectors: storage.vectors === true, recoveredFrom: storage.recoveredFrom ?? null, service: storage.service ?? null, tables, stats: storageStats },
+        database: db,
+        native: status.native ?? { available: false },
+        search: status.search ?? {},
+        stats: status.stats ?? {},
+        uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      }
+    },
+    'search.stats'() {
+      return { search: engine().searchStats(), native: engine().status().native }
+    },
+    'indexes.rebuild'() {
+      return engine().rebuildIndexes()
+    },
+    async 'backups.list'() {
+      const list = typeof store?.listBackups === 'function' ? await store.listBackups() : []
+      return { backups: list }
+    },
+    'backups.create'(params) {
+      if (typeof store?.backup !== 'function') throw createError('UNSUPPORTED', '当前存储引擎不支持备份')
+      return store.backup(params?.tag ?? 'manual')
+    },
+    async 'backups.restore'(params) {
+      if (typeof store?.restore !== 'function') throw createError('UNSUPPORTED', '当前存储引擎不支持恢复')
+      const result = await store.restore(String(params?.name ?? ''))
+      await engine().reload()
+      return result
+    },
+    'graph.neighbors'(params) {
+      const id = String(params?.id ?? '')
+      const depth = Math.max(1, Math.min(3, Number(params?.depth ?? 2) || 2))
+      const minWeight = Math.max(0, Math.min(1, Number(params?.minWeight ?? 0.5) || 0.5))
+      const seen = new Set([id])
+      const out = []
+      let frontier = [{ id, depth: 0, relevance: 1 }]
+      for (let level = 0; level < depth; level += 1) {
+        const next = []
+        for (const node of frontier) {
+          for (const neighbor of engine().graphNeighbors(node.id, { minWeight })) {
+            if (seen.has(neighbor.id)) continue
+            seen.add(neighbor.id)
+            const relevance = node.relevance * neighbor.weight
+            out.push({ ...neighbor, depth: level + 1, relevance })
+            next.push({ id: neighbor.id, depth: level + 1, relevance })
+          }
+        }
+        frontier = next
+        if (frontier.length === 0) break
+      }
+      return { id, neighbors: out }
+    },
+    async 'data.import'(params) {
+      const result = await engine().importData(params?.data ?? params ?? {}, params?.mode === 'replace' ? 'replace' : 'merge')
       return { ...result, stats: engine().stats() }
     },
   }
@@ -147,7 +254,7 @@ function notFound(id) {
 export function mountApi(webServer, engineAccessor, log, options = {}) {
   // 既接受引擎实例（测试里直接传），也接受取值函数（运行时用来跨代取到最新引擎）。
   const engineOf = typeof engineAccessor === 'function' ? engineAccessor : () => engineAccessor
-  const methods = createMethods(engineOf)
+  const methods = createMethods(engineOf, { store: options.store, startedAt: options.startedAt })
   const basePath = typeof options.path === 'string' && options.path !== '' ? options.path : API_PATH
   return webServer.register({
     kind: 'prefix',
@@ -264,4 +371,10 @@ export function sendJson(res, status, payload) {
 }
 
 export { LAYERS, NOTEBOOKS, clone }
+
+
+
+
+
+
 

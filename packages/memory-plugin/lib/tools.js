@@ -190,7 +190,7 @@ export function registerTools(ctx, engine, log) {
     },
     output: writeOutput,
     async execute(args, exec) {
-      const item = engine.createItem({
+      const item = await engine.createItem({
         ...args,
         sessionId: sessionIdOf(exec),
       }, 'agent')
@@ -214,7 +214,7 @@ export function registerTools(ctx, engine, log) {
     },
     output: searchOutput,
     async execute(args) {
-      const result = engine.searchItems(args ?? {})
+      const result = await engine.searchItems(args ?? {})
       return { ...result, items: result.items.map(toToolItem) }
     },
   })
@@ -256,7 +256,7 @@ export function registerTools(ctx, engine, log) {
     output: updateOutput,
     async execute(args) {
       const { id, ...patch } = args ?? {}
-      const item = engine.updateItem(String(id ?? ''), patch, 'agent')
+      const item = await engine.updateItem(String(id ?? ''), patch, 'agent')
       return { item: toToolItem(item) }
     },
   })
@@ -273,7 +273,7 @@ export function registerTools(ctx, engine, log) {
     },
     output: deleteOutput,
     async execute(args) {
-      return engine.deleteItems(args?.ids ?? [], 'agent')
+      return await engine.deleteItems(args?.ids ?? [], 'agent')
     },
   })
 
@@ -354,5 +354,7 @@ function sessionIdOf(exec) {
 }
 
 export { TOOL_NAMES }
+
+
 
 

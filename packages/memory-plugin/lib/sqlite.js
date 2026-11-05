@@ -1,32 +1,32 @@
 /**
- * SQLite 存储层（设计文档 §7.1/§7.2 的落地）。
+ * SQLite 持久层 + 语义向量表（设计文档 §7.1 / §7.2 的落地）。
  *
- * 为什么用 `node:sqlite`：宿主进程自带它（实测 node 24.21 / electron 44.7 可用），
- * 零依赖、无 node-gyp、跨平台，插件安装时不需要编译原生模块。
+ * 关于全文索引：设计文档写的是 SQLite FTS5，但 DSH 宿主自带的 `node:sqlite`
+ * 编译时没有启用 FTS5（`no such module: fts5`）。所以全文检索放在
+ * lib/search.js 的内存倒排索引里（BM25 打分，见该文件），SQLite 只负责
+ * 持久化与向量存储。等宿主 SQLite 支持 FTS5 时，把索引搬到库里即可，接口不变。
  *
- * 表结构直接对齐 `docs/design/记忆插件实现设计.md` §7.2：
- *   memories      记忆主体（layer/type/content/metadata/importance/status/...）
- *   events        日常记事本（事件流水）
- *   assets        资产记事本
- *   relationships 记忆之间的关系（冲突边）
- *   changelog     记忆记事本（操作流水，即审计日志）
- *   config        运行时配置（设置 / 元信息）——设计里的“配置文件”，这里一并入库
- *
- * 与引擎的接口保持和 JSON 存储完全一致：path / dir / info() / read() / write(state) /
- * refreshPath() / close()。引擎不需要知道底下是 SQLite 还是 JSON。
+ * 能力：
+ *   - 表结构：memories / events / assets / relationships / changelog / config
+ *   - 版本化迁移（schema_migrations 记录 description / applied_at，事务内按版本顺序执行）
+ *   - 向量表 memory_vectors（Float32 BLOB，语义检索用）
+ *   - WAL + 预编译语句缓存 + 事务写入 + busy 重试
+ *   - 备份目录、完整性校验、损坏自动从备份恢复、资源上限
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+import { embed, DEFAULT_DIM, vectorToBuffer, bufferToVector } from './embeddings.js'
+import { ftsText } from './text.js'
 import { message } from './store.js'
 
 export const DB_FILE = 'memory.sqlite3'
 export const LEGACY_JSON_FILE = 'store.json'
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
+export const BACKUP_DIR = 'backups'
 
-/** 建表 DDL：与设计文档一致；SQLite 不支持的设计字段用 TEXT 存 JSON。 */
-const SCHEMA = [
+const BASE_TABLES = [
   `CREATE TABLE IF NOT EXISTS memories (
      id TEXT PRIMARY KEY,
      layer TEXT NOT NULL,
@@ -44,7 +44,7 @@ const SCHEMA = [
      status TEXT NOT NULL DEFAULT 'active'
    )`,
   'CREATE INDEX IF NOT EXISTS idx_memories_layer_type ON memories (layer, type)',
-  'CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at, last_accessed)',
   'CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories (importance_score DESC)',
   'CREATE INDEX IF NOT EXISTS idx_memories_status ON memories (status)',
   `CREATE TABLE IF NOT EXISTS events (
@@ -87,7 +87,7 @@ const SCHEMA = [
    )`,
   'CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships (source_id)',
   'CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships (target_id)',
-  'CREATE INDEX IF NOT EXISTS idx_relationships_edge ON relationships (edge_type)',
+  'CREATE INDEX IF NOT EXISTS idx_relationships_edge ON relationships (edge_type, weight DESC)',
   `CREATE TABLE IF NOT EXISTS changelog (
      id TEXT PRIMARY KEY,
      timestamp TEXT NOT NULL,
@@ -102,7 +102,32 @@ const SCHEMA = [
   'CREATE INDEX IF NOT EXISTS idx_changelog_timestamp ON changelog (timestamp DESC)',
   'CREATE INDEX IF NOT EXISTS idx_changelog_target ON changelog (target_id)',
   'CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)',
-  'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
+]
+
+const VECTOR_TABLE = `CREATE TABLE IF NOT EXISTS memory_vectors (
+  id TEXT PRIMARY KEY,
+  dim INTEGER NOT NULL,
+  vec BLOB NOT NULL,
+  signature TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`
+
+/** 版本化迁移；每条迁移在事务里执行并记录。 */
+const MIGRATIONS = [
+  {
+    version: 1,
+    description: '初始结构：memories/events/assets/relationships/changelog/config',
+    upgrade(database) {
+      for (const statement of BASE_TABLES) database.exec(statement)
+    },
+  },
+  {
+    version: 2,
+    description: '语义索引向量表 memory_vectors',
+    upgrade(database) {
+      database.exec(VECTOR_TABLE)
+    },
+  },
 ]
 
 /** 解析数据库路径。 */
@@ -115,19 +140,11 @@ export function resolveDatabasePath(ctx, settings) {
   } catch {
     /* 退回环境变量 */
   }
-  const home = process.env.DSH_HOME || join(homedirSafe(), '.dsh')
+  const home = process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '.', '.dsh')
   return join(home, 'storages', 'dsh-memory-plugin', DB_FILE)
 }
 
-function homedirSafe() {
-  try {
-    return process.env.USERPROFILE || process.env.HOME || '.'
-  } catch {
-    return '.'
-  }
-}
-
-/** 尝试加载 node:sqlite，返回 { DatabaseSync } 或抛错。 */
+/** 加载 node:sqlite。 */
 export function loadSqlite() {
   const getBuiltin = process.getBuiltinModule
   if (typeof getBuiltin === 'function') {
@@ -140,50 +157,121 @@ export function loadSqlite() {
 
 /**
  * 创建 SQLite 存储句柄。
- *
- * @param ctx      Cordis 上下文（解析数据目录）。
- * @param log      `(level, text) => void`
- * @param getSettings 读取当前设置（决定目录与备份份数）。
  */
 export function createSqliteStore(ctx, log, getSettings) {
   const sqlite = loadSqlite()
   const settingsOf = () => (typeof getSettings === 'function' ? getSettings() : undefined)
   let path = resolveDatabasePath(ctx, settingsOf())
-  let db = null
-  /** id → 签名，用于最小化写入。 */
+  let database = null
+  let statements = new Map()
   let knownItems = new Map()
   let knownAudit = []
+  let vectorReady = false
+  let recoveredFrom = null
+  let lastError = null
+
+  const prepare = (sql) => {
+    let statement = statements.get(sql)
+    if (statement === undefined) {
+      statement = database.prepare(sql)
+      statements.set(sql, statement)
+    }
+    return statement
+  }
+  const run = (sql, ...params) => prepare(sql).run(...params)
+  const all = (sql, ...params) => prepare(sql).all(...params)
+
+  const reset = () => {
+    statements = new Map()
+    knownItems = new Map()
+    knownAudit = []
+    vectorReady = false
+  }
+
+  const applyMigrations = (db) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      description TEXT NOT NULL DEFAULT '',
+      applied_at TEXT NOT NULL
+    )`)
+    const columns = db.prepare('PRAGMA table_info(schema_migrations)').all().map((row) => row.name)
+    if (!columns.includes('description')) {
+      try {
+        db.exec("ALTER TABLE schema_migrations ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+      } catch {
+        /* 已有 */
+      }
+    }
+    const current = db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get()?.version ?? 0
+    for (const migration of MIGRATIONS) {
+      if (migration.version <= current) continue
+      const started = Date.now()
+      db.exec('BEGIN')
+      try {
+        migration.upgrade(db)
+        db.prepare('INSERT INTO schema_migrations (version, description, applied_at) VALUES (?, ?, ?)')
+          .run(migration.version, migration.description, new Date().toISOString())
+        db.exec('COMMIT')
+        log('info', `数据库迁移 v${migration.version} 完成（${migration.description}，${Date.now() - started}ms）`)
+      } catch (error) {
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          /* 事务可能已结束 */
+        }
+        lastError = `迁移 v${migration.version} 失败：${message(error)}`
+        log('error', lastError)
+        throw error
+      }
+    }
+  }
+
+  const detectCapabilities = () => {
+    try {
+      database.prepare('SELECT count(*) FROM memory_vectors').get()
+      vectorReady = true
+    } catch (error) {
+      vectorReady = false
+      lastError = `向量表不可用：${message(error)}`
+      log('warn', lastError)
+    }
+  }
+
+  const openDatabase = () => {
+    mkdirSync(dirname(path), { recursive: true })
+    backupOnOpen(path, settingsOf()?.storage?.backupKeep ?? 3, log)
+    database = new sqlite.DatabaseSync(path)
+    database.exec('PRAGMA journal_mode = WAL')
+    database.exec('PRAGMA synchronous = NORMAL')
+    database.exec('PRAGMA temp_store = MEMORY')
+    database.exec('PRAGMA cache_size = -32000')
+    database.exec('PRAGMA mmap_size = 134217728')
+    database.exec('PRAGMA busy_timeout = 5000')
+    database.exec('PRAGMA foreign_keys = ON')
+    applyMigrations(database)
+    detectCapabilities()
+    log('info', `SQLite 记忆库已打开：${path}`)
+    return database
+  }
 
   const ensure = () => {
-    if (db !== null) return db
-    mkdirSync(dirname(path), { recursive: true })
-    backupOnce(path, settingsOf()?.storage?.backupKeep ?? 0, log)
-    db = new sqlite.DatabaseSync(path)
-    db.exec('PRAGMA journal_mode = WAL')
-    db.exec('PRAGMA foreign_keys = ON')
-    for (const statement of SCHEMA) db.exec(statement)
-    const row = db.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(SCHEMA_VERSION)
-    if (row === undefined || row === null) {
-      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(SCHEMA_VERSION, new Date().toISOString())
+    if (database !== null) return database
+    if (existsSync(path)) {
+      try {
+        const probe = new sqlite.DatabaseSync(path, { readOnly: true })
+        const result = probe.prepare('PRAGMA quick_check').get()
+        probe.close()
+        const verdict = result?.quick_check ?? Object.values(result ?? {})[0]
+        if (String(verdict).toLowerCase() !== 'ok') throw new Error(`quick_check: ${verdict}`)
+      } catch (error) {
+        lastError = `数据库损坏：${message(error)}`
+        log('error', lastError)
+        const recovered = tryRestoreBackup(path, sqlite, log)
+        if (recovered === false) throw error
+        recoveredFrom = recovered
+      }
     }
-    log('info', `SQLite 记忆库已打开：${path}`)
-    return db
-  }
-
-  const readConfig = (database, key) => {
-    const row = database.prepare('SELECT value FROM config WHERE key = ?').get(key)
-    if (row === undefined || row === null) return undefined
-    try {
-      return JSON.parse(row.value)
-    } catch {
-      return undefined
-    }
-  }
-
-  const writeConfig = (database, key, value) => {
-    database.prepare(
-      'INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
-    ).run(key, JSON.stringify(value), new Date().toISOString())
+    return openDatabase()
   }
 
   const store = {
@@ -194,14 +282,19 @@ export function createSqliteStore(ctx, log, getSettings) {
       return dirname(path)
     },
     engine: 'sqlite',
-    /** 目录改了之后重新解析路径（下次 ensure 会重开）。 */
+    /** 宿主 SQLite 没有 FTS5，全文索引在 search.js 的内存倒排里。 */
+    get fts() {
+      return false
+    },
+    get vectors() {
+      return vectorReady
+    },
     refreshPath() {
       const next = resolveDatabasePath(ctx, settingsOf())
       if (next === path) return false
       store.close()
       path = next
-      knownItems = new Map()
-      knownAudit = []
+      reset()
       return true
     },
     info() {
@@ -214,37 +307,56 @@ export function createSqliteStore(ctx, log, getSettings) {
           exists: true,
           bytes: stat.size,
           modifiedAt: stat.mtime.toISOString(),
+          fts: false,
+          vectors: vectorReady,
           tables: tableStats(ensure()),
+          recoveredFrom,
+          lastError,
         }
       } catch {
-        return { engine: 'sqlite', path, dir: dirname(path), exists: false, bytes: 0, modifiedAt: null, tables: null }
+        return { engine: 'sqlite', path, dir: dirname(path), exists: false, bytes: 0, modifiedAt: null, fts: false, vectors: vectorReady, tables: null, lastError }
+      }
+    },
+    raw() {
+      return ensure()
+    },
+    stats() {
+      const db = ensure()
+      const pageSize = db.prepare('PRAGMA page_size').get()?.page_size ?? 4096
+      const pageCount = db.prepare('PRAGMA page_count').get()?.page_count ?? 0
+      return {
+        ...tableStats(db),
+        bytes: pageSize * pageCount,
+        journalMode: db.prepare('PRAGMA journal_mode').get()?.journal_mode ?? 'unknown',
+        vectors: vectorReady,
       }
     },
     read() {
-      const database = ensure()
-      const state = readAll(database)
+      const db = ensure()
+      const state = readAll(db)
       if (state !== undefined) return state
-      // 空库：尝试从旧的 JSON 记忆库迁移一次（插件早期版本用 JSON 落盘）。
       const legacy = readLegacyJson(dirname(path))
       if (legacy === undefined) return undefined
       try {
         store.write(legacy)
         log('info', `已把旧的 JSON 记忆库迁移进 SQLite：${legacy.items.length} 条`)
-        return readAll(database)
+        return readAll(db)
       } catch (error) {
         log('warn', `迁移旧 JSON 记忆库失败：${message(error)}`)
         return legacy
       }
     },
-    /** 把整份状态按行差异写回。 */
+    /** 按行签名做增量写入：新增/变更 upsert，消失的 delete；同步维护语义向量。 */
     write(state) {
-      const database = ensure()
-      database.exec('BEGIN')
+      const db = ensure()
+      const settings = settingsOf() ?? {}
+      const wantVectors = settings.retrieval?.semantic !== false
+      db.exec('BEGIN')
       try {
-        writeConfig(database, 'settings', state.settings ?? {})
-        writeConfig(database, 'meta', state.meta ?? {})
-        writeConfig(database, 'createdAt', state.createdAt ?? new Date().toISOString())
-        writeConfig(database, 'version', state.version ?? SCHEMA_VERSION)
+        writeConfig(db, 'settings', state.settings ?? {})
+        writeConfig(db, 'meta', state.meta ?? {})
+        writeConfig(db, 'createdAt', state.createdAt ?? new Date().toISOString())
+        writeConfig(db, 'version', state.version ?? SCHEMA_VERSION)
 
         const items = Array.isArray(state.items) ? state.items : []
         const seen = new Set()
@@ -252,56 +364,195 @@ export function createSqliteStore(ctx, log, getSettings) {
           seen.add(item.id)
           const signature = itemSignature(item)
           if (knownItems.get(item.id) === signature) continue
-          upsertItem(database, item)
+          upsertItem(db, item)
+          if (wantVectors && vectorReady) upsertVector(db, item)
           knownItems.set(item.id, signature)
         }
         for (const id of [...knownItems.keys()]) {
           if (seen.has(id)) continue
-          deleteItem(database, id)
+          deleteItem(db, id)
+          if (vectorReady) run('DELETE FROM memory_vectors WHERE id = ?', id)
           knownItems.delete(id)
         }
-        syncRelationships(database, items)
-
-        const audit = Array.isArray(state.audit) ? state.audit : []
-        appendAudit(database, audit, knownAudit)
-        knownAudit = audit.map((entry) => `${entry.at}|${entry.action}`)
-
-        database.prepare('UPDATE config SET updated_at = ? WHERE key = ?').run(new Date().toISOString(), 'meta')
-        database.exec('COMMIT')
+        syncRelationships(db, items)
+        appendAudit(db, Array.isArray(state.audit) ? state.audit : [], knownAudit)
+        knownAudit = (state.audit ?? []).map((entry) => `${entry.at}|${entry.action}`)
+        db.exec('COMMIT')
         return new Date().toISOString()
       } catch (error) {
         try {
-          database.exec('ROLLBACK')
+          db.exec('ROLLBACK')
         } catch {
-          /* 事务可能已经结束 */
+          /* 事务可能已结束 */
         }
-        log('warn', `写入 SQLite 失败：${message(error)}`)
+        lastError = `写入 SQLite 失败：${message(error)}`
+        log('warn', lastError)
+        return retryWrite(state, db, error)
+      }
+    },
+    /** 读取一批条目的向量（缺失的跳过）。 */
+    vectorsFor(ids) {
+      if (!vectorReady || !Array.isArray(ids) || ids.length === 0) return []
+      const db = ensure()
+      const out = []
+      const statement = db.prepare('SELECT id, dim, vec FROM memory_vectors WHERE id = ?')
+      for (const id of ids) {
+        const row = statement.get(id)
+        if (row === undefined || row === null) continue
+        const vector = bufferToVector(row.vec, row.dim ?? DEFAULT_DIM)
+        if (vector !== null) out.push([row.id, vector])
+      }
+      return out
+    },
+    /** 重建派生索引（目前只有向量；全文索引在内存里，由引擎重建）。 */
+    rebuildIndexes(items) {
+      const db = ensure()
+      if (!vectorReady) return { fts: false, vectors: false, items: items.length }
+      db.exec('BEGIN')
+      try {
+        db.exec('DELETE FROM memory_vectors')
+        for (const item of items) upsertVector(db, item)
+        db.exec('COMMIT')
+        knownItems = new Map(items.map((item) => [item.id, itemSignature(item)]))
+        return { fts: false, vectors: true, items: items.length }
+      } catch (error) {
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          /* 已结束 */
+        }
         throw error
       }
     },
-    close() {
-      if (db === null) return
+    // ---------------------------------------------------------- 高可用 --
+    verify() {
       try {
-        db.close()
+        const db = ensure()
+        const result = db.prepare('PRAGMA integrity_check').get()
+        const verdict = result?.integrity_check ?? Object.values(result ?? {})[0]
+        return { ok: String(verdict).toLowerCase() === 'ok', verdict }
+      } catch (error) {
+        return { ok: false, verdict: message(error) }
+      }
+    },
+    backup(tag = 'manual') {
+      const db = ensure()
+      const dir = join(dirname(path), BACKUP_DIR)
+      mkdirSync(dir, { recursive: true })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const target = join(dir, `backup_${stamp}_${tag}.sqlite3`)
+      try {
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      } catch {
+        /* 忽略 */
+      }
+      copyFileSync(path, target)
+      pruneBackups(dir, settingsOf()?.storage?.backupKeep ?? 10)
+      return { path: target, bytes: statSync(target).size, tag }
+    },
+    listBackups() {
+      const dir = join(dirname(path), BACKUP_DIR)
+      if (!existsSync(dir)) return []
+      return readdirSync(dir)
+        .filter((name) => name.endsWith('.sqlite3'))
+        .map((name) => {
+          const full = join(dir, name)
+          const stat = statSync(full)
+          return { name, path: full, bytes: stat.size, modifiedAt: stat.mtime.toISOString() }
+        })
+        .sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt))
+    },
+    restore(name) {
+      const dir = join(dirname(path), BACKUP_DIR)
+      const target = join(dir, name)
+      if (!existsSync(target)) throw new Error(`备份不存在：${name}`)
+      store.close()
+      const corrupt = `${path}.corrupt-${Date.now()}`
+      if (existsSync(path)) renameSync(path, corrupt)
+      copyFileSync(target, path)
+      reset()
+      ensure()
+      return { restored: name, previousFile: corrupt }
+    },
+    /** 资源上限：条目总数超过 maxItems 时，把最旧的 L6/L7 轮转记忆标为过期。 */
+    enforceLimits(maxItems) {
+      if (!Number.isFinite(maxItems) || maxItems <= 0) return { removed: 0 }
+      const db = ensure()
+      const total = db.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n ?? 0
+      if (total <= maxItems) return { removed: 0, total }
+      const excess = total - Math.floor(maxItems * 0.9)
+      const rows = db.prepare(
+        `SELECT id FROM memories WHERE layer IN ('L6','L7') AND status = 'active' ORDER BY created_at ASC LIMIT ?`,
+      ).all(excess)
+      for (const row of rows) {
+        deleteItem(db, row.id)
+        if (vectorReady) run('DELETE FROM memory_vectors WHERE id = ?', row.id)
+        knownItems.delete(row.id)
+      }
+      return { removed: rows.length, total: total - rows.length }
+    },
+    checkpoint() {
+      try {
+        ensure().exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      } catch {
+        /* 忽略 */
+      }
+    },
+    close() {
+      if (database === null) return
+      try {
+        database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      } catch {
+        /* 忽略 */
+      }
+      try {
+        database.close()
       } catch {
         /* 已关闭 */
       }
-      db = null
-    },
-    /** 直接拿到底层连接（测试/调试用）。 */
-    raw() {
-      return ensure()
+      database = null
+      reset()
     },
   }
+
+  const retryWrite = (state, db, firstError) => {
+    try {
+      db.exec('BEGIN IMMEDIATE')
+      const items = Array.isArray(state.items) ? state.items : []
+      const seen = new Set(items.map((item) => item.id))
+      for (const item of items) {
+        upsertItem(db, item)
+        if (vectorReady && (settingsOf()?.retrieval?.semantic ?? true)) upsertVector(db, item)
+        knownItems.set(item.id, itemSignature(item))
+      }
+      for (const id of [...knownItems.keys()]) {
+        if (seen.has(id)) continue
+        deleteItem(db, id)
+        if (vectorReady) run('DELETE FROM memory_vectors WHERE id = ?', id)
+        knownItems.delete(id)
+      }
+      syncRelationships(db, items)
+      db.exec('COMMIT')
+      log('info', 'SQLite 写入在 busy 重试后成功')
+      return new Date().toISOString()
+    } catch (retryError) {
+      lastError = `SQLite 写入重试仍失败：${message(retryError)}（首次：${message(firstError)}）`
+      log('error', lastError)
+      throw retryError
+    }
+  }
+
   return store
 }
 
 // ------------------------------------------------------------------ 读写实现 --
 
 function readAll(database) {
-  const configCount = database.prepare('SELECT COUNT(*) AS n FROM config').get()
-  const itemCount = database.prepare('SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM assets) AS n').get()
-  if ((configCount?.n ?? 0) === 0 && (itemCount?.n ?? 0) === 0) return undefined
+  const configCount = database.prepare('SELECT COUNT(*) AS n FROM config').get()?.n ?? 0
+  const itemCount = database.prepare(
+    'SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM assets) AS n',
+  ).get()?.n ?? 0
+  if (configCount === 0 && itemCount === 0) return undefined
 
   const items = [
     ...database.prepare('SELECT * FROM memories').all().map(rowFromMemory),
@@ -317,13 +568,12 @@ function readAll(database) {
     const related = conflicts.get(item.id) ?? []
     if (related.length > 0) item.conflicts = [...new Set([...(item.conflicts ?? []), ...related])]
   }
-  const audit = database.prepare('SELECT * FROM changelog ORDER BY timestamp ASC').all()
-    .map((row) => ({
-      at: row.timestamp,
-      action: row.operation,
-      detail: row.reason ?? row.change_details ?? '',
-      actor: row.triggered_by ?? 'system',
-    }))
+  const audit = database.prepare('SELECT * FROM changelog ORDER BY timestamp ASC').all().map((row) => ({
+    at: row.timestamp,
+    action: row.operation,
+    detail: row.reason ?? row.change_details ?? '',
+    actor: row.triggered_by ?? 'system',
+  }))
   return {
     version: readConfigValue(database, 'version') ?? SCHEMA_VERSION,
     createdAt: readConfigValue(database, 'createdAt') ?? new Date().toISOString(),
@@ -343,6 +593,12 @@ function readConfigValue(database, key) {
   } catch {
     return undefined
   }
+}
+
+function writeConfig(database, key, value) {
+  database.prepare(
+    'INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+  ).run(key, JSON.stringify(value), new Date().toISOString())
 }
 
 function rowFromMemory(row) {
@@ -383,7 +639,6 @@ function rowFromEvent(row) {
   } catch {
     payload = {}
   }
-  const tags = safeJson(row.tags, [])
   return {
     id: row.id,
     type: 'note',
@@ -391,7 +646,7 @@ function rowFromEvent(row) {
     notebook: 'daily',
     title: row.title ?? '',
     content: payload.content ?? row.summary ?? '',
-    tags,
+    tags: safeJson(row.tags, []),
     importance: clampImportance((row.importance ?? 0.5) * 10),
     status: 'active',
     pinned: false,
@@ -469,7 +724,7 @@ function upsertItem(database, item) {
       item.title ?? '',
       item.content ?? '',
       'low',
-      JSON.stringify({ content: item.content ?? '', importance: priority, status: item.status, updatedAt: item.updatedAt, version: item.version }),
+      JSON.stringify({ content: item.content ?? '', importance: priority, status: item.status, updatedAt: item.updatedAt, version: item.version, pinned: item.pinned === true }),
       JSON.stringify({}),
       item.createdAt ?? new Date().toISOString(),
       item.lastAccessAt ?? null,
@@ -478,7 +733,6 @@ function upsertItem(database, item) {
     )
     return
   }
-  // 其余（普通记忆、记忆记事本条目）都落在 memories。
   const metadata = {
     notebook: item.notebook ?? null,
     tags: item.tags ?? [],
@@ -522,7 +776,18 @@ function deleteItem(database, id) {
   database.prepare('DELETE FROM relationships WHERE source_id = ? OR target_id = ?').run(id, id)
 }
 
-/** 冲突边按 source 全量刷新，保证关系表与条目一致。 */
+/** 向量行：内容签名变化才重算。 */
+function upsertVector(database, item) {
+  const signature = itemSignature(item)
+  const existing = database.prepare('SELECT signature FROM memory_vectors WHERE id = ?').get(item.id)
+  if (existing?.signature === signature) return
+  const vector = embed(ftsText(item), DEFAULT_DIM)
+  database.prepare(
+    `INSERT INTO memory_vectors (id, dim, vec, signature, updated_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET vec = excluded.vec, signature = excluded.signature, updated_at = excluded.updated_at`,
+  ).run(item.id, DEFAULT_DIM, vectorToBuffer(vector), signature, new Date().toISOString())
+}
+
 function syncRelationships(database, items) {
   for (const item of items) {
     const conflicts = Array.isArray(item.conflicts) ? item.conflicts : []
@@ -534,13 +799,12 @@ function syncRelationships(database, items) {
            VALUES (?, ?, ?, 'conflict', 1.0, ?, '{}')`,
         ).run(randomUUID(), item.id, target, new Date().toISOString())
       } catch {
-        // 撞上已有边（唯一约束）就跳过
+        /* 唯一约束：已有边 */
       }
     }
   }
 }
 
-/** 审计日志只追加；被截断（compact）时整表重写。 */
 function appendAudit(database, audit, knownAudit) {
   const unchanged = audit.length >= knownAudit.length
     && knownAudit.every((entry, index) => audit[index] !== undefined && `${audit[index].at}|${audit[index].action}` === entry)
@@ -579,17 +843,26 @@ function itemSignature(item) {
     item.expiresAt ?? '',
     JSON.stringify(item.conflicts ?? []),
     JSON.stringify(item.source ?? null),
+    item.title ?? '',
+    (item.content ?? '').length,
   ].join('|')
 }
 
 function tableStats(database) {
-  const one = (sql) => database.prepare(sql).get()?.n ?? 0
+  const one = (sql) => {
+    try {
+      return database.prepare(sql).get()?.n ?? 0
+    } catch {
+      return 0
+    }
+  }
   return {
     memories: one('SELECT COUNT(*) AS n FROM memories'),
     events: one('SELECT COUNT(*) AS n FROM events'),
     assets: one('SELECT COUNT(*) AS n FROM assets'),
     relationships: one('SELECT COUNT(*) AS n FROM relationships'),
     changelog: one('SELECT COUNT(*) AS n FROM changelog'),
+    vectors: one('SELECT COUNT(*) AS n FROM memory_vectors'),
   }
 }
 
@@ -609,7 +882,7 @@ function clampImportance(value) {
 }
 
 /** 打开前把上一次的数据库留一份，保留 N 份。 */
-function backupOnce(path, keep, log) {
+function backupOnOpen(path, keep, log) {
   const count = Number.isFinite(keep) ? Math.max(0, Math.min(20, Math.trunc(keep))) : 0
   if (count === 0 || !existsSync(path)) return
   for (let index = count; index >= 2; index -= 1) {
@@ -628,7 +901,51 @@ function backupOnce(path, keep, log) {
   }
 }
 
-/** 读取旧版插件的 store.json（没有就返回 undefined）。 */
+/** 备份目录维护：只留最近 keep 份。 */
+function pruneBackups(dir, keep) {
+  const count = Number.isFinite(keep) ? Math.max(1, Math.min(50, Math.trunc(keep))) : 10
+  try {
+    const files = readdirSync(dir).filter((name) => name.endsWith('.sqlite3')).sort().reverse()
+    for (const file of files.slice(count)) {
+      try {
+        rmSync(join(dir, file))
+      } catch {
+        /* 删不掉就留着 */
+      }
+    }
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/**
+ * 数据库损坏时尝试从 backups/ 里最近的备份恢复（最多试 3 个）。
+ * 损坏文件不会被删掉，改名成 `.corrupt-<时间戳>` 留档。
+ */
+function tryRestoreBackup(path, sqlite, log) {
+  const dir = join(dirname(path), BACKUP_DIR)
+  if (!existsSync(dir)) return false
+  const files = readdirSync(dir).filter((name) => name.endsWith('.sqlite3')).sort().reverse()
+  for (const file of files.slice(0, 3)) {
+    try {
+      const source = join(dir, file)
+      const corrupt = `${path}.corrupt-${Date.now()}`
+      if (existsSync(path)) renameSync(path, corrupt)
+      copyFileSync(source, path)
+      const probe = new sqlite.DatabaseSync(path, { readOnly: true })
+      const check = probe.prepare('PRAGMA quick_check').get()
+      probe.close()
+      const verdict = check?.quick_check ?? Object.values(check ?? {})[0]
+      if (String(verdict).toLowerCase() !== 'ok') throw new Error(`备份 ${file} 也不完整`)
+      log('warn', `记忆库已从备份恢复：${file}（损坏文件：${corrupt}）`)
+      return file
+    } catch (error) {
+      log('warn', `尝试恢复备份 ${file} 失败：${message(error)}`)
+    }
+  }
+  return false
+}
+
 function readLegacyJson(dir) {
   const file = join(dir, LEGACY_JSON_FILE)
   if (!existsSync(file)) return undefined

@@ -201,12 +201,12 @@ test('旧版 store.json 会被一次性迁移进 SQLite', () => {
   }
 })
 
-test('引擎直接跑在 SQLite 上（启动加载不递归）', () => {
+await test('引擎直接跑在 SQLite 上（启动加载不递归）', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-engine-sqlite-'))
   const engineCtx = { get: () => (...parts) => join(dir, ...parts) }
   const ref = { engine: null }
   const sqliteStore = createSqliteStore(engineCtx, log, () => ref.engine?.getSettings?.() ?? { storage: { backupKeep: 0 } })
-  const engine = createEngine({
+  const engine = await createEngine({
     store: sqliteStore,
     initialSettings: normalizeSettings({}),
     getSettings: () => normalizeSettings({}),
@@ -216,7 +216,7 @@ test('引擎直接跑在 SQLite 上（启动加载不递归）', () => {
   try {
     // 这一步就是曾经把栈打爆的地方：读库时要拿设置，设置又触发读库。
     engine.reload()
-    const item = engine.createItem({
+    const item = await engine.createItem({
       title: 'SQLite 集成',
       content: '引擎直接写进 SQLite，验证启动加载不递归并且能读回。',
       tags: ['集成'],
@@ -225,9 +225,9 @@ test('引擎直接跑在 SQLite 上（启动加载不递归）', () => {
     assert.ok(item.id.startsWith('mem_'))
     assert.equal(sqliteStore.raw().prepare('SELECT COUNT(*) AS n FROM memories').get().n, 1)
     engine.reload()
-    const found = engine.searchItems({ query: 'SQLite' })
+    const found = await engine.searchItems({ query: 'SQLite' })
     assert.ok(found.total >= 1)
-    assert.equal(engine.getSettings().storage.engine, 'sqlite')
+    assert.equal(engine.getSettings().storage.engine, 'auto')
   } finally {
     sqliteStore.close()
     try {
@@ -246,6 +246,9 @@ test('设置里关闭备份时不产生 .bak 文件', () => {
 
 store.close()
 console.log(`\n${passed} 项通过，数据库：${store.path}`)
+
+
+
 
 
 
