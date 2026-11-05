@@ -1,7 +1,7 @@
 # 记忆插件（dsh-memory-plugin）
 
 给 DeepSeek Harness（DSH）加一套**跨会话的长期记忆**：八层记忆体系 + 三本记事本 + 混合检索 + 自动维护，
-并带一个装在设置页里的可视化界面。
+并带一个**左侧栏「记忆」图标直接打开的整页界面**（设置页入口也保留）。
 
 它不是「一个 JS 文件把数据塞进 JSON」：检索与持久化由独立的 Go 服务承担（SQLite + FTS5 + 图谱），
 批量数学由 Rust 原生核心承担，Node 只做插件宿主该做的控制层。
@@ -10,7 +10,7 @@
 
 | 层 | 语言 / 产物 | 职责 |
 | --- | --- | --- |
-| 控制层 | Node.js（宿主进程） | 插件入口 `apply(ctx)`、6 个 agent 工具、系统提示词注入、设置页 HTTP 接口、维护与备份的编排、原生组件缺失时的降级 |
+| 控制层 | Node.js（宿主进程） | 插件入口 `apply(ctx)`、6 个 agent 工具、系统提示词注入、界面 HTTP 接口、维护与备份的编排、原生组件缺失时的降级 |
 | 服务层 | Go → `packages/memory-plugin/bin/win32-x64/memory-service.exe` | SQLite 持久化、FTS5（bm25）全文检索、向量余弦、关系图谱 BFS、审计/备份/完整性校验、优雅退出 |
 | 计算核心 | Rust → `packages/memory-plugin/native/win32-x64/memory-core.exe` | 批量余弦、重要性评分、去重/相似度（JSON lines over stdio） |
 
@@ -54,7 +54,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\win32-x64\` 再运�
 | 自动维护 | 资源上限 / 过期清理 / 轮转归档 / 去重 / 反思提升 / 审计压缩，按设置的间隔自动跑，也可手动触发 |
 | 数据安全 | WAL + 版本化迁移、完整性校验、定时与手动备份、备份恢复、导出/导入 |
 | 提示词注入 | 每轮把最相关的若干条记忆拼进系统提示词，可预览、可关闭 |
-| 可视化界面 | 设置页一页搞定：列表 + 搜索 + 编辑器 + 全部设置项 + 维护 + 备份 + 审计 |
+| 可视化界面 | 左侧栏「记忆」图标打开整页：列表 + 搜索 + 编辑器 + 全部设置项 + 维护 + 备份 + 审计（设置页入口保留） |
 
 ## 仓库结构
 
@@ -69,7 +69,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\win32-x64\` 再运�
 ├─ native/memory-core/   # Rust 计算核心源码（cargo 工程）
 ├─ packages/memory-plugin/
 │  ├─ index.js           # 宿主入口：工具 / 提示词 / 维护定时器 / 接口挂载 / 组件生命周期
-│  ├─ client.js          # 客户端设置页（无构建，React.createElement）
+│  ├─ client.js          # 客户端界面（侧边栏整页 + 设置页，无构建，React.createElement）
 │  ├─ lib/
 │  │  ├─ go-store.js     # Go 服务客户端：spawn、握手、增量同步、检索、备份、关闭
 │  │  ├─ storage.js      # 存储选择：Go → Node SQLite → JSON

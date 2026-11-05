@@ -20,7 +20,7 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 | 文件 | 作用 |
 | --- | --- |
 | `index.js` | 宿主入口：注册 6 个工具、系统提示词段落、定时维护/自动备份、挂载 HTTP 接口、管理原生组件 |
-| `client.js` | 客户端设置页（`settings.section`，id=`memory-plugin`） |
+| `client.js` | 客户端界面：侧边栏 `memory` 整页 + `settings.section` 入口 |
 | `lib/go-store.js` | Go 服务客户端：spawn、握手、增量同步、检索、备份、关闭 |
 | `lib/storage.js` | 存储选择：Go 服务 → Node SQLite → JSON |
 | `lib/engine.js` | 记忆引擎：条目 CRUD、检索路由、冲突检测、维护任务、导出导入（全 async） |

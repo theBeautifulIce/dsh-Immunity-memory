@@ -2,7 +2,9 @@
  * dsh-memory-plugin 的客户端设置页。
  *
  * 无构建步骤：整个文件就是浏览器直接执行的模块，只依赖 DSH 注入的 `react`。
- * 落点是 `settings.section` —— 设置面板里独立的一页，与"插件"页同级。
+ * 落点有两个：
+ *   - `sidebar.panellist` + `main`：左侧栏的一枚图标，点开就是整页记忆库（主入口）；
+ *   - `settings.section`：设置面板里的一页（保留，方便从设置直达）。
  *
  * 数据全部来自宿主接口 `/memory-plugin/api`（lib/api.js），与模型工具共用同一个引擎。
  */
@@ -113,6 +115,10 @@ window.__ModuleLoader__.load({
     const CSS = `
       .mp-root { display:flex; flex-direction:column; gap:12px; font-size:13px; line-height:1.5;
         color:var(--dsw-alias-label-primary,#1f2329); padding-bottom:12px }
+      /* 侧边栏整页入口：沿用设置页的面板，但列表随视口长高，别停在 540px。 */
+      .mp-page .mp-root { min-height:100% }
+      .mp-page .mp-list { max-height:min(680px, calc(100vh - 300px)) }
+      .mp-page .mp-list-plain { max-height:min(420px, calc(100vh - 380px)) }
       .mp-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap }
       .mp-title { font-size:16px; font-weight:650; letter-spacing:.01em }
       .mp-sub { color:var(--dsw-alias-label-secondary,#6b7280); font-size:12px; margin-top:2px }
@@ -1235,6 +1241,43 @@ window.__ModuleLoader__.load({
       { value: 'title', label: { zh: '标题', en: 'Title' } },
     ]
 
+    // ------------------------------------------------------ 侧边栏整页入口 ----
+
+    // 侧边栏图标与 main 面板共用同一个 id；宿主按下这个 id 切换主区域。
+    const PANEL_ID = 'memory'
+
+    // 16×16，跟随 currentColor，active 时保持全不透明。
+    function MemoryPanelIcon({ size = 16, active = false }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        'aria-hidden': 'true',
+        style: { opacity: active ? 1 : 0.78, display: 'block' },
+      },
+        h('ellipse', { cx: 8, cy: 4.1, rx: 4.7, ry: 2.1, stroke: 'currentColor', strokeWidth: 1.25 }),
+        h('path', { d: 'M3.3 4.1v7.7c0 1.16 2.1 2.1 4.7 2.1s4.7-.94 4.7-2.1V4.1', stroke: 'currentColor', strokeWidth: 1.25, strokeLinecap: 'round' }),
+        h('path', { d: 'M3.3 7.9c0 1.16 2.1 2.1 4.7 2.1s4.7-.94 4.7-2.1', stroke: 'currentColor', strokeWidth: 1.25, strokeLinecap: 'round' }))
+    }
+
+    // main 槽位是一个 overflow:hidden 的主列，必须自己当滚动容器，
+    // 否则整页内容会超出但滚不动（与 gokifu 页面踩过的坑相同）。
+    function MemoryPage() {
+      return h('div', {
+        className: 'mp-page',
+        style: {
+          height: '100%',
+          minHeight: 0,
+          boxSizing: 'border-box',
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          padding: '24px 28px',
+        },
+      }, h('div', { style: { width: '100%', maxWidth: '1180px', margin: '0 auto' } },
+        h(MemorySettingsPage)))
+    }
+
     // ------------------------------------------------------------ 注册 ----
 
     function label() {
@@ -1253,6 +1296,18 @@ window.__ModuleLoader__.load({
         } catch {
           /* 没有 locale 服务也不影响 */
         }
+        // 主入口：侧边栏一枚图标 + 点击后的整页。
+        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+          name: 'sidebar.panellist',
+          id: PANEL_ID,
+          order: 20,
+          label: () => label(),
+        }, MemoryPanelIcon))
+        ctx.slots.inject('main', () => ctx.slots.register({
+          name: 'main',
+          key: PANEL_ID,
+        }, MemoryPage))
+        // 保留设置页入口：从设置也能直接打开同一套面板。
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
           id: 'memory-plugin',
@@ -1261,7 +1316,10 @@ window.__ModuleLoader__.load({
         }, MemorySettingsPage))
       },
       // 只为测试/调试暴露，宿主运行时不会用到。
-      __internals: { MemorySettingsPage, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates },
+      __internals: {
+        MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
+        MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
+      },
     }
   },
 })
