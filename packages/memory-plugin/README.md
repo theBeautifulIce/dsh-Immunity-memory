@@ -22,7 +22,7 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 | `lib/engine.js` | 记忆引擎：条目 CRUD、检索打分、冲突检测、维护任务、导出导入 |
 | `lib/store.js` | JSON 存储：原子写、备份轮转、路径解析 |
 | `lib/settings.js` | 设置结构（schema）、八层与三本记事本定义、归一化与补丁合并 |
-| `lib/api.js` | 设置页调用的 HTTP 接口（前缀 `/memory-plugin/api`） |
+| `lib/api.js` | 设置页调用的 HTTP 接口（前缀 `/memory-plugin/api/v2`） |
 | `lib/tools.js` | agent 工具注册 |
 | `locale/*.json` | 插件列表里的标题与描述 |
 

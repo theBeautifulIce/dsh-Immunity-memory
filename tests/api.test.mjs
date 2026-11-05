@@ -11,7 +11,7 @@ import { join } from 'node:path'
 
 import { createStore } from '../packages/memory-plugin/lib/store.js'
 import { createEngine } from '../packages/memory-plugin/lib/engine.js'
-import { API_PATH, mountApi } from '../packages/memory-plugin/lib/api.js'
+import { API_PATH, LEGACY_API_PATH, mountApi } from '../packages/memory-plugin/lib/api.js'
 import { normalizeSettings } from '../packages/memory-plugin/lib/settings.js'
 
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-memory-api-'))
@@ -94,6 +94,16 @@ try {
     assert.equal(body.value.stats.total, 0)
     assert.ok(body.value.toolNames.includes('memory_search'))
     assert.ok(typeof body.value.storage.path === 'string')
+  })
+
+  await test('mountApi 支持自定义路径（旧前缀兼容）', async () => {
+    const seen = []
+    const stub = { register(route) { seen.push(route); return () => {} } }
+    mountApi(stub, engine, log, { path: LEGACY_API_PATH })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].path, LEGACY_API_PATH)
+    assert.equal(seen[0].kind, 'prefix')
+    assert.notEqual(API_PATH, LEGACY_API_PATH)
   })
 
   let createdId = ''

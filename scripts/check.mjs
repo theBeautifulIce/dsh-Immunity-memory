@@ -55,6 +55,8 @@ if (failures.length === 0) console.log(`✔ ${files.length} 个模块语法正�
 console.log('\n== 引擎测试 ==')
 run('引擎测试', ['tests/engine.test.mjs'])
 
+run('工具测试', ['tests/tools.test.mjs'])
+
 if (!FAST) {
   console.log('\n== 接口测试 ==')
   run('接口测试', ['tests/api.test.mjs'])

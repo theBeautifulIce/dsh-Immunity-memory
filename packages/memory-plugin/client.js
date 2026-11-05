@@ -13,7 +13,9 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useState, useEffect, useMemo, useCallback, useRef } = React
 
-    const API_PATH = '/memory-plugin/api'
+    // 接口前缀：新路径优先，旧前缀只作兼容（旧前缀可能被上一代插件的路由占着，
+    // 那条路由读的是上一代的数据，所以必须把新路径排在前面）。
+    const API_PATHS = ['/memory-plugin/api/v2', '/memory-plugin/api']
     const NS = 'dsh-memory-plugin'
     const STYLE_ID = 'dsh-memory-plugin-style'
 
@@ -21,25 +23,27 @@ window.__ModuleLoader__.load({
 
     function apiCandidates() {
       const list = []
-      try {
-        list.push(new URL(API_PATH, window.location.origin).toString())
-      } catch {
-        /* 忽略 */
-      }
-      try {
-        if (document.baseURI) list.push(new URL(API_PATH.replace(/^\//, ''), document.baseURI).toString())
-      } catch {
-        /* 忽略 */
-      }
       const streamBase = globalThis.__DSH_TRANSPORT__?.streamBaseUrl
-      if (typeof streamBase === 'string' && streamBase !== '') {
+      for (const path of API_PATHS) {
         try {
-          list.push(new URL(API_PATH.replace(/^\//, ''), streamBase).toString())
+          list.push(new URL(path, window.location.origin).toString())
         } catch {
           /* 忽略 */
         }
+        try {
+          if (document.baseURI) list.push(new URL(path.replace(/^\//, ''), document.baseURI).toString())
+        } catch {
+          /* 忽略 */
+        }
+        if (typeof streamBase === 'string' && streamBase !== '') {
+          try {
+            list.push(new URL(path.replace(/^\//, ''), streamBase).toString())
+          } catch {
+            /* 忽略 */
+          }
+        }
+        list.push(path)
       }
-      list.push(API_PATH)
       return [...new Set(list)]
     }
 
@@ -1162,7 +1166,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mp-card-title' }, txt('诊断信息', 'Diagnostics')),
           h('div', { className: 'mp-hint' }, `${txt('版本', 'version')} ${boot.pluginVersion ?? ''} · ${txt('分层', 'layers')} ${(boot.layers ?? []).length}`),
           h('div', { className: 'mp-hint' }, `${txt('工具', 'tools')}：${(boot.toolNames ?? []).join(', ')}`),
-          h('div', { className: 'mp-hint' }, `${txt('接口', 'API')}：POST ${API_PATH}`),
+          h('div', { className: 'mp-hint' }, `${txt('接口', 'API')}：POST ${API_PATHS[0]}`),
           h('div', { className: 'mp-hint' }, `${txt('上次维护', 'last maintenance')} ${formatTime(boot.stats?.lastMaintenance ?? '') || '—'}`)))
     }
 

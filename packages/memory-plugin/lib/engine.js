@@ -902,10 +902,11 @@ function round(value) {
 }
 
 // 由 index.js 注入，避免循环依赖。
-export const TOOL_NAMES = ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_delete', 'memory_stats']
+export const TOOL_NAMES = ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats']
 
 // 记事本列表在模块初始化后填充（NOTEBOOKS 来自 settings.js）。
 import { NOTEBOOKS } from './settings.js'
 NOTEBOOK_LIST.push(...NOTEBOOKS)
 
 export { message, getPath }
+

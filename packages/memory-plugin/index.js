@@ -13,7 +13,7 @@
 import { Config, normalizeSettings } from './lib/settings.js'
 import { createStore, message } from './lib/store.js'
 import { createEngine } from './lib/engine.js'
-import { mountApi, setTrustedHosts } from './lib/api.js'
+import { API_PATH, LEGACY_API_PATH, mountApi, setTrustedHosts } from './lib/api.js'
 import { registerTools } from './lib/tools.js'
 
 export const name = 'dsh-memory-plugin'
@@ -93,42 +93,70 @@ export function apply(ctx, config) {
   attachApi(ctx, engine, log)
 }
 
-/** 把 HTTP 接口挂到 webServer 上（webServer 可能比本插件晚装载）。 */
+
+/**
+ * 把 HTTP 接口挂到 webServer 上。
+ *
+ * 两个坑：
+ *   1. webServer 可能比本插件晚装载 → 用 `ctx.inject(['webServer'], ...)` 等它出现；
+ *   2. 路由的生命周期不好保证（重装 / 热重载时旧路由可能还活着）→ 在 webServer 上放一个
+ *      holder，handler 每次都从 holder 取"当前这一代"的引擎，旧路由也不会读到旧数据。
+ */
+const API_HOLDER_KEY = '__dshMemoryPluginApi'
+
 function attachApi(ctx, engine, log) {
-  const attach = (holder) => {
+  const attach = () => {
     const webServer = ctx.get('webServer')
-    if (webServer === undefined) return
+    if (webServer === undefined || webServer === null) {
+      log('warn', '当前 profile 没有 webServer，设置页接口不可用')
+      return
+    }
     try {
       const runtime = ctx.get('webRuntime') ?? ctx.get('webApp')
       setTrustedHosts(runtime?.trustedHosts ?? [])
     } catch {
       // 拿不到可信域时退回回环判断
     }
-    let lastError
-    const register = () => {
-      try {
-        const dispose = mountApi(webServer, engine, log)
-        holder.dispose = dispose
-        holder.controller = true
-        return true
-      } catch (error) {
-        lastError = error
-        return false
-      }
-    }
-    if (register()) {
-      log('info', '记忆接口已挂载：/memory-plugin/api')
+
+    const holder = webServer[API_HOLDER_KEY] ?? (webServer[API_HOLDER_KEY] = { engine: null, dispose: null })
+    // 先换引擎：即使下面因为路径被占用注册不上，旧路由也会立刻读到这一代的数据。
+    holder.engine = engine
+
+    if (holder.dispose !== null) {
+      log('info', `记忆接口已挂载，复用现有路由：${API_PATH}`)
       return
     }
-    // 行热重载后旧代的同名路由可能还没释放，短暂退避后重试。
-    const delays = [0, 250, 1000, 3000]
-    for (const delay of delays) {
-      const timer = setTimeout(() => {
-        if (register()) log('info', '记忆接口挂载成功（重试）')
-      }, delay)
-      timer.unref?.()
+
+    const disposers = []
+    try {
+      disposers.push(ctx.effect(() => mountApi(webServer, () => holder.engine, log), 'memory-plugin:api'))
+      log('info', `记忆接口已挂载：${API_PATH}`)
+      holder.dispose = () => {
+        for (const dispose of disposers) {
+          try {
+            dispose()
+          } catch {
+            // 已经随 fiber 释放
+          }
+        }
+        holder.dispose = null
+      }
+    } catch (error) {
+      // 路径已被上一代占住：它同样是本插件的路由，会通过 holder.engine 读到最新数据。
+      log('info', `${API_PATH} 已被更早的一代占用，复用现有路由：${message(error)}`)
+      return
     }
-    log('warn', `记忆接口首次挂载失败，将重试：${message(lastError)}`)
+
+    // 旧前缀：只为了让早期文档里的地址继续可用，被占用就静默跳过。
+    try {
+      const legacy = ctx.effect(
+        () => mountApi(webServer, () => holder.engine, log, { path: LEGACY_API_PATH }),
+        'memory-plugin:api-legacy',
+      )
+      disposers.push(legacy)
+    } catch {
+      // 旧前缀仍被历史路由占着，无所谓
+    }
   }
 
   if (typeof ctx.inject === 'function') {
@@ -136,6 +164,7 @@ function attachApi(ctx, engine, log) {
       ctx.inject(['webServer'], () => attach())
     } catch (error) {
       log('warn', `等待 webServer 失败：${message(error)}`)
+      attach()
     }
   } else {
     attach()

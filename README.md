@@ -41,7 +41,7 @@
 │     │  ├─ settings.js  # 设置结构、分层与记事本定义、归一化
 │     │  ├─ store.js     # JSON 文件存储（原子写、备份轮转）
 │     │  ├─ engine.js    # 记忆引擎：增删改查、检索、冲突、维护、导出
-│     │  ├─ api.js       # HTTP 接口 /memory-plugin/api（供设置页调用）
+│     │  ├─ api.js       # HTTP 接口 /memory-plugin/api/v2（供设置页调用）
 │     │  └─ tools.js     # 6 个 agent 工具的注册
 │     ├─ locale/         # 中英文展示元数据
 │     ├─ icon.svg

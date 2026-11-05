@@ -98,7 +98,7 @@ const boot = {
   sortChoices: SORT_CHOICES,
   layers: LAYERS,
   notebooks: NOTEBOOKS,
-  toolNames: ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_delete', 'memory_stats'],
+  toolNames: ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats'],
   stats: { total: 3, memory: 2, note: 1, active: 3, archived: 0, expired: 0, conflicted: 0, pinned: 1, byLayer: { L5: 2, L4: 1 }, lastWriteAt: '2026-11-05T10:00:00.000Z' },
   storage: { path: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin\\store.json', dir: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin', exists: true, bytes: 2048, modifiedAt: '2026-11-05T10:00:00.000Z' },
   audit: [{ at: '2026-11-05T10:00:00.000Z', action: 'create', detail: 'mem_test' }],
@@ -178,3 +178,4 @@ assert.ok(styles.length >= 1, '应注入样式表')
 assert.ok(String(styles[0]).includes('.mp-root'), '样式表应包含 .mp-root')
 
 console.log(`\n${passed} 个面板渲染通过，样式注入 ${styles.length} 段`)
+

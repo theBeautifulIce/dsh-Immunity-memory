@@ -5,7 +5,7 @@
  * 和"模型读到的"永远是同一份数据。
  */
 import { TOOL_NAMES } from './engine.js'
-import { LAYERS, NOTEBOOKS } from './settings.js'
+import { LAYERS, NOTEBOOKS, NOTEBOOK_IDS } from './settings.js'
 import { message } from './store.js'
 
 const LAYER_ENUM = LAYERS.map((layer) => layer.id)
@@ -17,14 +17,15 @@ const itemSchema = {
     type: { type: 'string', enum: ['memory', 'note'] },
     layer: { type: 'string', enum: LAYER_ENUM },
     layerName: { type: 'string' },
-    notebook: { type: ['string', 'null'], enum: [...NOTEBOOKS.map((notebook) => notebook.id), null] },
+    // 输出 schema 只接受单值 type（JsonSchemaNode），可空字段用 oneOf 表达。
+    notebook: { oneOf: [{ type: 'string', enum: NOTEBOOK_IDS }, { type: 'null' }] },
     title: { type: 'string' },
     content: { type: 'string' },
     tags: { type: 'array', items: { type: 'string' } },
     importance: { type: 'number' },
     status: { type: 'string' },
     pinned: { type: 'boolean' },
-    expiresAt: { type: ['string', 'null'] },
+    expiresAt: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     updatedAt: { type: 'string' },
     accessCount: { type: 'number' },
     score: { type: 'number' },
@@ -37,7 +38,7 @@ const writeOutput = {
     type: 'object',
     properties: {
       item: itemSchema,
-      duplicateOf: { type: ['string', 'null'] },
+      duplicateOf: { oneOf: [{ type: 'string' }, { type: 'null' }] },
       saved: { type: 'boolean' },
     },
     required: ['saved'],
@@ -127,8 +128,8 @@ const statsOutput = {
       total: { type: 'number' },
       memories: { type: 'number' },
       notes: { type: 'number' },
-      byLayer: { type: 'object', additionalProperties: { type: 'number' } },
-      byStatus: { type: 'object', additionalProperties: { type: 'number' } },
+      byLayer: { type: 'object', additionalProperties: true },
+      byStatus: { type: 'object', additionalProperties: true },
       averageImportance: { type: 'number' },
       writes: { type: 'number' },
       searches: { type: 'number' },
@@ -156,7 +157,15 @@ export function registerTools(ctx, engine, log) {
   const disposers = []
   const register = (definition) => {
     try {
-      disposers.push(ctx.tools.register(definition))
+      // 工具的返回值必须是无损 JSON：undefined / 函数 / NaN 都要先清掉，
+      // 否则宿主会拒收（"value is not lossless JSON"），模型看到的是工具失败。
+      const wrapped = {
+        ...definition,
+        async execute(args, exec) {
+          return toLossless(await definition.execute(args, exec))
+        },
+      }
+      disposers.push(ctx.tools.register(wrapped))
     } catch (error) {
       log('warn', `注册工具 ${definition.name} 失败：${message(error)}`)
     }
@@ -185,7 +194,7 @@ export function registerTools(ctx, engine, log) {
         ...args,
         sessionId: sessionIdOf(exec),
       }, 'agent')
-      return { saved: true, item, duplicateOf: item.duplicateOf ?? null }
+      return { saved: true, item: toToolItem(item), duplicateOf: item.duplicateOf ?? null }
     },
   })
 
@@ -205,7 +214,8 @@ export function registerTools(ctx, engine, log) {
     },
     output: searchOutput,
     async execute(args) {
-      return engine.searchItems(args ?? {})
+      const result = engine.searchItems(args ?? {})
+      return { ...result, items: result.items.map(toToolItem) }
     },
   })
 
@@ -221,7 +231,7 @@ export function registerTools(ctx, engine, log) {
     async execute(args) {
       const item = engine.getItem(String(args?.id ?? ''))
       if (item === undefined) throw new Error(`找不到条目 ${String(args?.id ?? '')}`)
-      return { item }
+      return { item: toToolItem(item) }
     },
   })
 
@@ -247,12 +257,12 @@ export function registerTools(ctx, engine, log) {
     async execute(args) {
       const { id, ...patch } = args ?? {}
       const item = engine.updateItem(String(id ?? ''), patch, 'agent')
-      return { item }
+      return { item: toToolItem(item) }
     },
   })
 
   register({
-    name: 'memory_delete',
+    name: 'memory_forget',
     description: 'Delete memories by id. Use it when the user asks to forget something or a memory is provably wrong.',
     parameters: {
       type: 'object',
@@ -294,6 +304,45 @@ function text(value) {
   return [{ type: 'text', text: value }]
 }
 
+/**
+ * 工具的条目视图：把双语的分层名压成模型友好的单语字符串
+ * （`layerName` 在输出 schema 里声明为 string，直接透传 { zh, en } 会被宿主判为不匹配）。
+ */
+export function toToolItem(item) {
+  if (item === null || typeof item !== 'object') return item
+  const label = item.layerName
+  return {
+    ...item,
+    layerName: typeof label === 'string' ? label : label?.zh ?? label?.en ?? '',
+  }
+}
+
+/**
+ * 把任意返回值收敛成"无损 JSON"：
+ *   - `undefined` / 函数 / symbol → 丢弃（数组里则变成 null）
+ *   - `NaN` / `Infinity` → null
+ *   - Date → ISO 字符串
+ *   - 其余原始值、数组、普通对象递归处理
+ * 宿主的工具结果校验只接受这种形状。
+ */
+export function toLossless(value) {
+  if (value === undefined || value === null) return null
+  const kind = typeof value
+  if (kind === 'function' || kind === 'symbol') return null
+  if (kind === 'number') return Number.isFinite(value) ? value : null
+  if (kind === 'bigint') return String(value)
+  if (kind !== 'object') return value
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString()
+  if (Array.isArray(value)) return value.map((entry) => toLossless(entry))
+  const out = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === undefined) continue
+    if (typeof entry === 'function' || typeof entry === 'symbol') continue
+    out[key] = toLossless(entry)
+  }
+  return out
+}
+
 function clip(value, max) {
   const source = String(value ?? '').replace(/\s+/g, ' ').trim()
   return source.length <= max ? source : `${source.slice(0, max)}…`
@@ -305,3 +354,5 @@ function sessionIdOf(exec) {
 }
 
 export { TOOL_NAMES }
+
+
