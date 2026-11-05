@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory plugin (dsh-memory-plugin)",
+    "description": "Long-term memory for DeepSeek: eight memory layers, memory/daily/asset notebooks, weighted keyword retrieval, automatic reflection and rotation cleanup, all editable on a visual settings page."
+  }
+}

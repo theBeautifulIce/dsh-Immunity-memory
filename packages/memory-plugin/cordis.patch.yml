@@ -1,0 +1,11 @@
+# dsh-memory-plugin bundle patch — 一行 host 插件插入到列出本 bundle 的 profile。
+#
+# 这里的 config 只是“出厂默认值”：插件运行时的真实设置保存在
+#   <DSH_HOME>/storages/dsh-memory-plugin/store.json
+# 由插件自己的设置页读写。用户在 profile 的 cordis.patch.yml 里按 id 覆盖本行仍然生效，
+# 且优先级高于这里的默认值。
+- insert:
+    - id: memory-plugin
+      name: dsh-memory-plugin
+      config:
+        enabled: true

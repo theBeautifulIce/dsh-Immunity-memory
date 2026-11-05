@@ -1,0 +1,49 @@
+{
+  "name": "dsh-memory-plugin",
+  "version": "0.1.0",
+  "description": "DSH long-term memory: an eight-layer memory system, notebooks, hybrid retrieval, agent tools and a visual settings page.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "记忆插件 (dsh-memory-plugin)",
+    "description": "给 DeepSeek 装上跨会话的长期记忆：八层记忆体系、记忆/日常/资产三本记事本、关键词加权检索、自动反思与轮转清理，并带一个可视化的设置页面。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "memory",
+    "long-term-memory",
+    "retrieval"
+  ],
+  "license": "MIT"
+}
