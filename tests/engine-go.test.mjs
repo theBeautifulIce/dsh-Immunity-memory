@@ -53,6 +53,7 @@ try {
       content: '这条记忆通过 Go 服务写入 SQLite，并由 FTS5 建立全文索引。',
       tags: ['集成', 'go'],
       importance: 8,
+      ttlDays: 30,
     }, 'agent')
     assert.ok(item.id.startsWith('mem_'))
     firstId = item.id
@@ -72,7 +73,7 @@ try {
   })
 
   await test('更新条目后 Go 侧能读到新内容', async () => {
-    const updated = await engine.updateItem(firstId, { title: 'Go 服务集成（改）', importance: 9 }, 'user')
+    const updated = await engine.updateItem(firstId, { title: 'Go 服务集成（改）', importance: 9, ttlDays: 30 }, 'user')
     assert.equal(updated.title, 'Go 服务集成（改）')
     const snapshot = await store.load()
     const saved = snapshot.items.find((item) => item.id === firstId)
@@ -81,8 +82,8 @@ try {
   })
 
   await test('冲突关系写进 Go 的关系表并参与图谱', async () => {
-    const left = await engine.createItem({ layer: 'L2', title: '缓存策略 A', content: '缓存统一放 Redis，过期 30 分钟。' }, 'agent')
-    const right = await engine.createItem({ layer: 'L2', title: '缓存策略 A', content: '缓存统一放 Redis，过期 30 分钟。' }, 'agent')
+    const left = await engine.createItem({ layer: 'L2', title: '缓存策略 A', content: '缓存统一放 Redis，过期 30 分钟。', ttlDays: 30 }, 'agent')
+    const right = await engine.createItem({ layer: 'L2', title: '缓存策略 A', content: '缓存统一放 Redis，过期 30 分钟。', ttlDays: 30 }, 'agent')
     const graph = await store.graphBfs([left.id], { depth: 1, minWeight: 0.5, maxResults: 10 })
     const ids = graph.nodes.map((node) => node.id)
     assert.ok(ids.includes(right.id), `图谱应包含冲突邻居：${ids}`)

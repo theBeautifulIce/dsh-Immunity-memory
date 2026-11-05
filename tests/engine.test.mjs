@@ -63,6 +63,44 @@ await test('保存设置后能从存档读回', async () => {
   await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { ui: { pageSize: 20 } }))
 })
 
+await test('旧数据缺少保鲜期时加载会补全', async () => {
+  let saved = null
+  const created = new Date(Date.now() - 86400000).toISOString()
+  const legacyStore = {
+    load: async () => ({
+      version: 3,
+      createdAt: created,
+      updatedAt: created,
+      settings: normalizeSettings({}),
+      items: [{
+        id: 'mem_legacy0001',
+        type: 'memory',
+        layer: 'L5',
+        title: '旧版永久记忆',
+        content: '这是旧版本写入的、没有保鲜期的记忆。',
+        importance: 5,
+        status: 'active',
+        createdAt: created,
+        updatedAt: created,
+      }],
+      audit: [],
+      meta: {},
+    }),
+    apply: async (next) => { saved = next },
+  }
+  const legacy = await createEngine({
+    store: legacyStore,
+    initialSettings: normalizeSettings({}),
+    getSettings: () => normalizeSettings({}),
+    log,
+  })
+  const item = legacy.listItems({}).items[0]
+  assert.ok(item.ttlDays > 0, '旧数据应补上有限保鲜期')
+  assert.ok(Date.parse(item.expiresAt) > Date.now(), '应补上未来的到期时间')
+  assert.equal(saved.items[0].ttlDays, item.ttlDays)
+  assert.ok(saved.audit.some((entry) => entry.action === 'ttl.backfill'))
+})
+
 // ---------------------------------------------------------------- 写入 ----
 
 let firstId = ''
@@ -72,6 +110,7 @@ await test('写入一条中文记忆', async () => {
     content: '记忆插件仓库使用 pnpm 管理 packages/* 下的子包，不要混用 npm。',
     tags: ['构建', 'pnpm'],
     importance: 7,
+    ttlDays: 30,
   }, 'agent')
   assert.ok(item.id.startsWith('mem_'))
   assert.equal(item.layer, 'L5')
@@ -102,6 +141,7 @@ await test('重复内容会被标记 duplicateOf', async () => {
   const duplicate = await engine.createItem({
     title: '项目使用 pnpm 工作区（副本）',
     content: '记忆插件仓库使用 pnpm 管理 packages/* 下的子包，不要混用 npm。',
+    ttlDays: 30,
   }, 'agent')
   assert.equal(duplicate.duplicateOf, firstId)
 })
@@ -118,11 +158,13 @@ await test('L2 上相近的条目互相标记冲突', async () => {
     layer: 'L2',
     title: '缓存使用 Redis',
     content: '会话缓存统一放在 Redis 里，过期时间 30 分钟。',
+    ttlDays: 30,
   }, 'agent')
   const right = await engine.createItem({
     layer: 'L2',
     title: '缓存使用 Redis',
     content: '会话缓存统一放在 Redis 里，过期时间 30 分钟。',
+    ttlDays: 30,
   }, 'agent')
   const fresh = engine.getItem(right.id)
   assert.equal(fresh.status, 'conflicted')
@@ -158,7 +200,7 @@ await test('检索会累计访问次数', async () => {
 // ---------------------------------------------------------------- 修改 ----
 
 await test('更新标题与重要度', async () => {
-  const updated = await engine.updateItem(firstId, { title: '仓库用 pnpm 工作区', importance: 9 }, 'user')
+  const updated = await engine.updateItem(firstId, { title: '仓库用 pnpm 工作区', importance: 9, ttlDays: 30 }, 'user')
   assert.equal(updated.title, '仓库用 pnpm 工作区')
   assert.equal(updated.importance, 9)
   assert.equal(updated.version, 2)
@@ -195,9 +237,109 @@ await test('过期条目会被清理任务归档为 expired', async () => {
   const index = state.items.findIndex((item) => item.id === shortLived.id)
   state.items[index].expiresAt = new Date(Date.now() - 1000).toISOString()
   store.write(state)
-  engine.reload()
+  await engine.reload()
+  // 还没跑 cleanup 时，过期条目也不能被注入或检索到。
+  assert.equal(engine.promptDigest().includes('临时提醒'), false)
+  const expiredSearch = await engine.searchItems({ query: '临时提醒', limit: 10 })
+  assert.equal(expiredSearch.items.some((item) => item.id === shortLived.id), false)
   await engine.runMaintenance({ tasks: ['cleanup'] })
   assert.equal(engine.getItem(shortLived.id).status, 'expired')
+  // 恢复时必须续期，否则下一次 cleanup 会立刻再归档。
+  await engine.bulkAction([shortLived.id], 'restore')
+  assert.equal(engine.getItem(shortLived.id).status, 'active')
+  assert.ok(Date.parse(engine.getItem(shortLived.id).expiresAt) > Date.now())
+  await engine.runMaintenance({ tasks: ['cleanup'] })
+  assert.equal(engine.getItem(shortLived.id).status, 'active')
+})
+
+// ---------------------------------------------------------------- 增强 ----
+
+await test('可修改层写入必须填写保鲜期', async () => {
+  await assert.rejects(
+    () => engine.createItem({ title: '没有保鲜期', content: '这条记忆没有填写保鲜期，应当被拒绝写入。' }, 'agent'),
+    (error) => error.code === 'TTL_REQUIRED',
+  )
+  await assert.rejects(
+    () => engine.updateItem(firstId, { title: '改标题但不续期' }, 'user'),
+    (error) => error.code === 'TTL_REQUIRED',
+  )
+  await assert.rejects(
+    () => engine.updateItem(firstId, { tags: ['只改标签'] }, 'user'),
+    (error) => error.code === 'TTL_REQUIRED',
+  )
+})
+
+await test('注入统计给出总量与逐层明细', async () => {
+  const stats = engine.injectionStats()
+  assert.equal(stats.template.id, 'default')
+  assert.ok(stats.tokens > 0)
+  assert.ok(stats.text.includes('长期记忆（dsh-memory-plugin）'))
+  assert.ok(Array.isArray(stats.layers) && stats.layers.length >= 1)
+})
+
+await test('模板热切换立即改变注入预算', async () => {
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { template: 'dev' } }))
+  const stats = engine.injectionStats()
+  assert.equal(stats.template.id, 'dev')
+  assert.equal(stats.topN, 10)
+  assert.ok(stats.layers.some((layer) => layer.id === 'L4'))
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { template: 'default' } }))
+})
+
+await test('智能体检索会记录用量账本', async () => {
+  const before = engine.usageStats({ type: 'note' })
+  await engine.searchItems({ query: '进展', type: 'note', actor: 'agent' })
+  const after = engine.usageStats({ type: 'note' })
+  assert.ok(after.calls >= before.calls + 1)
+  assert.ok(after.totalTokens > 0)
+  assert.equal(after.byType.note.calls >= 1, true)
+})
+
+await test('混合检索用量按结果类型拆分', async () => {
+  await engine.searchItems({ query: 'pnpm', actor: 'agent' })
+  const notes = engine.usageStats({ type: 'note' })
+  const memories = engine.usageStats({ type: 'memory' })
+  assert.ok(notes.resultTokens > 0, '记事本视图应包含记事本结果的 token')
+  assert.ok(memories.resultTokens > 0, '记忆视图应包含记忆结果的 token')
+})
+
+await test('关闭审计时用量账本不保存查询原文', async () => {
+  const original = engine.getSettings()
+  await engine.replaceSettings(applySettingsPatch(original, { privacy: { auditLog: false } }))
+  try {
+    await engine.searchItems({ query: 'private-token-abc', actor: 'agent' })
+    const latest = engine.usageStats({}).recent[0]
+    assert.equal(latest.query, '')
+    assert.ok(latest.queryTokens > 0)
+  } finally {
+    await engine.replaceSettings(original)
+  }
+})
+
+await test('反复强化的记忆可审计固化到目标层', async () => {
+  const item = await engine.createItem({
+    title: '固定使用 pnpm',
+    content: '本仓库所有子包统一使用 pnpm，不要用 npm 或 yarn。',
+    importance: 8,
+    ttlDays: 30,
+  }, 'agent')
+  for (let index = 0; index < 3; index += 1) {
+    await engine.updateItem(item.id, {
+      title: `固定使用 pnpm（第 ${index + 2} 次确认）`,
+      ttlDays: 30,
+    }, 'user')
+  }
+  const candidates = engine.consolidationCandidates()
+  const candidate = candidates.find((entry) => entry.id === item.id)
+  assert.ok(candidate, '应产生固化候选')
+  assert.ok(candidate.signals >= 4)
+  assert.equal(candidate.suggestedLayer, 'L4')
+  // 固化必须先经维护任务生成候选记录，再走审计确认，不能直接跳过审计。
+  await engine.runMaintenance({ tasks: ['consolidate'] })
+  const result = await engine.applyConsolidation(item.id, 'approve', { note: '反复确认，提升为学习行为' }, 'agent')
+  assert.equal(result.item.layer, 'L4')
+  assert.ok(result.item.ttlDays >= 1)
+  assert.ok(engine.auditList().some((entry) => entry.action === 'consolidation.approved' && entry.detail.includes(item.id)))
 })
 
 // ---------------------------------------------------------------- 输出 ----
@@ -215,6 +357,45 @@ await test('导出可以再次导入（merge）', async () => {
   const result = await engine.importData({ items: exported.items.slice(0, 1) }, 'merge')
   assert.equal(result.imported, 1)
   assert.equal(engine.stats().total, before + 1)
+})
+
+await test('导入缺失保鲜期的记忆会补全', async () => {
+  const exported = engine.exportData()
+  const legacy = {
+    ...exported.items[0],
+    id: 'mem_import_not_ttl',
+    title: '导入缺保鲜期的记忆',
+    ttlDays: null,
+    expiresAt: null,
+  }
+  const result = await engine.importData({ items: [legacy] }, 'merge')
+  assert.equal(result.ttlFilled, 1)
+  const imported = engine.getItem('mem_import_not_ttl')
+  assert.ok(imported.ttlDays > 0)
+  assert.ok(Date.parse(imported.expiresAt) > Date.now())
+})
+
+await test('导入伪造的远期到期时间会被 ttlDays 截断', async () => {
+  const now = Date.now()
+  const result = await engine.importData({
+    items: [{
+      id: 'mem_import_far_future',
+      type: 'memory',
+      layer: 'L5',
+      title: '导入伪造远期到期',
+      content: '这条记忆试图带一个几千年后的到期时间，必须被 ttlDays 截断。',
+      ttlDays: 30,
+      expiresAt: '9999-12-31T00:00:00.000Z',
+      tags: [],
+      importance: 5,
+      status: 'active',
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    }],
+  }, 'merge')
+  assert.equal(result.imported, 1)
+  const imported = engine.getItem('mem_import_far_future')
+  assert.ok(Date.parse(imported.expiresAt) <= now + 31 * 86400000)
 })
 
 await test('统计口径自洽', async () => {

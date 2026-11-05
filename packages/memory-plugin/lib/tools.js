@@ -149,6 +149,63 @@ const statsOutput = {
   },
 }
 
+const usageOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      calls: { type: 'number' },
+      queryTokens: { type: 'number' },
+      resultTokens: { type: 'number' },
+      totalTokens: { type: 'number' },
+      allTime: { type: 'object', additionalProperties: true },
+      byTool: { type: 'object', additionalProperties: true },
+      byType: { type: 'object', additionalProperties: true },
+      recent: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    },
+    required: ['calls', 'totalTokens'],
+  },
+  render(args, value) {
+    const type = value?.filters?.type ?? '全部'
+    return text([
+      `智能体查询记事本/记忆的 token 用量（${type}）`,
+      `调用 ${value?.calls ?? 0} 次：查询 ${value?.queryTokens ?? 0} + 结果 ${value?.resultTokens ?? 0} = ${value?.totalTokens ?? 0} token`,
+      `累计：${value?.allTime?.calls ?? 0} 次，${(value?.allTime?.queryTokens ?? 0) + (value?.allTime?.resultTokens ?? 0)} token`,
+      value?.recent?.length > 0
+        ? `最近一次：${value.recent[0].tool} / ${value.recent[0].type} / ${value.recent[0].totalTokens ?? (value.recent[0].queryTokens + value.recent[0].resultTokens)} token`
+        : '还没有带过滤条件的用量记录。',
+    ].join('\n'))
+  },
+}
+
+const consolidateOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      candidates: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      decision: { type: 'string' },
+      item: itemSchema,
+      record: { type: 'object', additionalProperties: true },
+    },
+    required: [],
+  },
+  render(args, value) {
+    if (Array.isArray(value?.candidates)) {
+      if (value.candidates.length === 0) return text('当前没有达到阈值的固化候选。')
+      return text(`固化候选 ${value.candidates.length} 条（需智能体审计后 approve/reject）：\n`
+        + value.candidates.map((candidate, index) => `${index + 1}. ${candidate.id} [${candidate.layer}] ${candidate.title}`
+          + `，信号 ${candidate.signals} 次（写入 ${candidate.breakdown?.create ?? 0}/更新 ${candidate.breakdown?.update ?? 0}/命中 ${candidate.breakdown?.hit ?? 0}）`
+          + ` → 建议 ${candidate.suggestedLayer}，保鲜 ${candidate.suggestedTtlDays} 天`).join('\n'))
+    }
+    if (value?.decision === 'approve') {
+      return text(`已固化 ${value.item?.id}：${value.record?.fromLayer} → ${value.record?.toLayer}，保鲜 ${value.record?.ttlDays} 天，已写入审计。`)
+    }
+    if (value?.decision === 'reject') {
+      return text(`已记录拒绝固化 ${value.item?.id}；出现新的强化信号后会重新进入候选。`)
+    }
+    return text('固化操作完成。')
+  },
+}
+
 /**
  * 注册全部工具，返回释放函数。
  * ctx.tools.register(definition, options) 的 definition 必须带 output。
@@ -184,7 +241,10 @@ export function registerTools(ctx, engine, log) {
         notebook: { type: 'string', enum: NOTEBOOKS.map((notebook) => notebook.id), description: 'Notebook id, only for type=note.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Short tags for retrieval.' },
         importance: { type: 'number', description: '1-10, default 5. Higher means it survives longer and ranks higher.' },
-        ttlDays: { type: 'number', description: 'Optional expiry in days; L6/L7 default to the configured TTL.' },
+        ttlDays: {
+          type: 'number',
+          description: 'Freshness period in days. Required for mutable layers L2/L4/L5/L6/L7 (writes fail without it); immutable layers L0/L1/L3 ignore it. Use L6/L7 for facts that should expire.',
+        },
       },
       required: ['content'],
     },
@@ -214,7 +274,7 @@ export function registerTools(ctx, engine, log) {
     },
     output: searchOutput,
     async execute(args) {
-      const result = await engine.searchItems(args ?? {})
+      const result = await engine.searchItems({ ...(args ?? {}), actor: 'agent' })
       return { ...result, items: result.items.map(toToolItem) }
     },
   })
@@ -249,7 +309,10 @@ export function registerTools(ctx, engine, log) {
         layer: { type: 'string', enum: LAYER_ENUM },
         status: { type: 'string', enum: ['active', 'archived', 'expired', 'conflicted'] },
         pinned: { type: 'boolean', description: 'Pinned items are never auto-archived or auto-expired.' },
-        ttlDays: { type: 'number' },
+        ttlDays: {
+          type: 'number',
+          description: 'Freshness period in days. Required when changing title/content/tags/importance/layer of a mutable memory; the new expiry starts from now.',
+        },
       },
       required: ['id'],
     },
@@ -274,6 +337,54 @@ export function registerTools(ctx, engine, log) {
     output: deleteOutput,
     async execute(args) {
       return await engine.deleteItems(args?.ids ?? [], 'agent')
+    },
+  })
+
+  register({
+    name: 'memory_usage',
+    description: 'Report how many tokens the agent spent querying memory and notebooks: query tokens, returned result tokens, totals by tool/type and recent calls.',
+    parameters: {
+      type: 'object',
+      properties: {
+        since: { type: 'string', description: 'ISO date/time lower bound, e.g. 2026-11-01.' },
+        tool: { type: 'string', description: 'Filter by tool name, e.g. memory_search.' },
+        type: { type: 'string', enum: ['memory', 'note'], description: 'Filter by queried content type.' },
+      },
+    },
+    output: usageOutput,
+    async execute(args) {
+      return engine.usageStats(args ?? {})
+    },
+  })
+
+  register({
+    name: 'memory_consolidate',
+    description: 'Review and act on memory consolidation: list candidates that were repeatedly written, updated or retrieved, then approve moving a stable fact to a higher layer with a finite freshness period, or reject it. Every decision is audited.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'approve', 'reject'], description: 'list = show pending candidates; approve/reject = record an audited decision.' },
+        id: { type: 'string', description: 'Candidate item id (required for approve/reject).' },
+        targetLayer: { type: 'string', enum: LAYER_ENUM, description: 'Target layer for approve; defaults to the configured consolidation layer.' },
+        ttlDays: { type: 'number', description: 'Freshness period in days for the consolidated item.' },
+        note: { type: 'string', description: 'Audit note: why it should or should not be consolidated.' },
+      },
+      required: ['action'],
+    },
+    output: consolidateOutput,
+    async execute(args) {
+      const action = String(args?.action ?? 'list')
+      if (action === 'list') {
+        return { candidates: engine.consolidationCandidates({ limit: args?.limit }) }
+      }
+      if (action !== 'approve' && action !== 'reject') throw new Error('action 只能是 list、approve 或 reject')
+      const id = String(args?.id ?? '')
+      if (id === '') throw new Error('approve/reject 必须提供 id')
+      return await engine.applyConsolidation(id, action, {
+        targetLayer: args?.targetLayer,
+        ttlDays: args?.ttlDays,
+        note: args?.note,
+      }, 'agent')
     },
   })
 

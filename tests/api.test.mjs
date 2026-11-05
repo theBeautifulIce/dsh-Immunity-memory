@@ -113,6 +113,7 @@ try {
       content: '这条记忆由接口测试写入，用来验证设置页与工具共用同一份数据。',
       tags: ['测试'],
       importance: 6,
+      ttlDays: 30,
     })
     assert.equal(body.ok, true)
     assert.ok(body.value.item.id.startsWith('mem_'))
@@ -134,7 +135,7 @@ try {
   })
 
   await test('items.update 修改标题，版本号递增', async () => {
-    const { body } = await call('items.update', { id: createdId, patch: { title: '接口测试记忆（改）' } })
+    const { body } = await call('items.update', { id: createdId, patch: { title: '接口测试记忆（改）', ttlDays: 30 } })
     assert.equal(body.value.item.title, '接口测试记忆（改）')
     assert.equal(body.value.item.version, 2)
   })

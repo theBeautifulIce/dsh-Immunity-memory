@@ -17,17 +17,21 @@ import { randomUUID } from 'node:crypto'
 import {
   LAYERS,
   LAYER_IDS,
+  MEMORY_TEMPLATES,
   NOTEBOOK_IDS,
+  activeTemplate,
   clone,
   getPath,
   layerEnabled,
   layerInfo,
   normalizeSettings,
+  promptBudget,
+  templateById,
 } from './settings.js'
 import { emptyState, message, STORE_VERSION } from './store.js'
 import { createSearchEngine } from './search.js'
 import { fallbackCosineBatch, fallbackDedupe, fallbackImportance } from './fallback-math.js'
-import { jaccard, tokenize } from './text.js'
+import { estimateTokens, jaccard, tokenize } from './text.js'
 
 export { jaccard, tokenize }
 
@@ -118,9 +122,82 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (state === undefined) {
       const raw = remote ? await store.load() : store.read()
       state = hydrate(raw)
+      const backfilled = backfillLegacyTtl(state, settings())
       reindexAll()
+      if (backfilled > 0) {
+        audit('ttl.backfill', `${backfilled} 条可修改层记忆补全保鲜期`, 'system')
+        await persist()
+      }
     }
     return state
+  }
+
+  /**
+   * 旧版本允许可修改层永久保鲜。加载时一次性补上有限保鲜期，
+   * 避免历史数据绕过“必须填写保鲜期”的硬约束。
+   */
+  function backfillLegacyTtl(current, active) {
+    if (current.meta?.ttlBackfillVersion === 1) return 0
+    const now = Date.now()
+    const defaultDays = Math.max(1, Math.round(Number(active.write.defaultTtlDays) || 30))
+    let changed = 0
+    for (const item of current.items) {
+      if (item.type !== 'memory') continue
+      const info = layerInfo(item.layer)
+      let touched = false
+      if (info.immutable) {
+        if (item.ttlDays !== null || item.expiresAt !== null) {
+          item.ttlDays = null
+          item.expiresAt = null
+          touched = true
+        }
+        if (touched) changed += 1
+        continue
+      }
+      if (item.ttlDays === null || item.ttlDays === undefined) {
+        const expires = Date.parse(item.expiresAt ?? '')
+        item.ttlDays = Number.isFinite(expires)
+          ? Math.max(1, Math.ceil((expires - now) / 86400000))
+          : defaultDays
+        touched = true
+      }
+      if (item.expiresAt === null || item.expiresAt === undefined) {
+        item.expiresAt = expiresAtFor(item, active)
+        touched = true
+      }
+      if (touched) changed += 1
+    }
+    current.meta.ttlBackfillVersion = 1
+    return changed
+  }
+
+  /**
+   * 导入的条目也必须遵守保鲜期硬约束：
+   * - 记事本没有保鲜期；
+   * - 不可变层不设 TTL；
+   * - 可修改层的记忆缺 TTL 时补默认值。
+   */
+  function normalizeImportedTtl(item, active) {
+    if (item.type !== 'memory' || layerInfo(item.layer).immutable) {
+      const touched = item.ttlDays !== null || item.expiresAt !== null
+      item.ttlDays = null
+      item.expiresAt = null
+      return touched
+    }
+    let touched = false
+    if (item.ttlDays === null || item.ttlDays === undefined) {
+      item.ttlDays = Math.max(1, Math.round(Number(active.write.defaultTtlDays) || 30))
+      touched = true
+    }
+    // 导入方可能伪造一个极远的 expiresAt；保鲜期不得超过 ttlDays 对应的上限。
+    const maxExpiresAt = Date.parse(expiresAtFor(item, active))
+    const importedExpiresAt = Date.parse(item.expiresAt ?? '')
+    if (item.expiresAt === null || item.expiresAt === undefined
+      || !Number.isFinite(importedExpiresAt) || importedExpiresAt > maxExpiresAt) {
+      item.expiresAt = new Date(maxExpiresAt).toISOString()
+      touched = true
+    }
+    return touched
   }
 
   /** 同步读取已经加载好的状态（工厂里会先 ensureLoaded）。 */
@@ -171,6 +248,316 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (current.audit.length > keep) current.audit = current.audit.slice(-keep)
   }
 
+  // ------------------------------------------------------- 用量 / 强化信号 ----
+  // 用量账本与固化状态都放在 meta 里：Go 服务的 meta 走 /config 整体同步，
+  // 不需要改 SQLite 表结构，也不会因为新增字段而丢数据。
+
+  const MAX_USAGE_RECENT = 200
+
+  function usageLedger() {
+    const current = currentState()
+    if (current.meta.usage === null || typeof current.meta.usage !== 'object') {
+      current.meta.usage = {
+        calls: 0,
+        queryTokens: 0,
+        resultTokens: 0,
+        byTool: {},
+        byType: {},
+        recent: [],
+      }
+    }
+    const ledger = current.meta.usage
+    if (!Array.isArray(ledger.recent)) ledger.recent = []
+    if (ledger.byTool === null || typeof ledger.byTool !== 'object') ledger.byTool = {}
+    if (ledger.byType === null || typeof ledger.byType !== 'object') ledger.byType = {}
+    return ledger
+  }
+
+  function emptyUsageBucket() {
+    return { calls: 0, queryTokens: 0, resultTokens: 0 }
+  }
+
+  function bumpUsage(bucket, queryTokens, resultTokens) {
+    bucket.calls = (bucket.calls ?? 0) + 1
+    bucket.queryTokens = (bucket.queryTokens ?? 0) + queryTokens
+    bucket.resultTokens = (bucket.resultTokens ?? 0) + resultTokens
+  }
+
+  /**
+   * 记录一次「智能体查询」的 token 成本。
+   * 只有带 actor 的调用才记账（工具调用），设置页自己刷新列表不算。
+   */
+  function recordUsage(tool, options, items) {
+    if (typeof options?.actor !== 'string' || options.actor === '') return null
+    const ledger = usageLedger()
+    const query = typeof options.query === 'string' ? options.query : ''
+    const queryTokens = estimateTokens(query)
+    const typeTokens = { note: 0, memory: 0 }
+    let resultTokens = 0
+    for (const item of items) {
+      const tags = Array.isArray(item.tags) ? item.tags.join(' ') : ''
+      const tokens = estimateTokens(`${item.id} ${item.layer} ${item.title} ${item.content} ${tags}`)
+      resultTokens += tokens
+      if (item.type === 'note' || item.type === 'memory') typeTokens[item.type] += tokens
+    }
+    const type = options.type === 'note' ? 'note' : options.type === 'memory' ? 'memory' : 'all'
+    bumpUsage(ledger, queryTokens, resultTokens)
+    ledger.byTool[tool] = ledger.byTool[tool] ?? emptyUsageBucket()
+    bumpUsage(ledger.byTool[tool], queryTokens, resultTokens)
+    ledger.byType[type] = ledger.byType[type] ?? emptyUsageBucket()
+    bumpUsage(ledger.byType[type], queryTokens, resultTokens)
+    ledger.recent.push({
+      at: new Date().toISOString(),
+      tool,
+      actor: options.actor,
+      type,
+      typeTokens,
+      // 关闭操作审计时不落查询原文，避免把可能含隐私的检索词写进账本。
+      query: settings().privacy.auditLog === false ? '' : truncate(query, 120),
+      queryTokens,
+      resultTokens,
+      results: items.length,
+    })
+    if (ledger.recent.length > MAX_USAGE_RECENT) ledger.recent = ledger.recent.slice(-MAX_USAGE_RECENT)
+    scheduleAccessPersist()
+    return { queryTokens, resultTokens, totalTokens: queryTokens + resultTokens }
+  }
+
+  /** 查询用量：按工具 / 类型 / 时间过滤，返回汇总与最近明细。 */
+  function usageStats(options = {}) {
+    const ledger = usageLedger()
+    const since = typeof options.since === 'string' && options.since !== '' ? Date.parse(options.since) : 0
+    const tool = typeof options.tool === 'string' && options.tool !== '' ? options.tool : ''
+    const type = options.type === 'note' || options.type === 'memory' ? options.type : ''
+    const matches = (entry) => {
+      if (tool !== '' && entry.tool !== tool) return false
+      if (type !== '' && entry.type !== type && !((entry.typeTokens?.[type] ?? 0) > 0)) return false
+      if (since > 0 && Date.parse(entry.at) < since) return false
+      return true
+    }
+    const recent = ledger.recent.filter(matches)
+    const sum = recent.reduce((acc, entry) => {
+      acc.calls += 1
+      acc.queryTokens += entry.queryTokens ?? 0
+      acc.resultTokens += type === ''
+        ? (entry.resultTokens ?? 0)
+        : (entry.typeTokens?.[type] ?? (entry.type === type ? entry.resultTokens ?? 0 : 0))
+      return acc
+    }, { calls: 0, queryTokens: 0, resultTokens: 0 })
+    // 分组统计跟随当前筛选，避免“筛选记事本却看到全量桶”的误读。
+    const byTool = {}
+    const byType = {}
+    for (const entry of recent) {
+      const result = type === ''
+        ? (entry.resultTokens ?? 0)
+        : (entry.typeTokens?.[type] ?? (entry.type === type ? entry.resultTokens ?? 0 : 0))
+      byTool[entry.tool] = byTool[entry.tool] ?? emptyUsageBucket()
+      bumpUsage(byTool[entry.tool], entry.queryTokens ?? 0, result)
+      const typeKey = type === '' ? entry.type : type
+      byType[typeKey] = byType[typeKey] ?? emptyUsageBucket()
+      bumpUsage(byType[typeKey], entry.queryTokens ?? 0, result)
+    }
+    return {
+      ...sum,
+      totalTokens: sum.queryTokens + sum.resultTokens,
+      allTime: {
+        calls: ledger.calls ?? 0,
+        queryTokens: ledger.queryTokens ?? 0,
+        resultTokens: ledger.resultTokens ?? 0,
+      },
+      byTool,
+      byType,
+      recent: recent.slice(-50).reverse(),
+      filters: { since: options.since ?? null, tool: tool || null, type: type || null },
+    }
+  }
+
+  function reinforcementMap() {
+    const current = currentState()
+    if (current.meta.reinforcement === null || typeof current.meta.reinforcement !== 'object') {
+      current.meta.reinforcement = {}
+    }
+    return current.meta.reinforcement
+  }
+
+  /** 强化信号：写入 / 更新 / 检索命中。 */
+  function reinforce(item, kind) {
+    if (item?.type !== 'memory') return
+    const map = reinforcementMap()
+    const now = new Date().toISOString()
+    const record = map[item.id] ?? {
+      count: 0,
+      firstAt: now,
+      lastAt: now,
+      create: 0,
+      update: 0,
+      hit: 0,
+    }
+    record.count = (record.count ?? 0) + 1
+    record.lastAt = now
+    record[kind] = (record[kind] ?? 0) + 1
+    map[item.id] = record
+  }
+
+  function pruneMetaFor(ids) {
+    const current = currentState()
+    const keep = new Set(ids)
+    for (const key of ['reinforcement', 'consolidation']) {
+      const map = current.meta[key]
+      if (map === null || typeof map !== 'object') continue
+      for (const id of Object.keys(map)) {
+        if (!keep.has(id)) delete map[id]
+      }
+    }
+  }
+
+  /** 固化候选：窗口内强化次数达到阈值、可修改层、状态可用的记忆。 */
+  function consolidationCandidates(options = {}) {
+    const current = currentState()
+    const active = settings()
+    if (active.consolidation.enabled !== true) return []
+    const now = Date.now()
+    const map = reinforcementMap()
+    const records = current.meta.consolidation !== null && typeof current.meta.consolidation === 'object'
+      ? current.meta.consolidation
+      : {}
+    const windowMs = Math.max(1, active.consolidation.windowDays) * 86400000
+    const threshold = Math.max(2, active.consolidation.threshold)
+    const out = []
+    for (const item of current.items) {
+      if (item.type !== 'memory') continue
+      if (item.status !== 'active' && item.status !== 'conflicted') continue
+      if (isExpiredItem(item, now)) continue
+      if (layerInfo(item.layer).immutable) continue
+      if (item.importance < active.consolidation.minImportance) continue
+      const signal = map[item.id]
+      if (signal === undefined) continue
+      if (signal.count < threshold) continue
+      if (now - Date.parse(signal.lastAt) > windowMs) continue
+      const record = records[item.id]
+      if (record?.state === 'approved' && Date.parse(record.at) >= Date.parse(signal.lastAt)) continue
+      if (record?.state === 'rejected' && Date.parse(record.at) >= Date.parse(signal.lastAt)) continue
+      const ageDays = Math.max(0, (now - Date.parse(signal.firstAt)) / 86400000)
+      out.push({
+        id: item.id,
+        title: item.title,
+        layer: item.layer,
+        layerName: layerInfo(item.layer).name,
+        importance: item.importance,
+        status: item.status,
+        accessCount: item.accessCount ?? 0,
+        signals: signal.count,
+        windowDays: Math.round(ageDays * 10) / 10,
+        firstAt: signal.firstAt,
+        lastAt: signal.lastAt,
+        breakdown: { create: signal.create ?? 0, update: signal.update ?? 0, hit: signal.hit ?? 0 },
+        suggestedLayer: active.consolidation.targetLayer,
+        suggestedTtlDays: active.consolidation.ttlDays,
+        state: record?.state ?? 'new',
+      })
+    }
+    out.sort((left, right) => right.signals - left.signals || right.importance - left.importance)
+    const cap = Math.max(1, active.consolidation.maxCandidates)
+    return typeof options.limit === 'number' ? out.slice(0, Math.max(1, Math.min(cap, options.limit))) : out.slice(0, cap)
+  }
+
+  /** 把候选写进审计（每轮只记录新出现的候选，避免刷屏）。 */
+  function proposeConsolidation(current, active) {
+    const candidates = consolidationCandidates()
+    if (candidates.length === 0) return { proposed: 0, candidates: [] }
+    if (current.meta.consolidation === null || typeof current.meta.consolidation !== 'object') {
+      current.meta.consolidation = {}
+    }
+    const records = current.meta.consolidation
+    let proposed = 0
+    for (const candidate of candidates) {
+      const record = records[candidate.id]
+      if (record?.state === 'candidate') continue
+      records[candidate.id] = {
+        state: 'candidate',
+        at: new Date().toISOString(),
+        signals: candidate.signals,
+        score: candidate.signals * (1 + candidate.importance / 10),
+        suggestedLayer: candidate.suggestedLayer,
+      }
+      audit('consolidation.proposed', `${candidate.id} ${candidate.layer} ${candidate.title}（信号 ${candidate.signals}）`, 'system')
+      proposed += 1
+    }
+    return { proposed, candidates }
+  }
+
+  /**
+   * 固化审计的最终动作：智能体确认后调用。
+   * approve 会把层级提升到 targetLayer、写入有限保鲜期并留审计；
+   * reject 只记录理由，等新的强化信号再重新进入候选。
+   */
+  async function applyConsolidation(id, decision, options = {}, actor = 'agent') {
+    const current = await ensureLoaded()
+    const active = settings()
+    if (active.consolidation.enabled !== true) throw createError('CONSOLIDATION_OFF', '固化功能已在设置里关闭')
+    const item = current.items.find((candidate) => candidate.id === id)
+    if (item === undefined) throw createError('NOT_FOUND', `找不到条目 ${id}`)
+    if (layerInfo(item.layer).immutable) throw createError('READ_ONLY', `${item.layer} 是不可变层，不需要固化`)
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw createError('INVALID_DECISION', 'decision 只能是 approve 或 reject')
+    }
+    const now = new Date().toISOString()
+    const records = current.meta.consolidation !== null && typeof current.meta.consolidation === 'object'
+      ? current.meta.consolidation
+      : (current.meta.consolidation = {})
+    const note = typeof options.note === 'string' ? truncate(options.note, 240) : ''
+    if (decision === 'reject') {
+      records[id] = {
+        state: 'rejected',
+        at: now,
+        by: actor,
+        note,
+        signals: current.meta.reinforcement?.[id]?.count ?? 0,
+      }
+      audit('consolidation.rejected', `${id} ${item.layer} ${item.title}${note === '' ? '' : `：${note}`}`, actor)
+      await persist()
+      return { decision: 'reject', record: records[id], item: decorate(item) }
+    }
+    const targetLayer = options.targetLayer === undefined
+      ? active.consolidation.targetLayer
+      : String(options.targetLayer)
+    if (!LAYER_IDS.includes(targetLayer)) {
+      throw createError('INVALID_LAYER', `固化目标层 ${targetLayer} 不存在`)
+    }
+    const targetInfo = layerInfo(targetLayer)
+    if (targetInfo.immutable) throw createError('READ_ONLY', `${targetLayer} 是不可变层，不能作为固化目标`)
+    if (!layerEnabled(active, targetLayer)) throw createError('LAYER_DISABLED', `${targetLayer} 已在设置里关闭`)
+    const ttlDays = options.ttlDays === undefined
+      ? Math.max(1, active.consolidation.ttlDays)
+      : Math.max(1, Math.round(Number(options.ttlDays) || active.consolidation.ttlDays))
+    if (records[id]?.state !== 'candidate') {
+      throw createError('NOT_CANDIDATE', `条目 ${id} 不在固化候选状态，请先扫描强化信号`)
+    }
+    const fromLayer = item.layer
+    item.layer = targetLayer
+    item.ttlDays = ttlDays
+    item.importance = Math.max(item.importance, active.consolidation.minImportance)
+    item.updatedAt = now
+    item.version = (item.version ?? 1) + 1
+    item.expiresAt = expiresAtFor(item, active)
+    if (item.status === 'conflicted' && !layerInfo(targetLayer).conflictable) item.status = 'active'
+    records[id] = {
+      state: 'approved',
+      at: now,
+      by: actor,
+      note,
+      fromLayer,
+      toLayer: targetLayer,
+      ttlDays,
+      signals: current.meta.reinforcement?.[id]?.count ?? 0,
+      score: (current.meta.reinforcement?.[id]?.count ?? 0) * (1 + item.importance / 10),
+    }
+    indexItem(item)
+    audit('consolidation.approved', `${id} ${fromLayer} → ${targetLayer} ${item.title}（保鲜 ${ttlDays} 天${note === '' ? '' : `；${note}`}）`, actor)
+    await persist()
+    return { decision: 'approve', record: records[id], item: decorate(item) }
+  }
+
   // ---------------------------------------------------------------- 读取 ----
 
   function listItems(options = {}) {
@@ -208,15 +595,18 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       for (const item of sorted) {
         item.accessCount = (item.accessCount ?? 0) + 1
         item.lastAccessAt = new Date().toISOString()
+        reinforce(item, 'hit')
       }
       if (sorted.length > 0) scheduleAccessPersist()
       current.meta.searches = (current.meta.searches ?? 0) + 1
+      const listed = sorted.map((item) => ({ ...decorate(item), score: round(scoreItem(item, new Set(), active, Date.now())) }))
       return {
-        items: sorted.map((item) => ({ ...decorate(item), score: round(scoreItem(item, new Set(), active, Date.now())) })),
+        items: listed,
         total: scope.length,
         query,
         limit,
         tokens: 0,
+        usage: recordUsage('memory_search', options, listed),
         tookMs: Date.now() - started,
         breakdown: 'listing',
       }
@@ -243,8 +633,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       for (const hit of result.hits ?? []) {
         const item = itemMap.get(hit.id)
         if (item === undefined) continue
+        if (isExpiredItem(item, started)) continue
         item.accessCount = (item.accessCount ?? 0) + 1
         item.lastAccessAt = new Date().toISOString()
+        reinforce(item, 'hit')
         hits.push({ ...decorate(item), score: round(hit.score), breakdown: hit.breakdown })
       }
       if (hits.length > 0) scheduleAccessPersist()
@@ -255,6 +647,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         query,
         limit,
         tokens: tokenize(query).size,
+        usage: recordUsage('memory_search', options, hits),
         tookMs: Date.now() - started,
         weights: result.weights,
         cached: false,
@@ -278,8 +671,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     for (const hit of result.items) {
       const item = itemMap.get(hit.item.id)
       if (item === undefined) continue
+      if (isExpiredItem(item, started)) continue
       item.accessCount = (item.accessCount ?? 0) + 1
       item.lastAccessAt = new Date().toISOString()
+      reinforce(item, 'hit')
       hits.push({ ...decorate(item), score: round(hit.score), breakdown: hit.breakdown })
     }
     if (hits.length > 0) scheduleAccessPersist()
@@ -290,6 +685,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       query,
       limit,
       tokens: tokenize(query).size,
+      usage: recordUsage('memory_search', options, hits),
       tookMs: Date.now() - started,
       weights: result.weights,
       cached: result.cached === true,
@@ -344,9 +740,14 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (item === undefined) throw createError('INVALID', '无法创建条目')
 
     const duplicate = findSimilar(current.items, item, active.write.dedupeThreshold)
-    if (duplicate !== undefined) item.duplicateOf = duplicate.id
+    if (duplicate !== undefined) {
+      item.duplicateOf = duplicate.id
+      // 同一条事实被反复强调，也是固化信号。
+      reinforce(duplicate, 'create')
+    }
     // 保鲜期：L6/L7 默认层或显式 ttlDays 的条目到期后由清理任务归档。
     item.expiresAt = expiresAtFor(item, active)
+    reinforce(item, 'create')
     current.items.push(item)
     indexItem(item)
     detectConflicts(current, item, active)
@@ -372,6 +773,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       const layer = normalizeLayer(patch.layer)
       assertLayerWritable(active, layer)
       next.layer = layer
+      // 不可变层不允许携带保鲜期，移入时一并清掉。
+      if (layerInfo(layer).immutable) next.ttlDays = null
     }
     if (patch.notebook !== undefined && next.type === 'note') next.notebook = normalizeNotebook(patch.notebook)
     if (patch.pinned !== undefined) next.pinned = patch.pinned === true
@@ -385,10 +788,18 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       && patch.status === undefined && patch.ttlDays === undefined && patch.notebook === undefined) {
       return decorate(before)
     }
+    // 修改可修改层的内容/重要度时必须续期：老数据没有 ttlDays 时要求这次补填。
+    const contentTouched = patch.title !== undefined || patch.content !== undefined
+      || patch.tags !== undefined || patch.importance !== undefined || patch.layer !== undefined
+    if (contentTouched && next.type === 'memory' && !layerInfo(next.layer).immutable
+      && patch.ttlDays === undefined) {
+      throw createError('TTL_REQUIRED', `修改 ${next.layer} 记忆时必须同时填写或更新 ttlDays（保鲜期）`)
+    }
     next.updatedAt = new Date().toISOString()
     next.version = (before.version ?? 1) + 1
     next.expiresAt = expiresAtFor(next, active)
     current.items[index] = normalizeItem(next) ?? before
+    reinforce(current.items[index], 'update')
     indexItem(current.items[index])
     detectConflicts(current, current.items[index], active)
     audit('update', `${current.items[index].layer}/${current.items[index].title}`, actor)
@@ -417,6 +828,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
     if (removed.length > 0) {
       for (const id of removed) unindexItem(id)
+      pruneMetaFor(current.items.map((item) => item.id))
       audit('delete', `删除 ${removed.length} 条：${removed.slice(0, 5).join(', ')}`, actor)
       await persist()
     }
@@ -436,11 +848,20 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     for (const item of current.items) {
       if (!wanted.has(item.id)) continue
       if (layerInfo(item.layer).immutable && !active.write.allowImmutableEdit) continue
+      const before = changed
       if (action === 'archive' && item.status !== 'archived') {
         item.status = 'archived'
         changed += 1
       } else if (action === 'restore' && item.status !== 'active') {
         item.status = 'active'
+        // 恢复已过期条目时补一次保鲜期，否则下一次 cleanup 会立刻再归档。
+        if (layerInfo(item.layer).immutable) {
+          item.ttlDays = null
+          item.expiresAt = null
+        } else if (item.type === 'memory' && (item.expiresAt === null || Date.parse(item.expiresAt) <= Date.now())) {
+          item.ttlDays = Math.max(1, Math.round(Number(item.ttlDays) || Number(active.write.defaultTtlDays) || 30))
+          item.expiresAt = expiresAtFor(item, active)
+        }
         changed += 1
       } else if (action === 'pin' && !item.pinned) {
         item.pinned = true
@@ -461,7 +882,17 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           changed += 1
         }
       }
-      if (changed > 0) {
+      if (changed > before) {
+        // 提升/降低重要度属于“修改”，同步续期，避免绕过保鲜期硬约束。
+        if ((action === 'promote' || action === 'demote') && item.type === 'memory') {
+          if (layerInfo(item.layer).immutable) {
+            item.ttlDays = null
+            item.expiresAt = null
+          } else {
+            item.ttlDays = Math.max(1, Math.round(Number(item.ttlDays) || Number(active.write.defaultTtlDays) || 30))
+            item.expiresAt = expiresAtFor(item, active)
+          }
+        }
         item.updatedAt = new Date().toISOString()
         item.version = (item.version ?? 1) + 1
       }
@@ -494,7 +925,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const now = Date.now()
     const wanted = Array.isArray(options.tasks) && options.tasks.length > 0
       ? options.tasks.filter((task) => typeof task === 'string')
-      : ['cleanup', 'rotate', 'archive', 'dedupe', 'reflect']
+      : ['cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'consolidate']
     const report = { ranAt: new Date().toISOString(), tasks: [], totals: {} }
     let dirty = false
 
@@ -566,6 +997,27 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         }
         current.meta.lastReflect = new Date().toISOString()
         report.tasks.push({ task, changed: result.changed, note: result.note, suggestions: result.suggestions })
+      } else if (task === 'consolidate') {
+        const proposal = proposeConsolidation(current, active)
+        let applied = 0
+        if (active.consolidation.autoApply === true) {
+          for (const candidate of proposal.candidates) {
+            try {
+              await applyConsolidation(candidate.id, 'approve', { note: '维护任务自动固化' }, 'system')
+              applied += 1
+            } catch (error) {
+              audit('consolidation.failed', `${candidate.id}：${error?.message ?? error}`, 'system')
+            }
+          }
+        }
+        dirty = true
+        report.tasks.push({
+          task,
+          changed: proposal.proposed,
+          applied,
+          note: `新增固化候选 ${proposal.proposed} 条${applied > 0 ? `，自动固化 ${applied} 条` : '，等待智能体审计'}`,
+          candidates: proposal.candidates,
+        })
       } else if (task === 'compact') {
         const keep = Math.max(0, active.maintenance.auditKeep)
         const before = current.audit.length
@@ -736,6 +1188,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (oldest === null || item.createdAt < oldest) oldest = item.createdAt
     }
     const total = current.items.length
+    const consolidation = current.meta.consolidation !== null && typeof current.meta.consolidation === 'object'
+      ? current.meta.consolidation
+      : {}
+    const consolidationState = { candidate: 0, approved: 0, rejected: 0 }
+    for (const record of Object.values(consolidation)) {
+      if (record?.state !== undefined && consolidationState[record.state] !== undefined) {
+        consolidationState[record.state] += 1
+      }
+    }
     return {
       total,
       memories: byType.memory,
@@ -748,6 +1209,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       oldest,
       writes: current.meta.writes ?? 0,
       searches: current.meta.searches ?? 0,
+      usage: {
+        calls: current.meta.usage?.calls ?? 0,
+        queryTokens: current.meta.usage?.queryTokens ?? 0,
+        resultTokens: current.meta.usage?.resultTokens ?? 0,
+      },
+      consolidation: consolidationState,
       enabledLayers: LAYER_IDS.filter((id) => layerEnabled(active, id)),
       lastMaintenance: current.meta.lastMaintenance ?? null,
     }
@@ -790,16 +1257,28 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (incoming.length === 0) throw createError('EMPTY_IMPORT', '导入内容里没有 items')
     const imported = []
     let skipped = 0
+    let ttlFilled = 0
     const existingIds = new Set(current.items.map((item) => item.id))
+    // replace 模式也不能借导入覆盖受保护的不可变层条目。
+    const protectedIds = mode === 'replace'
+      ? new Set(current.items
+        .filter((item) => layerInfo(item.layer).immutable && !active.write.allowImmutableEdit)
+        .map((item) => item.id))
+      : null
     for (const candidate of incoming) {
       const normalized = normalizeItem(candidate)
       if (normalized === undefined) {
         skipped += 1
         continue
       }
+      if (protectedIds !== null && protectedIds.has(normalized.id)) {
+        skipped += 1
+        continue
+      }
       if (mode !== 'replace' && existingIds.has(normalized.id)) normalized.id = newId()
       existingIds.add(normalized.id)
       normalized.source = { ...normalized.source, kind: 'import' }
+      if (normalizeImportedTtl(normalized, active)) ttlFilled += 1
       imported.push(normalized)
     }
     if (mode === 'replace') {
@@ -809,43 +1288,140 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       current.items = [...replaced.values()]
     } else {
       current.items = [...current.items, ...imported]
-      reindexAll()
     }
+    reindexAll()
     if (payload?.settings !== undefined && mode === 'replace') current.settings = normalizeSettings(payload.settings)
-    audit('import', `导入 ${imported.length} 条（跳过 ${skipped}）`, 'user')
+    audit('import', `导入 ${imported.length} 条（跳过 ${skipped}${ttlFilled > 0 ? `，补全保鲜期 ${ttlFilled}` : ''}）`, 'user')
     await persist()
-    return { imported: imported.length, skipped, mode }
+    return { imported: imported.length, skipped, ttlFilled, mode }
   }
 
-  /** 提示词注入用的摘要文本。 */
-  function promptDigest(now = Date.now()) {
+  /**
+   * 构造提示词注入：模板头 + 排序后的记忆行。
+   * promptDigest 只要文本；injectionStats 还要每层 token 明细，两者共用这一份结果，
+   * 避免 UI 看到的预算与实际注入的不是同一套算法。
+   */
+  function buildDigest(now = Date.now()) {
     const current = currentState()
     const active = settings()
-    if (!active.enabled || !active.prompt.inject || active.prompt.topN <= 0) return ''
+    const template = activeTemplate(active)
+    const budget = promptBudget(active)
+    const enabled = active.enabled !== false && active.prompt.inject !== false && budget.topN > 0
+    const empty = {
+      enabled,
+      text: '',
+      preview: '',
+      tokens: 0,
+      chars: 0,
+      topN: budget.topN,
+      maxChars: budget.maxChars,
+      truncated: false,
+      template: { id: template.id, name: template.name, desc: template.desc },
+      itemCount: 0,
+      headerTokens: 0,
+      headerChars: 0,
+      headerPercent: 0,
+      lines: [],
+      layers: LAYERS.map((layer) => ({
+        id: layer.id,
+        name: layer.name,
+        disabled: !layerEnabled(active, layer.id),
+        count: 0,
+        tokens: 0,
+        chars: 0,
+        percent: 0,
+      })),
+    }
+    if (!enabled) return empty
     const candidates = current.items.filter((item) => {
       if (item.status !== 'active' && item.status !== 'conflicted') return false
+      if (isExpiredItem(item, now)) return false
       if (!layerEnabled(active, item.layer)) return false
       if (item.type !== 'memory') return false
       return true
     })
     const scored = candidates.map((item) => ({ item, score: scoreItem(item, new Set(), active, now) }))
     scored.sort((left, right) => right.score - left.score)
-    const chosen = scored.slice(0, active.prompt.topN)
-    if (chosen.length === 0) return ''
+    const chosen = scored.slice(0, budget.topN)
+    if (chosen.length === 0) return empty
     const lines = chosen.map(({ item }) => {
       const body = truncate(item.content.replace(/\s+/g, ' ').trim(), 220)
       return `- [${item.layer}·重要度${item.importance}] ${item.title}：${body}`
     })
-    const header = [
-      '## 长期记忆（dsh-memory-plugin）',
-      '下面是从跨会话记忆里挑出的、可能相关的条目。只在确实相关时使用，不要臆造未列出的记忆。',
-      '需要更多细节时用 memory_search 检索；新的关键事实用 memory_write 保存。',
-    ].join('\n')
+    const header = template.header
     let text = `${header}\n${lines.join('\n')}`
-    if (active.prompt.maxChars > 0 && text.length > active.prompt.maxChars) {
-      text = `${text.slice(0, Math.max(0, active.prompt.maxChars - 1))}…`
+    let truncated = false
+    if (budget.maxChars > 0 && text.length > budget.maxChars) {
+      text = `${text.slice(0, Math.max(0, budget.maxChars - 1))}…`
+      truncated = true
     }
-    return text
+    const headerTokens = estimateTokens(header)
+    const lineTokens = lines.map((line) => estimateTokens(line))
+    const lineTokenSum = lineTokens.reduce((sum, value) => sum + value, 0)
+    const totalTokens = estimateTokens(text)
+    const headerPercent = totalTokens === 0
+      ? 0
+      : Math.min(100, Math.round((headerTokens / totalTokens) * 1000) / 10)
+    // 截断可能切掉半行：按剩余预算等比例折算，保证每层之和 ≈ 实际注入。
+    const scale = truncated && lineTokenSum > 0
+      ? Math.max(0, totalTokens - Math.min(headerTokens, totalTokens)) / lineTokenSum
+      : 1
+    const byLayer = new Map(LAYERS.map((layer) => [layer.id, {
+      id: layer.id,
+      name: layer.name,
+      disabled: !layerEnabled(active, layer.id),
+      count: 0,
+      tokens: 0,
+      chars: 0,
+      percent: 0,
+    }]))
+    const lineStats = []
+    chosen.forEach(({ item }, index) => {
+      const tokens = Math.max(0, Math.round(lineTokens[index] * scale))
+      const bucket = byLayer.get(item.layer)
+      bucket.count += 1
+      bucket.tokens += tokens
+      bucket.chars += lines[index].length
+      lineStats.push({
+        id: item.id,
+        title: item.title,
+        layer: item.layer,
+        importance: item.importance,
+        tokens,
+        chars: lines[index].length,
+      })
+    })
+    const layers = [...byLayer.values()].map((bucket) => ({
+      ...bucket,
+      percent: totalTokens === 0 ? 0 : Math.round((bucket.tokens / totalTokens) * 1000) / 10,
+    }))
+    return {
+      enabled,
+      text,
+      preview: text.slice(0, 2000),
+      tokens: totalTokens,
+      chars: text.length,
+      topN: budget.topN,
+      maxChars: budget.maxChars,
+      truncated,
+      template: { id: template.id, name: template.name, desc: template.desc },
+      itemCount: chosen.length,
+      headerTokens,
+      headerChars: header.length,
+      headerPercent,
+      lines: lineStats,
+      layers,
+    }
+  }
+
+  /** 提示词注入用的摘要文本。 */
+  function promptDigest(now = Date.now()) {
+    return buildDigest(now).text
+  }
+
+  /** 注入预算明细（UI 与 API 用）。 */
+  function injectionStats(now = Date.now()) {
+    return buildDigest(now)
   }
 
   const api = {
@@ -859,6 +1435,11 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     notebooks: () => NOTEBOOK_LIST,
     auditList: (limit = 50) => currentState().audit.slice(-clampInt(limit, 1, 1000, 50)).reverse(),
     meta: () => currentState().meta,
+    injectionStats,
+    usageStats,
+    templates: () => ({ active: activeTemplate(settings()).id, list: MEMORY_TEMPLATES }),
+    consolidationCandidates,
+    applyConsolidation,
     // 检索/索引诊断
     searchStats: () => searchEngine.stats(),
     resetSearchStats: () => searchEngine.resetStats(),
@@ -907,13 +1488,17 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
 const NOTEBOOK_LIST = []
 
 /** 条目对外视图：补上分层名、是否只读、是否过期。 */
+function isExpiredItem(item, now = Date.now()) {
+  return item?.expiresAt !== null && item?.expiresAt !== undefined && Date.parse(item.expiresAt) <= now
+}
+
 function decorate(item) {
   const info = layerInfo(item.layer)
   return {
     ...item,
     layerName: info.name,
     layerImmutable: info.immutable === true,
-    isExpired: item.expiresAt !== null && Date.parse(item.expiresAt) <= Date.now(),
+    isExpired: isExpiredItem(item),
   }
 }
 
@@ -928,6 +1513,7 @@ function filterItems(items, options, active) {
   const tag = typeof options.tag === 'string' && options.tag.trim() !== '' ? options.tag.trim().toLowerCase() : undefined
   const query = typeof options.query === 'string' ? options.query.trim().toLowerCase() : ''
   const minImportance = clampInt(options.minImportance, 1, 10, 1)
+  const now = Date.now()
   return items.filter((item) => {
     if (!layerEnabled(active, item.layer)) return false
     if (layer !== undefined && item.layer !== layer) return false
@@ -935,6 +1521,8 @@ function filterItems(items, options, active) {
     if (notebook !== undefined && item.notebook !== notebook) return false
     if (status === 'usable') {
       if (item.status !== 'active' && item.status !== 'conflicted') return false
+      // 过期但尚未跑 cleanup 的条目不应再被检索/注入。
+      if (isExpiredItem(item, now)) return false
     } else if (status !== 'all' && item.status !== status) {
       return false
     }
@@ -1048,6 +1636,7 @@ function normalizeItem(raw) {
 }
 
 function expiresAtFor(item, active) {
+  if (layerInfo(item.layer).immutable) return null
   if (item.ttlDays === null || item.ttlDays === undefined) {
     const info = layerInfo(item.layer)
     if (info.ttl !== true) return null
@@ -1058,11 +1647,16 @@ function expiresAtFor(item, active) {
 }
 
 function normalizeTtl(value, active, layer) {
+  const info = layerInfo(layer)
+  if (info.immutable === true) return null
   if (value === null || value === undefined || value === '' || value === 0) {
-    return layerInfo(layer).ttl === true ? Math.max(1, active.maintenance.ttlDays) : null
+    // 可修改层必须显式给保鲜期，绝不默认无限期。
+    throw createError('TTL_REQUIRED', `写入 ${layer} ${info.name.zh}时必须填写 ttlDays（保鲜期，单位天）`)
   }
   const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw createError('TTL_REQUIRED', 'ttlDays 必须是大于 0 的天数')
+  }
   return Math.max(1, Math.round(parsed))
 }
 
@@ -1142,7 +1736,16 @@ function round(value) {
 }
 
 // 由 index.js 注入，避免循环依赖。
-export const TOOL_NAMES = ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats']
+export const TOOL_NAMES = [
+  'memory_write',
+  'memory_search',
+  'memory_get',
+  'memory_update',
+  'memory_forget',
+  'memory_stats',
+  'memory_usage',
+  'memory_consolidate',
+]
 
 // 记事本列表在模块初始化后填充（NOTEBOOKS 来自 settings.js）。
 import { NOTEBOOKS } from './settings.js'

@@ -169,6 +169,47 @@ window.__ModuleLoader__.load({
         background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.06)) }
       .mp-chip.is-warn { color:var(--dsw-alias-state-warning-primary,#b45309) }
       .mp-chip.is-bad { color:var(--dsw-alias-state-error-primary,#dc2626) }
+      /* 分层徽章：颜色 + 粗体，扫列表时先看到层，不必读正文。 */
+      .mp-layer-badge { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:700;
+        padding:1px 7px; border-radius:6px; border:1px solid transparent; letter-spacing:.02em }
+      .mp-layer-badge::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor }
+      .mp-layer-badge.is-large { font-size:12px; padding:3px 9px }
+      .mp-layer-badge.is-l0 { color:#7c3aed; background:rgba(124,58,237,.12); border-color:rgba(124,58,237,.28) }
+      .mp-layer-badge.is-l1 { color:#4f46e5; background:rgba(79,70,229,.12); border-color:rgba(79,70,229,.28) }
+      .mp-layer-badge.is-l2 { color:#2563eb; background:rgba(37,99,235,.12); border-color:rgba(37,99,235,.28) }
+      .mp-layer-badge.is-l3 { color:#0d9488; background:rgba(13,148,136,.12); border-color:rgba(13,148,136,.28) }
+      .mp-layer-badge.is-l4 { color:#16a34a; background:rgba(22,163,74,.12); border-color:rgba(22,163,74,.28) }
+      .mp-layer-badge.is-l5 { color:#b45309; background:rgba(180,83,9,.12); border-color:rgba(180,83,9,.28) }
+      .mp-layer-badge.is-l6 { color:#ea580c; background:rgba(234,88,12,.12); border-color:rgba(234,88,12,.28) }
+      .mp-layer-badge.is-l7 { color:#475569; background:rgba(71,85,105,.12); border-color:rgba(71,85,105,.28) }
+      .mp-inject { gap:8px }
+      .mp-inject-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap }
+      .mp-inject-main { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap }
+      .mp-inject-tokens { font-size:22px; font-weight:750; line-height:1.1; letter-spacing:-.02em }
+      .mp-inject-unit { font-size:11px; color:var(--dsw-alias-label-tertiary,#9ca3af) }
+      .mp-meter { height:7px; border-radius:999px; overflow:hidden;
+        background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.08)); display:flex }
+      .mp-meter span { height:100%; display:block }
+      .mp-meter span.is-l0 { background:#7c3aed } .mp-meter span.is-l1 { background:#4f46e5 }
+      .mp-meter span.is-l2 { background:#2563eb } .mp-meter span.is-l3 { background:#0d9488 }
+      .mp-meter span.is-l4 { background:#16a34a } .mp-meter span.is-l5 { background:#b45309 }
+      .mp-meter span.is-l6 { background:#ea580c } .mp-meter span.is-l7 { background:#475569 }
+      .mp-meter span.is-header { background:var(--dsw-alias-label-tertiary,#9ca3af) }
+      .mp-layer-table { display:grid; grid-template-columns:1fr auto auto; gap:4px 10px; align-items:center; font-size:12px }
+      .mp-layer-table .mp-hint { font-size:11px }
+      .mp-bar { height:5px; border-radius:999px; background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.08)); overflow:hidden }
+      .mp-bar span { display:block; height:100% }
+      .mp-bar span.is-l0 { background:#7c3aed } .mp-bar span.is-l1 { background:#4f46e5 }
+      .mp-bar span.is-l2 { background:#2563eb } .mp-bar span.is-l3 { background:#0d9488 }
+      .mp-bar span.is-l4 { background:#16a34a } .mp-bar span.is-l5 { background:#b45309 }
+      .mp-bar span.is-l6 { background:#ea580c } .mp-bar span.is-l7 { background:#475569 }
+      .mp-usage-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px }
+      .mp-kpi { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px; padding:8px 10px }
+      .mp-kpi b { display:block; font-size:18px; line-height:1.2 }
+      .mp-consolidate-row { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px; padding:8px 10px;
+        display:flex; flex-direction:column; gap:6px }
+      .mp-ttl-alert { border-left:3px solid var(--dsw-alias-state-warning-primary,#b45309); padding:5px 8px;
+        background:rgba(180,83,9,.08); border-radius:6px; font-size:11px; color:var(--dsw-alias-state-warning-primary,#b45309) }
       .mp-editor { flex:1 1 420px; min-width:300px; display:flex; flex-direction:column; gap:10px;
         border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:10px; padding:12px;
         background:var(--dsw-alias-bg-layer-1,#fff) }
@@ -298,7 +339,115 @@ window.__ModuleLoader__.load({
       return h('span', { style: { display: 'inline-flex', gap: '4px' } }, chips)
     }
 
+    function LayerBadge({ item, large }) {
+      const layer = String(item?.layer ?? 'L5')
+      const name = labelOf(item?.layerName)
+      return h('span', {
+        className: `mp-layer-badge is-${layer.toLowerCase()}${large === true ? ' is-large' : ''}`,
+        title: `${layer} ${name}`.trim(),
+      }, `${layer}${name === '' ? '' : ` ${name}`}`)
+    }
+
     // ------------------------------------------------------------ 主组件 ----
+
+    /**
+     * 顶部注入预算卡：默认只看总 token，展开后按层拆分。
+     * 模板切换直接写 settings.prompt.template，系统提示词下一轮就按新模板生成。
+     */
+    function InjectionCard({ api, lang, boot, notify, onChanged }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const injection = boot.injection ?? {}
+      const templates = boot.templates?.list ?? []
+      const [expanded, setExpanded] = useState(false)
+      const [saving, setSaving] = useState(false)
+      const [templateId, setTemplateId] = useState(boot.settings?.prompt?.template ?? injection.template?.id ?? 'default')
+
+      useEffect(() => {
+        setTemplateId(boot.settings?.prompt?.template ?? injection.template?.id ?? 'default')
+      }, [boot.settings?.prompt?.template, injection.template?.id])
+
+      async function switchTemplate(next) {
+        setTemplateId(next)
+        setSaving(true)
+        try {
+          await api('settings.save', { patch: { prompt: { template: next } } })
+          notify(txt('模板已切换，下一轮对话立即生效', 'Template switched; takes effect on the next turn'))
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      const layers = injection.layers ?? []
+      const total = injection.tokens ?? 0
+      const maxChars = injection.maxChars ?? 0
+      const headerTokens = injection.headerTokens ?? 0
+      const headerPercent = injection.headerPercent ?? 0
+      const charPercent = maxChars > 0 ? Math.min(100, ((injection.chars ?? 0) / maxChars) * 100) : 0
+      const activeName = injection.template?.name
+      const activeLabel = typeof activeName === 'object' ? labelOf(activeName) : (activeName ?? templateId)
+
+      return h('div', { className: 'mp-card mp-inject' },
+        h('div', { className: 'mp-inject-head' },
+          h('div', null,
+            h('div', { className: 'mp-card-title' }, txt('当前记忆注入消耗', 'Current memory injection cost')),
+            h('div', { className: 'mp-inject-main' },
+              h('span', { className: 'mp-inject-tokens' }, total.toLocaleString()),
+              h('span', { className: 'mp-inject-unit' }, txt('token', 'tokens')),
+              h('span', { className: 'mp-hint' }, txt(
+                `${injection.itemCount ?? 0} 条 · 字符 ${injection.chars ?? 0}/${maxChars || '不限'}${injection.truncated ? ' · 已截断' : ''}`,
+                `${injection.itemCount ?? 0} items · ${injection.chars ?? 0}/${maxChars || 'unlimited'} chars${injection.truncated ? ' · truncated' : ''}`)))),
+          h('div', { className: 'mp-toolbar' },
+            h('select', {
+              className: 'mp-select',
+              value: templateId,
+              disabled: saving,
+              title: txt('记忆模板（保存后立即生效）', 'Memory template (applies immediately)'),
+              onChange: (event) => switchTemplate(event.target.value),
+            }, templates.map((entry) => h('option', { key: entry.id, value: entry.id },
+              `${labelOf(entry.name)}${entry.id === templateId ? '' : ''}`))),
+            h('button', {
+              type: 'button',
+              className: 'mp-btn',
+              onClick: () => setExpanded((value) => !value),
+            }, expanded ? txt('收起分层', 'Hide layers') : txt('展开分层', 'Show layers')))),
+        h('div', { className: 'mp-hint' },
+          `${txt('模板', 'template')} ${activeLabel} · ${txt('估算口径', 'estimate')}：CJK 1 字≈1 token，其它 4 字符≈1 token${injection.enabled ? '' : txt(' · 注入已关闭', ' · injection is off')}`),
+        h('div', { className: 'mp-meter', title: `${charPercent.toFixed(1)}%` },
+          headerPercent > 0 ? h('span', {
+            className: 'is-header',
+            title: `${txt('模板头', 'header')} ${headerTokens} token`,
+            style: { width: `${headerPercent}%` },
+          }) : null,
+          layers.filter((layer) => (layer.tokens ?? 0) > 0).map((layer) => h('span', {
+            key: layer.id,
+            className: `is-${layer.id.toLowerCase()}`,
+            style: { width: `${Math.max(1, layer.percent ?? 0)}%` },
+          }))),
+        expanded
+          ? h('div', { className: 'mp-layer-table' },
+            headerTokens > 0 ? h('div', { style: { display: 'contents' } },
+              h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                h('span', { className: 'mp-chip' }, txt('模板头', 'header'))),
+              h('span', { style: { textAlign: 'right', fontWeight: 600 } }, `${headerTokens}`),
+              h('span', { className: 'mp-hint' }, `${headerPercent}%`)) : null,
+            layers.map((layer) => h('div', { key: layer.id, style: { display: 'contents' } },
+              h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                h('span', { className: `mp-layer-badge is-${layer.id.toLowerCase()}` }, layer.id),
+                h('span', null, labelOf(layer.name)),
+                layer.count === 0 ? h('span', { className: 'mp-hint' }, txt('未注入', 'none')) : null),
+              h('span', { style: { textAlign: 'right', fontWeight: 600 } }, `${layer.tokens ?? 0}`),
+              h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: '90px' } },
+                h('span', { className: 'mp-bar', style: { flex: 1 } },
+                  h('span', { className: `is-${layer.id.toLowerCase()}`, style: { width: `${Math.max(0, Math.min(100, layer.percent ?? 0))}%` } })),
+                h('span', { className: 'mp-hint' }, `${layer.percent ?? 0}%`)))))
+          : null,
+        h('div', { className: 'mp-hint' }, txt(
+          '这是按注入文本估算的消耗，用于控制上下文预算；不是模型计费 token 的精确值。',
+          'Estimated from the injected text to control the context budget; not an exact billing token count.')))
+    }
 
     function MemorySettingsPage() {
       const [boot, setBoot] = useState(null)
@@ -357,6 +506,8 @@ window.__ModuleLoader__.load({
       const tabs = [
         { id: 'memory', label: txt('记忆', 'Memories'), count: stats.memories ?? 0 },
         { id: 'note', label: txt('记事本', 'Notebooks'), count: stats.notes ?? 0 },
+        { id: 'usage', label: txt('用量', 'Usage') },
+        { id: 'consolidate', label: txt('固化', 'Consolidate'), count: boot.consolidation?.candidates?.length ?? 0 },
         { id: 'settings', label: txt('设置', 'Settings') },
         { id: 'maintenance', label: txt('维护', 'Maintenance') },
       ]
@@ -378,6 +529,7 @@ window.__ModuleLoader__.load({
                 `${txt('冲突', 'conflicts')} ${stats.byStatus.conflicted}`)
               : null,
             h('span', { className: 'mp-badge' }, settings.enabled ? txt('已启用', 'enabled') : txt('已停用', 'disabled')))),
+        h(InjectionCard, { api, lang, boot, notify, onChanged: refreshBoot }),
         h('div', { className: 'mp-tabs' }, tabs.map((entry) => h('button', {
           key: entry.id,
           type: 'button',
@@ -404,6 +556,12 @@ window.__ModuleLoader__.load({
             notify,
             onSaved: refreshBoot,
           })
+          : null,
+        tab === 'usage'
+          ? h(UsagePanel, { api, lang, boot, notify })
+          : null,
+        tab === 'consolidate'
+          ? h(ConsolidationPanel, { api, lang, boot, notify, onChanged: refreshBoot })
           : null,
         tab === 'maintenance'
           ? h(MaintenancePanel, { api, lang, boot, notify, onChanged: refreshBoot })
@@ -483,7 +641,7 @@ window.__ModuleLoader__.load({
           importance: settings.write.defaultImportance,
           layer: settings.write.defaultLayer,
           notebook,
-          ttlDays: '',
+          ttlDays: kind === 'note' ? '' : String(settings.write.defaultTtlDays ?? 30),
           pinned: false,
           status: 'active',
         })
@@ -641,7 +799,7 @@ window.__ModuleLoader__.load({
                     h(StatusChip, { lang, item })),
                   h('div', { className: 'mp-row-body' }, String(item.content).slice(0, 120)),
                   h('div', { className: 'mp-row-meta' },
-                    settings.ui.showLayerBadges ? h('span', { className: 'mp-chip' }, `${item.layer} ${item.layerName ?? ''}`) : null,
+                    settings.ui.showLayerBadges ? h(LayerBadge, { item }) : null,
                     h('span', null, `${txt('重要度', 'importance')} ${item.importance}`),
                     typeof item.score === 'number' ? h('span', null, `${txt('得分', 'score')} ${item.score}`) : null,
                     h('span', null, formatTime(item.updatedAt))))),
@@ -722,13 +880,16 @@ window.__ModuleLoader__.load({
       const update = (key, value) => setDraft({ ...draft, [key]: value })
       const immutable = ['L0', 'L1', 'L3'].includes(draft.layer)
       const readOnly = immutable && !settings.write.allowImmutableEdit
+      const ttlRequired = isNote !== true && immutable !== true
+      const ttlMissing = ttlRequired && String(draft.ttlDays ?? '').trim() === ''
 
       return h('div', { className: 'mp-editor' },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' } },
-          h('div', { className: 'mp-card-title' },
+          h('div', { className: 'mp-card-title', style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             creating
               ? (isNote ? txt('新建记事', 'New note') : txt('新建记忆', 'New memory'))
-              : txt('编辑条目', 'Edit entry')),
+              : txt('编辑条目', 'Edit entry'),
+            h(LayerBadge, { item: draft, large: true })),
           h('button', { type: 'button', className: 'mp-btn is-ghost', onClick: onClose }, txt('关闭', 'Close'))),
         readOnly
           ? h('div', { className: 'mp-toast' }, txt(
@@ -790,16 +951,30 @@ window.__ModuleLoader__.load({
               }, NOTEBOOK_FALLBACK.map((entry) => h('option', { key: entry.id, value: entry.id }, labelOf(entry.name)))))
             : null,
           h('label', { className: 'mp-field' },
-            h('span', { className: 'mp-label' }, txt('保鲜期（天）', 'TTL (days)')),
+            h('span', { className: 'mp-label' }, ttlRequired
+              ? txt('保鲜期（天）*', 'TTL (days) *')
+              : txt('保鲜期（天）', 'TTL (days)')),
             h('input', {
               className: 'mp-input',
               type: 'number',
               min: 1,
-              placeholder: txt('留空表示不过期', 'Empty = never expires'),
+              placeholder: ttlRequired
+                ? txt('必填，例如 30', 'Required, e.g. 30')
+                : txt('不可变层无需填写', 'Not needed for immutable layers'),
               value: draft.ttlDays,
               disabled: readOnly,
               onChange: (event) => update('ttlDays', event.target.value),
-            })),
+            }),
+            ttlRequired
+              ? h('span', { className: 'mp-hint' }, txt(
+                '可修改层的记忆必须填写保鲜期；修改内容时会从当前时间重新计算到期日。',
+                'Mutable memories must carry a freshness period; editing content restarts the expiry clock.'))
+              : null,
+            ttlMissing
+              ? h('span', { className: 'mp-ttl-alert' }, txt(
+                '缺少保鲜期：保存会被拒绝，请填写天数。',
+                'Missing freshness period: saving is blocked until you enter a number of days.'))
+              : null),
           h('label', { className: 'mp-field' },
             h('span', { className: 'mp-label' }, txt('状态', 'Status')),
             h('select', {
@@ -826,7 +1001,7 @@ window.__ModuleLoader__.load({
           h('button', {
             type: 'button',
             className: 'mp-btn is-primary',
-            disabled: saving || readOnly,
+            disabled: saving || readOnly || ttlMissing,
             onClick: onSave,
           }, saving ? txt('保存中…', 'Saving…') : txt('保存', 'Save')),
           creating
@@ -845,6 +1020,194 @@ window.__ModuleLoader__.load({
             ? null
             : h('button', { type: 'button', className: 'mp-btn is-danger', disabled: readOnly, onClick: onDelete },
               txt('删除', 'Delete'))))
+    }
+
+    // ------------------------------------------------------------ 用量页 ----
+
+    function UsagePanel({ api, lang, notify }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const [type, setType] = useState('note')
+      const [stats, setStats] = useState(null)
+      const [loading, setLoading] = useState(false)
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('usage.stats', type === 'all' ? {} : { type })
+          setStats(value)
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }, [api, type, notify])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      const recent = stats?.recent ?? []
+      const byType = stats?.byType ?? {}
+      return h('div', { className: 'mp-panel' },
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-inject-head' },
+            h('div', null,
+              h('div', { className: 'mp-card-title' }, txt('智能体查询消耗的 token', 'Tokens spent by agent queries')),
+              h('div', { className: 'mp-hint' }, txt(
+                '只统计模型通过 memory_search 等工具发起的查询；结果里含记事本的查询都会计入“记事本”视图，设置页里翻列表不计入。',
+                'Only agent calls through memory_search and related tools count; any query whose results include notebook entries counts toward the notebook view. Browsing here is not counted.'))),
+            h('div', { className: 'mp-toolbar' },
+              h('select', {
+                className: 'mp-select',
+                value: type,
+                onChange: (event) => setType(event.target.value),
+              },
+                h('option', { value: 'note' }, txt('记事本', 'Notebooks')),
+                h('option', { value: 'memory' }, txt('记忆', 'Memories')),
+                h('option', { value: 'all' }, txt('全部', 'All'))),
+              h('button', { type: 'button', className: 'mp-btn', disabled: loading, onClick: load },
+                loading ? txt('刷新中…', 'Refreshing…') : txt('刷新', 'Refresh')))),
+          h('div', { className: 'mp-usage-grid' },
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('调用次数', 'Calls')),
+              h('b', null, stats?.calls ?? 0)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('查询 token', 'Query tokens')),
+              h('b', null, stats?.queryTokens ?? 0)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('结果 token', 'Result tokens')),
+              h('b', null, stats?.resultTokens ?? 0)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('合计 token', 'Total tokens')),
+              h('b', null, stats?.totalTokens ?? 0))),
+          h('div', { className: 'mp-hint' }, txt(
+            `累计（不过滤）：${stats?.allTime?.calls ?? 0} 次，查询 ${stats?.allTime?.queryTokens ?? 0} + 结果 ${stats?.allTime?.resultTokens ?? 0} token。`,
+            `All time (unfiltered): ${stats?.allTime?.calls ?? 0} calls, ${stats?.allTime?.queryTokens ?? 0} query + ${stats?.allTime?.resultTokens ?? 0} result tokens.`))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('当前筛选下的类型 / 工具', 'Type / tool for this filter')),
+          h('div', { className: 'mp-layer-table' },
+            Object.entries(byType).map(([key, bucket]) => h('div', { key, style: { display: 'contents' } },
+              h('span', null, key === 'all' ? txt('未指定类型', 'unspecified') : key),
+              h('span', { style: { textAlign: 'right' } }, `${bucket.queryTokens + bucket.resultTokens} token`),
+              h('span', { className: 'mp-hint' }, `${bucket.calls} 次`))),
+            Object.entries(stats?.byTool ?? {}).map(([key, bucket]) => h('div', { key, style: { display: 'contents' } },
+              h('span', null, key),
+              h('span', { style: { textAlign: 'right' } }, `${bucket.queryTokens + bucket.resultTokens} token`),
+              h('span', { className: 'mp-hint' }, `${bucket.calls} 次`))))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('最近查询', 'Recent queries')),
+          recent.length === 0
+            ? h('div', { className: 'mp-empty' }, txt('当前筛选下还没有记录。', 'No usage recorded for this filter.'))
+            : h('div', { className: 'mp-list-plain' }, recent.map((entry, index) => h('div', {
+              key: `${entry.at}-${index}`,
+              className: 'mp-audit',
+              style: { flexDirection: 'column', gap: '2px' },
+            },
+              h('div', null, `${formatTime(entry.at)} · ${entry.tool} · ${entry.type}`),
+              h('div', null, `${txt('查询', 'query')} ${entry.queryTokens} + ${txt('结果', 'result')} ${entry.resultTokens} token · ${entry.results} 条`),
+              entry.query === '' ? null : h('div', { className: 'mp-code' }, entry.query))))))
+    }
+
+    // ------------------------------------------------------------ 固化页 ----
+
+    function ConsolidationPanel({ api, lang, boot, notify, onChanged }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const [candidates, setCandidates] = useState(boot.consolidation?.candidates ?? [])
+      const [loading, setLoading] = useState(false)
+      const settings = boot.settings?.consolidation ?? {}
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('consolidation.candidates', {})
+          setCandidates(value.candidates ?? [])
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }, [api, notify])
+
+      async function scan() {
+        setLoading(true)
+        try {
+          await api('maintenance.run', { tasks: ['consolidate'] })
+          notify(txt('已扫描强化信号', 'Scanned reinforcement signals'))
+          await load()
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }
+
+      async function decide(candidate, decision) {
+        let note = ''
+        if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+          note = window.prompt(txt(
+            `审计意见（${decision === 'approve' ? '同意固化' : '拒绝固化'}，可留空）：`,
+            `Audit note (${decision}, optional):`), '') ?? ''
+        }
+        setLoading(true)
+        try {
+          await api('consolidation.apply', {
+            id: candidate.id,
+            decision,
+            note,
+            targetLayer: candidate.suggestedLayer,
+            ttlDays: candidate.suggestedTtlDays,
+          })
+          notify(decision === 'approve'
+            ? txt('已固化并写入审计', 'Consolidated and audited')
+            : txt('已记录拒绝理由', 'Rejection recorded'))
+          await load()
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }
+
+      return h('div', { className: 'mp-panel' },
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-inject-head' },
+            h('div', null,
+              h('div', { className: 'mp-card-title' }, txt('固化审计', 'Consolidation audit')),
+              h('div', { className: 'mp-hint' }, txt(
+                `窗口 ${settings.windowDays ?? 14} 天内写入/更新/命中达到 ${settings.threshold ?? 4} 次的记忆会成为候选；智能体或你确认后才提升到 ${settings.targetLayer ?? 'L4'}，并写入审计日志。`,
+                `Memories with ${settings.threshold ?? 4} writes/updates/hits within ${settings.windowDays ?? 14} days become candidates; only an explicit approval moves them to ${settings.targetLayer ?? 'L4'}, with an audit record.`))),
+            h('button', { type: 'button', className: 'mp-btn', disabled: loading, onClick: scan },
+              loading ? txt('扫描中…', 'Scanning…') : txt('扫描强化信号', 'Scan signals'))),
+          candidates.length === 0
+            ? h('div', { className: 'mp-empty' }, txt(
+              '没有待审计候选。反复出现的记忆会在这里出现；也可以先跑“扫描强化信号”。',
+              'No candidates waiting. Repeated memories will show up here; run “Scan signals” to refresh.'))
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+              candidates.map((candidate) => h('div', { key: candidate.id, className: 'mp-consolidate-row' },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                  h(LayerBadge, { item: candidate }),
+                  h('strong', null, candidate.title),
+                  h('span', { className: 'mp-chip' }, `${candidate.signals} 次信号`),
+                  h('span', { className: 'mp-hint' }, `${candidate.windowDays} 天`)),
+                h('div', { className: 'mp-hint' }, txt(
+                  `写入 ${candidate.breakdown?.create ?? 0} · 更新 ${candidate.breakdown?.update ?? 0} · 命中 ${candidate.breakdown?.hit ?? 0}；建议 → ${candidate.suggestedLayer}，保鲜 ${candidate.suggestedTtlDays} 天`,
+                  `create ${candidate.breakdown?.create ?? 0} · update ${candidate.breakdown?.update ?? 0} · hit ${candidate.breakdown?.hit ?? 0}; suggested ${candidate.suggestedLayer}, TTL ${candidate.suggestedTtlDays} days`)),
+                h('div', { className: 'mp-toolbar' },
+                  h('button', { type: 'button', className: 'mp-btn is-primary', disabled: loading, onClick: () => decide(candidate, 'approve') },
+                    txt('审计通过并固化', 'Approve & consolidate')),
+                  h('button', { type: 'button', className: 'mp-btn is-danger', disabled: loading, onClick: () => decide(candidate, 'reject') },
+                    txt('拒绝', 'Reject'))))))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('规则', 'Rules')),
+          h('div', { className: 'mp-hint' }, txt(
+            `自动应用：${settings.autoApply === true ? '开启（维护任务会直接固化）' : '关闭（必须逐条审计）'} · 最低重要度 ${settings.minImportance ?? 6} · 单轮最多 ${settings.maxCandidates ?? 20} 条。`,
+            `Auto-apply: ${settings.autoApply === true ? 'on (maintenance consolidates directly)' : 'off (every candidate needs an audit)'} · min importance ${settings.minImportance ?? 6} · max ${settings.maxCandidates ?? 20} per scan.`)),
+          h('div', { className: 'mp-hint' }, txt(
+            '固化动作会记录在维护页的审计日志里（consolidation.proposed / approved / rejected），包含时间、操作者、层级变化和保鲜期。',
+            'Decisions are recorded in the audit log (consolidation.proposed / approved / rejected) with time, actor, layer change and TTL.')))
+      )
     }
 
     // ------------------------------------------------------------ 设置页 ----
@@ -1106,6 +1469,7 @@ window.__ModuleLoader__.load({
         { id: ['archive'], label: txt('归档', 'Archive'), desc: txt(`长期未更新且重要度≤4 的条目归档（>${boot.settings.maintenance.archiveAfterDays} 天）`, `Archive stale low-importance entries (>${boot.settings.maintenance.archiveAfterDays} days)`) },
         { id: ['dedupe'], label: txt('重复检测', 'Detect duplicates'), desc: txt('找出高度相似的条目并互相标记冲突', 'Mark near-duplicate entries as conflicts') },
         { id: ['reflect'], label: txt('反思提升', 'Reflect'), desc: txt('被反复检索到的记忆自动/建议提升重要度', 'Raise importance of memories retrieved repeatedly') },
+        { id: ['consolidate'], label: txt('固化扫描', 'Consolidate'), desc: txt('扫描反复写入/更新/命中的记忆，生成待审计候选', 'Find repeatedly reinforced memories and queue them for audit') },
         { id: ['compact'], label: txt('压缩日志', 'Compact log'), desc: txt('按上限裁剪审计日志', 'Trim the audit log to the configured cap') },
       ]
 
@@ -1134,7 +1498,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'mp-btn is-primary',
               disabled: running,
-              onClick: () => run(['limits', 'cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'compact']),
+              onClick: () => run(['limits', 'cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'consolidate', 'compact']),
             }, running ? txt('运行中…', 'Running…') : txt('全部运行', 'Run all')),
             h('button', { type: 'button', className: 'mp-btn', onClick: previewPrompt },
               txt('预览提示词注入', 'Preview prompt injection'))),
@@ -1319,6 +1683,7 @@ window.__ModuleLoader__.load({
       __internals: {
         MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
         MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
+        InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge,
       },
     }
   },

@@ -110,7 +110,26 @@ const boot = {
   sortChoices: SORT_CHOICES,
   layers: LAYERS,
   notebooks: NOTEBOOKS,
-  toolNames: ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats'],
+  toolNames: ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats', 'memory_usage', 'memory_consolidate'],
+  injection: {
+    enabled: true,
+    text: '## 长期记忆（dsh-memory-plugin）\n\n- [L5·重要度6] 示例记忆：示例正文',
+    tokens: 120,
+    chars: 800,
+    topN: 6,
+    maxChars: 1200,
+    truncated: false,
+    template: { id: 'default', name: { zh: '通用', en: 'General' } },
+    itemCount: 2,
+    headerTokens: 30,
+    layers: [
+      { id: 'L5', name: { zh: '目标记忆', en: 'Goals' }, tokens: 80, percent: 66, count: 2 },
+      { id: 'L4', name: { zh: '学习行为', en: 'Learned' }, tokens: 10, percent: 8, count: 1 },
+    ],
+  },
+  templates: { active: 'default', list: [{ id: 'default', name: { zh: '通用', en: 'General' } }] },
+  consolidation: { candidates: [] },
+  usage: { calls: 1, queryTokens: 4, resultTokens: 30, totalTokens: 34 },
   stats: { total: 3, memory: 2, note: 1, active: 3, archived: 0, expired: 0, conflicted: 0, pinned: 1, byLayer: { L5: 2, L4: 1 }, lastWriteAt: '2026-11-05T10:00:00.000Z' },
   storage: { path: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin\\store.json', dir: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin', exists: true, bytes: 2048, modifiedAt: '2026-11-05T10:00:00.000Z' },
   audit: [{ at: '2026-11-05T10:00:00.000Z', action: 'create', detail: 'mem_test' }],
@@ -131,7 +150,7 @@ function render(title, element) {
 const shell = render('MemorySettingsPage 加载态', React.createElement(settingsReg.Component))
 assert.ok(shell.includes('mp-root'), '应包含根容器样式类名')
 
-const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel } = mod.__internals
+const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge } = mod.__internals
 render('MemorySettingsPage（直接调用）', React.createElement(MemorySettingsPage))
 
 // 侧边栏入口：整页容器必须自己滚动（main 槽位是 overflow:hidden 的列）。
@@ -143,6 +162,21 @@ assert.ok(page.includes('mp-root'), '整页内应渲染记忆面板')
 const icon = render('MemoryPanelIcon', React.createElement(MemoryPanelIcon, { size: 20, active: true }))
 assert.ok(icon.includes('width="20"'), '图标应使用传入的尺寸')
 assert.ok(icon.includes('currentColor'), '图标应跟随主题色')
+
+const layerBadge = render('LayerBadge 层级徽章', React.createElement(LayerBadge, {
+  item: { layer: 'L5', layerName: { zh: '目标记忆', en: 'Goals' } }, large: true,
+}))
+assert.ok(layerBadge.includes('mp-layer-badge'), '层级徽章应有颜色类名')
+assert.ok(layerBadge.includes('目标记忆'), '中文环境应显示层名')
+
+render('InjectionCard 注入统计', React.createElement(InjectionCard, {
+  api, lang: 'zh', boot, notify: noop, onChanged: noop,
+}))
+
+render('UsagePanel 用量', React.createElement(UsagePanel, { api, lang: 'zh', boot, notify: noop }))
+render('ConsolidationPanel 固化', React.createElement(ConsolidationPanel, {
+  api, lang: 'zh', boot, notify: noop, onChanged: noop,
+}))
 
 const browser = render('ItemBrowser 记忆列表', React.createElement(ItemBrowser, {
   api, lang: 'zh', settings: DEFAULT_SETTINGS, kind: 'memory', notify: noop, onChanged: noop,

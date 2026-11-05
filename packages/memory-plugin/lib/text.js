@@ -37,6 +37,34 @@ export function tokenList(text) {
   return [...tokenize(text)]
 }
 
+/**
+ * 估算文本的 token 数。
+ *
+ * 这里不引入 tokenizer 依赖：记忆注入是「预算控制」而不是计费，按经验口径
+ * 中文/全角字符约 1 token，其它字符约 4 字符 1 token 已经足够接近主流模型，
+ * 且跨模型稳定、零依赖。UI 与用量账本都用同一口径，保证前后一致。
+ */
+export function estimateTokens(text) {
+  const source = String(text ?? '')
+  if (source === '') return 0
+  let wide = 0
+  let narrow = 0
+  for (const char of source) {
+    const code = char.codePointAt(0)
+    // CJK、全角标点、假名、韩文等按单 token；其余按 4 字符 1 token。
+    if (
+      (code >= 0x1100 && code <= 0x11ff)
+      || (code >= 0x2e80 && code <= 0xa4cf)
+      || (code >= 0xac00 && code <= 0xd7af)
+      || (code >= 0xf900 && code <= 0xfaff)
+      || (code >= 0xfe30 && code <= 0xfe4f)
+      || (code >= 0xff00 && code <= 0xffef)
+    ) wide += 1
+    else narrow += 1
+  }
+  return Math.max(1, Math.ceil(wide + narrow / 4))
+}
+
 /** 一条记忆可检索的文本：标题 + 正文 + 标签。 */
 export function searchableText(item) {
   const tags = Array.isArray(item?.tags) ? item.tags.join(' ') : ''

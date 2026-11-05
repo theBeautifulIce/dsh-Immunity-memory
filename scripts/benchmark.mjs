@@ -111,7 +111,7 @@ const seedMs = Date.now() - seededAt
 const createTimes = []
 for (let index = 0; index < Math.min(200, ITEMS); index += 1) {
   const started = process.hrtime.bigint()
-  await engine.createItem({ title: `写入基准 ${index}`, content: `逐条写入的基准数据 ${index}，用于测单条写入延迟。`, tags: ['基准'] }, 'agent')
+  await engine.createItem({ title: `写入基准 ${index}`, content: `逐条写入的基准数据 ${index}，用于测单条写入延迟。`, tags: ['基准'], ttlDays: 30 }, 'agent')
   createTimes.push(Number(process.hrtime.bigint() - started) / 1e6)
 }
 

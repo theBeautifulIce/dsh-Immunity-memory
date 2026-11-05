@@ -85,6 +85,77 @@ export const NOTEBOOKS = [
 
 export const NOTEBOOK_IDS = NOTEBOOKS.map((notebook) => notebook.id)
 
+/**
+ * 记忆模板：一套可直接热切换的「注入策略」。
+ *
+ * 模板只影响提示词注入（头部说明、条数、字符预算），不改动既有数据；
+ * 切换后下一次 promptDigest 立即使用新模板，不需要重启插件。
+ */
+export const MEMORY_TEMPLATES = [
+  {
+    id: 'default',
+    name: { zh: '通用模板', en: 'General' },
+    desc: { zh: '平衡型：重要度、置顶与新鲜度综合排序，适合日常使用。', en: 'Balanced ranking for everyday use.' },
+    header: [
+      '## 长期记忆（dsh-memory-plugin）',
+      '下面是从跨会话记忆里挑出的、可能相关的条目。只在确实相关时使用，不要臆造未列出的记忆。',
+      '需要更多细节时用 memory_search 检索；新的关键事实用 memory_write 保存。',
+    ].join('\n'),
+    topN: 6,
+    maxChars: 1200,
+  },
+  {
+    id: 'dev',
+    name: { zh: '开发模板', en: 'Development' },
+    desc: { zh: '开发导向：优先项目事实、构建命令、架构决策与踩坑记录，注入条数更多。', en: 'Project facts, build commands, architecture decisions and lessons; larger budget.' },
+    header: [
+      '## 项目长期记忆（dsh-memory-plugin · 开发模板）',
+      '下面是与当前开发工作相关的历史事实、命令、架构决策与踩坑记录。优先复用这些结论，避免重复试错；与当前代码冲突时以实际代码为准。',
+      '需要更多细节时用 memory_search 检索（可用 type=note 查开发记事本）；新的关键事实用 memory_write 保存，并填写保鲜期。',
+    ].join('\n'),
+    topN: 10,
+    maxChars: 1800,
+  },
+  {
+    id: 'qqbot',
+    name: { zh: 'QQ 机器人模板', en: 'QQ bot' },
+    desc: { zh: '对话导向：优先用户偏好、群聊背景与稳定人设，预算更紧，避免跨群泄露。', en: 'User preferences, group context and stable persona; tighter budget.' },
+    header: [
+      '## 跨会话记忆（dsh-memory-plugin · QQ 机器人）',
+      '下面是可能相关的用户偏好、群聊背景与稳定约定。只在当前对话确实需要时使用；不要把 A 群/私聊的内容带到 B 群，也不要编造未列出的记忆。',
+      '需要更多细节时用 memory_search 检索；新的稳定偏好用 memory_write 保存，并填写保鲜期。',
+    ].join('\n'),
+    topN: 8,
+    maxChars: 900,
+  },
+]
+
+export const TEMPLATE_IDS = MEMORY_TEMPLATES.map((template) => template.id)
+
+/** 按 id 取模板；未知 id 回退通用模板。 */
+export function templateById(id) {
+  return MEMORY_TEMPLATES.find((template) => template.id === id) ?? MEMORY_TEMPLATES[0]
+}
+
+/** 当前生效的模板。 */
+export function activeTemplate(settings) {
+  return templateById(settings?.prompt?.template)
+}
+
+/** 注入预算：默认跟随模板，打开 overrideBudget 后才读 prompt.topN / maxChars。 */
+export function promptBudget(settings) {
+  const template = activeTemplate(settings)
+  const prompt = settings?.prompt ?? {}
+  if (prompt.overrideBudget === true) {
+    return {
+      topN: Math.max(0, Number(prompt.topN) || 0),
+      maxChars: Math.max(0, Number(prompt.maxChars) || 0),
+    }
+  }
+  return { topN: template.topN, maxChars: template.maxChars }
+}
+
+
 /** 出厂默认设置。 */
 export const DEFAULT_SETTINGS = {
   enabled: true,
@@ -122,6 +193,8 @@ export const DEFAULT_SETTINGS = {
     defaultLayer: 'L5',
     defaultImportance: 5,
     allowImmutableEdit: false,
+    // 可修改层必须填写保鲜期，这是硬约束，不提供关闭开关。
+    defaultTtlDays: 30,
   },
   layers: {
     L0: true,
@@ -135,8 +208,22 @@ export const DEFAULT_SETTINGS = {
   },
   prompt: {
     inject: true,
+    template: 'default',
     topN: 6,
     maxChars: 1200,
+    // 默认跟随模板预算；打开后才用上面的 topN / maxChars 覆盖。
+    overrideBudget: false,
+  },
+  consolidation: {
+    enabled: true,
+    threshold: 4,
+    windowDays: 14,
+    targetLayer: 'L4',
+    ttlDays: 90,
+    minImportance: 6,
+    maxCandidates: 20,
+    // 必须由智能体调用 memory_consolidate 明确批准，维护任务只产生候选。
+    autoApply: false,
   },
   maintenance: {
     autoRun: true,
@@ -169,6 +256,12 @@ const LANGUAGE_OPTIONS = [
 ]
 
 const LAYER_OPTIONS = LAYERS.map((layer) => ({ value: layer.id, label: layer.name }))
+
+const TEMPLATE_OPTIONS = MEMORY_TEMPLATES.map((template) => ({
+  value: template.id,
+  label: template.name,
+  hint: template.desc,
+}))
 
 const SORT_OPTIONS = [
   { value: 'updated', label: { zh: '最近更新', en: 'Recently updated' } },
@@ -454,6 +547,16 @@ export const SETTINGS_SCHEMA = [
         label: { zh: '允许修改不可变层', en: 'Allow editing immutable layers' },
         hint: { zh: 'L0 / L1 / L3 默认只读；打开后解锁（谨慎使用）。', en: 'L0 / L1 / L3 are read-only by default; this unlocks them.' },
       },
+      {
+        path: 'write.defaultTtlDays',
+        type: 'number',
+        min: 1,
+        max: 3650,
+        step: 1,
+        unit: { zh: '天', en: 'days' },
+        label: { zh: '新建时的建议保鲜期', en: 'Suggested TTL' },
+        hint: { zh: '新建表单的默认值；不是无限保鲜，最终仍以实际写入值为准。', en: 'Prefilled in the create form; the submitted value still wins.' },
+      },
     ],
   },
   {
@@ -473,10 +576,23 @@ export const SETTINGS_SCHEMA = [
     desc: { zh: '把长期记忆注入系统提示词', en: 'Inject long-term memory into the system prompt' },
     fields: [
       {
+        path: 'prompt.template',
+        type: 'select',
+        options: TEMPLATE_OPTIONS,
+        label: { zh: '记忆模板', en: 'Memory template' },
+        hint: { zh: '开发 / QQ 机器人 / 通用三套模板；切换后下一轮对话立即生效。', en: 'Development, QQ bot or general; applies from the next turn.' },
+      },
+      {
         path: 'prompt.inject',
         type: 'boolean',
         label: { zh: '注入记忆摘要', en: 'Inject a memory digest' },
         hint: { zh: '开启后每次对话都会带上最重要的若干条记忆。', en: 'Each turn carries the most important memories.' },
+      },
+      {
+        path: 'prompt.overrideBudget',
+        type: 'boolean',
+        label: { zh: '覆盖模板预算', en: 'Override template budget' },
+        hint: { zh: '默认跟随模板的条数与字符上限；打开后才使用下面的条数/字符设置。', en: 'Follow the template budget unless this is on.' },
       },
       {
         path: 'prompt.topN',
@@ -485,8 +601,8 @@ export const SETTINGS_SCHEMA = [
         max: 30,
         step: 1,
         unit: { zh: '条', en: 'entries' },
-        label: { zh: '注入条数', en: 'Entries injected' },
-        hint: { zh: '按重要度、置顶与新鲜度排序取前 N 条。', en: 'Top N by importance, pinning and recency.' },
+        label: { zh: '注入条数（覆盖）', en: 'Entries injected (override)' },
+        hint: { zh: '仅在打开「覆盖模板预算」时生效。', en: 'Only used when overriding the template budget.' },
       },
       {
         path: 'prompt.maxChars',
@@ -495,8 +611,83 @@ export const SETTINGS_SCHEMA = [
         max: 8000,
         step: 100,
         unit: { zh: '字符', en: 'chars' },
-        label: { zh: '注入字符上限', en: 'Injection character cap' },
-        hint: { zh: '超出后截断，防止记忆挤占上下文。', en: 'Truncated beyond this budget.' },
+        label: { zh: '注入字符上限（覆盖）', en: 'Injection cap (override)' },
+        hint: { zh: '仅在打开「覆盖模板预算」时生效；超出后截断。', en: 'Only used when overriding; text beyond it is truncated.' },
+      },
+    ],
+  },
+  {
+    id: 'consolidation',
+    title: { zh: '固化', en: 'Consolidation' },
+    desc: { zh: '反复出现、更新或命中的记忆进入固化审计，由智能体确认后提升到稳定层', en: 'Repeated memories are audited and promoted after agent approval' },
+    fields: [
+      {
+        path: 'consolidation.enabled',
+        type: 'boolean',
+        label: { zh: '启用固化审计', en: 'Enable consolidation audits' },
+        hint: { zh: '维护任务会收集候选；关闭后不再产生新候选。', en: 'Maintenance collects candidates; off means no new candidates.' },
+      },
+      {
+        path: 'consolidation.threshold',
+        type: 'number',
+        min: 2,
+        max: 100,
+        step: 1,
+        unit: { zh: '次', en: 'signals' },
+        label: { zh: '触发次数', en: 'Signal threshold' },
+        hint: { zh: '窗口内写入、更新、检索命中累计达到该次数即成为候选。', en: 'Writes, updates and hits within the window that reach this count become candidates.' },
+      },
+      {
+        path: 'consolidation.windowDays',
+        type: 'number',
+        min: 1,
+        max: 365,
+        step: 1,
+        unit: { zh: '天', en: 'days' },
+        label: { zh: '观察窗口', en: 'Observation window' },
+        hint: { zh: '只统计最近这么多天内的强化信号。', en: 'Only signals inside this window count.' },
+      },
+      {
+        path: 'consolidation.targetLayer',
+        type: 'select',
+        options: LAYER_OPTIONS.filter((option) => !['L0', 'L1', 'L3'].includes(option.value)),
+        label: { zh: '默认固化层', en: 'Target layer' },
+        hint: { zh: '智能体批准时若未指定层级，固化到该层。', en: 'Used when approval omits a layer.' },
+      },
+      {
+        path: 'consolidation.ttlDays',
+        type: 'number',
+        min: 1,
+        max: 3650,
+        step: 1,
+        unit: { zh: '天', en: 'days' },
+        label: { zh: '固化后保鲜期', en: 'TTL after consolidation' },
+        hint: { zh: '固化后的记忆仍有保鲜期，到期后按常规维护处理。', en: 'Consolidated memories still expire and are maintained normally.' },
+      },
+      {
+        path: 'consolidation.minImportance',
+        type: 'number',
+        min: 1,
+        max: 10,
+        step: 1,
+        label: { zh: '候选最低重要度', en: 'Minimum importance' },
+        hint: { zh: '低于该重要度的条目不会进入固化候选。', en: 'Lower-importance entries are not proposed.' },
+      },
+      {
+        path: 'consolidation.maxCandidates',
+        type: 'number',
+        min: 1,
+        max: 200,
+        step: 1,
+        unit: { zh: '条', en: 'items' },
+        label: { zh: '单次候选上限', en: 'Candidate cap' },
+        hint: { zh: '每次审计最多列出这么多候选。', en: 'At most this many candidates per audit.' },
+      },
+      {
+        path: 'consolidation.autoApply',
+        type: 'boolean',
+        label: { zh: '自动固化（危险）', en: 'Auto-apply (dangerous)' },
+        hint: { zh: '默认关闭：必须由智能体审计确认。打开后维护任务会直接提升，不再等待确认。', en: 'Off by default: agent approval is required. On means maintenance promotes directly.' },
       },
     ],
   },

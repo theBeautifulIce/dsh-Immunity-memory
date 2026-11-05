@@ -221,6 +221,7 @@ await test('引擎直接跑在 SQLite 上（启动加载不递归）', async () 
       content: '引擎直接写进 SQLite，验证启动加载不递归并且能读回。',
       tags: ['集成'],
       importance: 7,
+      ttlDays: 30,
     }, 'agent')
     assert.ok(item.id.startsWith('mem_'))
     assert.equal(sqliteStore.raw().prepare('SELECT COUNT(*) AS n FROM memories').get().n, 1)

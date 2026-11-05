@@ -43,6 +43,10 @@ export const API_METHODS = [
   'settings.reset',
   'maintenance.run',
   'prompt.preview',
+  'usage.stats',
+  'consolidation.candidates',
+  'consolidation.apply',
+  'templates.list',
   'audit.list',
   'data.export',
   'data.import',
@@ -91,6 +95,12 @@ function createMethods(engineOf, context = {}) {
         defaults: DEFAULT_SETTINGS,
         sortChoices: SORT_CHOICES,
         audit: engine().auditList(12),
+        injection: engine().injectionStats(),
+        usage: engine().usageStats({}),
+        templates: engine().templates(),
+        consolidation: {
+          candidates: engine().consolidationCandidates(),
+        },
       }
     },
     status() {
@@ -142,7 +152,29 @@ function createMethods(engineOf, context = {}) {
       return engine().runMaintenance(params ?? {})
     },
     'prompt.preview'() {
-      return { text: engine().promptDigest(), enabled: engine().getSettings().prompt.inject }
+      return { ...engine().injectionStats(), enabled: engine().getSettings().prompt.inject }
+    },
+    'usage.stats'(params) {
+      return engine().usageStats(params ?? {})
+    },
+    'consolidation.candidates'(params) {
+      return {
+        candidates: engine().consolidationCandidates(params ?? {}),
+        settings: engine().getSettings().consolidation,
+      }
+    },
+    async 'consolidation.apply'(params) {
+      const id = String(params?.id ?? '')
+      const decision = String(params?.decision ?? '')
+      if (id === '') throw createError('INVALID_ARGUMENT', '缺少 id')
+      return engine().applyConsolidation(id, decision, {
+        targetLayer: params?.targetLayer,
+        ttlDays: params?.ttlDays,
+        note: params?.note,
+      }, String(params?.actor ?? 'user'))
+    },
+    'templates.list'() {
+      return engine().templates()
     },
     'audit.list'(params) {
       return { audit: engine().auditList(params?.limit ?? 50) }

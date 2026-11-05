@@ -58,6 +58,8 @@ function itemSignature(item) {
     item.accessCount ?? 0,
     item.status ?? '',
     item.importance ?? 5,
+    item.layer ?? '',
+    item.ttlDays ?? '',
     item.pinned === true ? 1 : 0,
     item.expiresAt ?? '',
     JSON.stringify(item.conflicts ?? []),

@@ -141,7 +141,7 @@ export async function apply(ctx, config) {
     const timer = setInterval(() => {
       ;(async () => {
         try {
-          const report = await engine.runMaintenance({ tasks: ['limits', 'cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'compact'] })
+          const report = await engine.runMaintenance({ tasks: ['limits', 'cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'consolidate', 'compact'] })
           const changed = report.tasks.reduce((sum, task) => sum + (task.changed ?? 0), 0)
           if (changed > 0) log('info', `定时维护完成：${report.tasks.map((task) => task.note).join('；')}`)
           // 用户可能在设置页改了间隔或关掉了自动维护。

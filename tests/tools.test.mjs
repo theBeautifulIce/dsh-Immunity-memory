@@ -156,15 +156,16 @@ async function test(title, run) {
 
 const dispose = registerTools(fakeCtx, engine, log)
 
-await test('注册了全部 6 个工具', () => {
+await test('注册了全部 8 个工具', () => {
   assert.deepEqual([...registered.keys()].sort(), [
-    'memory_forget', 'memory_get', 'memory_search', 'memory_stats', 'memory_update', 'memory_write',
+    'memory_consolidate', 'memory_forget', 'memory_get', 'memory_search',
+    'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
   ])
 })
 
 await test('memory_write 写入并渲染确认文本', async () => {
   const def = registered.get('memory_write')
-  const value = await def.execute({ content: '工具测试：记忆插件使用 JSON 文件存储。', layer: 'L4', tags: ['测试'] }, {})
+  const value = await def.execute({ content: '工具测试：记忆插件使用 JSON 文件存储。', layer: 'L4', tags: ['测试'], ttlDays: 30 }, {})
   assert.equal(value.saved, true)
   assert.ok(value.item.id.startsWith('mem_'))
   const blocks = def.output.render({}, value)
@@ -191,7 +192,7 @@ await test('memory_get 返回完整正文', async () => {
 await test('memory_update 改标题', async () => {
   const def = registered.get('memory_update')
   const found = await registered.get('memory_search').execute({ query: 'JSON 文件存储' }, {})
-  const value = await def.execute({ id: found.items[0].id, importance: 9 }, {})
+  const value = await def.execute({ id: found.items[0].id, importance: 9, ttlDays: 30 }, {})
   assert.equal(value.item.importance, 9)
   assert.ok(def.output.render({ id: value.item.id }, value)[0].text.includes('已更新'))
 })
@@ -202,6 +203,24 @@ await test('memory_stats 统计与渲染一致', async () => {
   assert.ok(value.total >= 1)
   assert.equal(typeof value.byLayer, 'object')
   assert.ok(def.output.render({}, value)[0].text.includes('共'))
+})
+
+await test('memory_usage 返回智能体查询用量', async () => {
+  const def = registered.get('memory_usage')
+  const value = await def.execute({ type: 'memory' }, {})
+  assert.ok(value.calls >= 1)
+  assert.ok(value.totalTokens > 0)
+  assert.ok(def.output.render({}, value)[0].text.includes('用量'))
+})
+
+await test('memory_consolidate 列出候选并拒绝空操作', async () => {
+  const def = registered.get('memory_consolidate')
+  const value = await def.execute({ action: 'list' }, {})
+  assert.ok(Array.isArray(value.candidates))
+  await assert.rejects(
+    () => def.execute({ action: 'approve' }, {}),
+    (error) => /id/.test(error.message),
+  )
 })
 
 await test('memory_forget 删除后检索不到', async () => {
@@ -215,7 +234,7 @@ await test('memory_forget 删除后检索不到', async () => {
 
 await test('工具返回值是无损 JSON', async () => {
   const samples = [
-    ['memory_write', { content: '无损 JSON 校验：这条记忆用于验证工具返回值序列化。' }],
+    ['memory_write', { content: '无损 JSON 校验：这条记忆用于验证工具返回值序列化。', ttlDays: 30 }],
     ['memory_search', { query: '无损 JSON' }],
     ['memory_stats', {}],
   ]
