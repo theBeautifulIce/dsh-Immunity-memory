@@ -10,6 +10,9 @@
  *   lib/tools.js    模型可调用的工具
  *   client.js       客户端设置页（无构建步骤）
  */
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { Config, normalizeSettings } from './lib/settings.js'
 import { createStore, message } from './lib/store.js'
 import { createEngine } from './lib/engine.js'
@@ -52,6 +55,11 @@ export function apply(ctx, config) {
   })
   ref.engine = engine
 
+  // 桌面端的宿主日志不落在插件能读的地方；关键路径同时写一份到数据目录，
+  // 出问题时可以直接看 <storageDir>/plugin.log。
+  const debug = createDebugLog(store, log)
+  debug('apply: start')
+
   ctx.effect(() => registerTools(ctx, engine, log), 'memory-plugin:tools')
   log('info', `记忆库已就绪：${store.path}`)
 
@@ -90,27 +98,31 @@ export function apply(ctx, config) {
     return () => clearInterval(timer)
   }, 'memory-plugin:maintenance')
 
-  attachApi(ctx, engine, log)
+  attachApi(ctx, engine, debug)
 }
+
 
 
 /**
  * 把 HTTP 接口挂到 webServer 上。
  *
- * 两个坑：
+ * 三个坑：
  *   1. webServer 可能比本插件晚装载 → 用 `ctx.inject(['webServer'], ...)` 等它出现；
  *   2. 路由的生命周期不好保证（重装 / 热重载时旧路由可能还活着）→ 在 webServer 上放一个
- *      holder，handler 每次都从 holder 取"当前这一代"的引擎，旧路由也不会读到旧数据。
+ *      holder，handler 每次都从 holder 取"当前这一代"的引擎，旧路由也不会读到旧数据；
+ *   3. 宿主日志不落盘 → 关键步骤同时写 <storageDir>/plugin.log，出问题能直接看。
  */
 const API_HOLDER_KEY = '__dshMemoryPluginApi'
 
-function attachApi(ctx, engine, log) {
-  const attach = () => {
+function attachApi(ctx, engine, debug) {
+  const attach = (via) => {
+    debug(`attach(${via}): start`)
     const webServer = ctx.get('webServer')
     if (webServer === undefined || webServer === null) {
-      log('warn', '当前 profile 没有 webServer，设置页接口不可用')
+      debug('attach: 当前 profile 没有 webServer，设置页接口不可用')
       return
     }
+    debug(`attach: webServer ok, register=${typeof webServer.register}`)
     try {
       const runtime = ctx.get('webRuntime') ?? ctx.get('webApp')
       setTrustedHosts(runtime?.trustedHosts ?? [])
@@ -118,19 +130,40 @@ function attachApi(ctx, engine, log) {
       // 拿不到可信域时退回回环判断
     }
 
-    const holder = webServer[API_HOLDER_KEY] ?? (webServer[API_HOLDER_KEY] = { engine: null, dispose: null })
-    // 先换引擎：即使下面因为路径被占用注册不上，旧路由也会立刻读到这一代的数据。
+    let holder = webServer[API_HOLDER_KEY]
+    if (holder === undefined || holder === null) {
+      holder = { engine: null, dispose: null, path: null }
+      try {
+        webServer[API_HOLDER_KEY] = holder
+        debug('attach: holder created')
+      } catch (error) {
+        // 有些服务对象冻结/代理，写不进去就退回本代自用（路由仍然能工作）
+        holder = { engine: null, dispose: null, path: null }
+        debug(`attach: holder 写入失败，改用局部 holder：${message(error)}`)
+      }
+    }
     holder.engine = engine
 
-    if (holder.dispose !== null) {
-      log('info', `记忆接口已挂载，复用现有路由：${API_PATH}`)
+    // 只有"同一个接口路径"才算可复用：插件升级可能换了前缀，旧 holder 指向的是旧路径。
+    if (holder.dispose !== null && holder.path === API_PATH) {
+      debug(`attach: 复用已有路由 ${API_PATH}`)
       return
+    }
+    if (holder.dispose !== null && holder.path !== API_PATH) {
+      try {
+        holder.dispose()
+      } catch {
+        // 旧路径的释放失败不影响新路径注册
+      }
+      holder.dispose = null
+      holder.path = null
+      debug('attach: 释放了旧路径的路由')
     }
 
     const disposers = []
+    const apiLog = (level, text) => debug(`api ${level}: ${text}`)
     try {
-      disposers.push(ctx.effect(() => mountApi(webServer, () => holder.engine, log), 'memory-plugin:api'))
-      log('info', `记忆接口已挂载：${API_PATH}`)
+      disposers.push(ctx.effect(() => mountApi(webServer, () => holder.engine, apiLog), 'memory-plugin:api'))
       holder.dispose = () => {
         for (const dispose of disposers) {
           try {
@@ -140,33 +173,60 @@ function attachApi(ctx, engine, log) {
           }
         }
         holder.dispose = null
+        holder.path = null
       }
+      holder.path = API_PATH
+      debug(`attach: 注册成功 ${API_PATH}`)
     } catch (error) {
-      // 路径已被上一代占住：它同样是本插件的路由，会通过 holder.engine 读到最新数据。
-      log('info', `${API_PATH} 已被更早的一代占用，复用现有路由：${message(error)}`)
+      debug(`attach: 注册失败 ${API_PATH}：${message(error)}`)
       return
     }
 
     // 旧前缀：只为了让早期文档里的地址继续可用，被占用就静默跳过。
     try {
-      const legacy = ctx.effect(
-        () => mountApi(webServer, () => holder.engine, log, { path: LEGACY_API_PATH }),
+      disposers.push(ctx.effect(
+        () => mountApi(webServer, () => holder.engine, apiLog, { path: LEGACY_API_PATH }),
         'memory-plugin:api-legacy',
-      )
-      disposers.push(legacy)
-    } catch {
-      // 旧前缀仍被历史路由占着，无所谓
+      ))
+      debug(`attach: 注册成功（兼容前缀） ${LEGACY_API_PATH}`)
+    } catch (error) {
+      debug(`attach: 兼容前缀跳过 ${LEGACY_API_PATH}：${message(error)}`)
     }
   }
 
   if (typeof ctx.inject === 'function') {
     try {
-      ctx.inject(['webServer'], () => attach())
+      ctx.inject(['webServer'], () => attach('inject'))
     } catch (error) {
-      log('warn', `等待 webServer 失败：${message(error)}`)
-      attach()
+      debug(`attach: ctx.inject 失败：${message(error)}`)
+      attach('fallback')
     }
   } else {
-    attach()
+    attach('direct')
   }
 }
+
+/** 把一行诊断写到 <storageDir>/plugin.log（截断到 64KB），同时走宿主 logger。 */
+function createDebugLog(store, log) {
+  let file
+  try {
+    file = join(store.dir, 'plugin.log')
+  } catch {
+    file = undefined
+  }
+  return (line) => {
+    try {
+      log('info', line)
+    } catch {
+      /* 忽略 */
+    }
+    if (file === undefined) return
+    try {
+      mkdirSync(store.dir, { recursive: true })
+      appendFileSync(file, `${new Date().toISOString()} ${line}\n`.slice(0, 4000))
+    } catch {
+      /* 诊断写不了就算了 */
+    }
+  }
+}
+

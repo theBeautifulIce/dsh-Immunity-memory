@@ -25,7 +25,7 @@ import { message } from './store.js'
  * 可能留下一条同路径的旧路由（插件重装时旧行未必被干净卸载）。路径带版本
  * 号后新代码总能注册到一条干净路由，不会被上一代的路由挡住。
  */
-export const API_PATH = '/memory-plugin/api/v2'
+export const API_PATH = '/dsh-memory-plugin/api/v2'
 /** 兼容早期文档与外部脚本的旧前缀；注册时尽力而为，被占用就跳过。 */
 export const LEGACY_API_PATH = '/memory-plugin/api'
 export const API_METHODS = [

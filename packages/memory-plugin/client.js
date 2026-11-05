@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
 
     // 接口前缀：新路径优先，旧前缀只作兼容（旧前缀可能被上一代插件的路由占着，
     // 那条路由读的是上一代的数据，所以必须把新路径排在前面）。
-    const API_PATHS = ['/memory-plugin/api/v2', '/memory-plugin/api']
+    const API_PATHS = ['/dsh-memory-plugin/api/v2', '/memory-plugin/api/v2', '/memory-plugin/api']
     const NS = 'dsh-memory-plugin'
     const STYLE_ID = 'dsh-memory-plugin-style'
 
