@@ -1,0 +1,23 @@
+# 依赖与构建产物（插件没有构建步骤，这里只挡掉可能出现的本地文件）
+node_modules/
+package-lock.json
+pnpm-lock.yaml.bak
+
+# 运行期数据：记忆库永远写在 DSH 的 storages 目录，不应进仓库
+*.tmp
+store.json
+store.json.bak-*
+
+# 测试与调试产物
+coverage/
+*.log
+.tmp/
+tmp/
+
+# 编辑器 / 系统文件
+.vscode/*
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
