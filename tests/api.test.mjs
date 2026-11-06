@@ -97,6 +97,7 @@ try {
     assert.equal(body.value.hook.stats.enabled, false)
     assert.ok(Array.isArray(body.value.hook.runs))
     assert.ok(body.value.diagnostics)
+    assert.equal(body.value.writeHooks.service, 'memoryWriteHooks')
     assert.ok(Array.isArray(body.value.writeHooks.before))
     assert.ok(Array.isArray(body.value.writeHooks.after))
   })

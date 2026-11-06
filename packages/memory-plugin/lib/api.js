@@ -114,7 +114,7 @@ function createMethods(engineOf, context = {}) {
         },
         injection: engine().injectionStats(),
         diagnostics: engine().diagnostics(),
-        writeHooks: engine().writeHooks.list(),
+        writeHooks: { service: 'memoryWriteHooks', ...engine().writeHooks.list() },
         usage: engine().usageStats({}),
         templates: engine().templates(),
         consolidation: {

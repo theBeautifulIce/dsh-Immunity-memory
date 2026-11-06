@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-06
+
+Patch release exposing the write-lifecycle hook registry to other Cordis plugins.
+
+### Added
+
+- `ctx.provide('memoryWriteHooks', engine.writeHooks)`: sibling plugins can call
+  `ctx.get('memoryWriteHooks')` and register before/after handlers without
+  importing the engine. Bootstrap now reports `writeHooks.service`.
+
+### Notes
+
+- Registering a hook does not create or update memories automatically. Automatic
+  update remains a policy that a registering plugin must implement.
+
 ## [0.3.0] - 2026-11-06
 
 Memory-quality and observability release: conflict resolution, forgetting curve,

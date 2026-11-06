@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.1-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -345,6 +345,18 @@ v0.3.0 已交付：
 - **记忆质量**：冲突合并 / 保留策略、遗忘曲线、按项目隔离的记忆空间；
 - **可观测性**：维护任务历史、慢查询、注入命中率与记忆健康分；
 - **写入 Hook**：`createItem` / `updateItem` / 导入 / 冲突解决的 before/after 生命周期 Hook，可拦截、可改写、失败放行。
+
+其他 Cordis 插件可以通过 `ctx.get('memoryWriteHooks')` 获取注册表并注册处理器：
+
+```js
+const hooks = ctx.get('memoryWriteHooks')
+hooks.onBeforeWrite((event) => {
+  if (event.action !== 'create') return
+  return { patch: { tags: [...(event.input.tags ?? []), 'auto'] } }
+})
+```
+
+Hook 只负责拦截 / 改写 / 放行，不会自动生成或更新记忆；自动更新需要注册方自己实现策略。
 
 近期优先级：
 

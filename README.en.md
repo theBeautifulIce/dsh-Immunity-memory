@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.1-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -345,6 +345,18 @@ Shipped in v0.3.0:
 - **Memory quality**: conflict merge / keep, forgetting curve, per-project memory spaces;
 - **Observability**: maintenance run history, slow queries, injection hit rate, memory health score;
 - **Write hooks**: before/after lifecycle hooks for `createItem` / `updateItem` / import / conflict resolution, with rewrite, block and fail-open behavior.
+
+Other Cordis plugins can obtain the registry through `ctx.get('memoryWriteHooks')` and register handlers:
+
+```js
+const hooks = ctx.get('memoryWriteHooks')
+hooks.onBeforeWrite((event) => {
+  if (event.action !== 'create') return
+  return { patch: { tags: [...(event.input.tags ?? []), 'auto'] } }
+})
+```
+
+Hooks only intercept, rewrite, or allow writes; they do not create or update memories by themselves. Automatic updates require a policy implemented by the registering plugin.
 
 Near-term priorities:
 

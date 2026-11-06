@@ -102,6 +102,11 @@ export async function apply(ctx, config) {
   })
   ref.engine = engine
 
+  // 把写入生命周期 Hook 暴露为 Cordis 服务，其他插件可以：
+  //   ctx.get('memoryWriteHooks').onBeforeWrite((event) => { ... })
+  // 注册表只负责拦截/改写/放行，不会自动生成或更新记忆；自动更新需要注册方自己实现。
+  ctx.effect(() => ctx.provide('memoryWriteHooks', engine.writeHooks), 'memory-plugin:write-hooks')
+
   // 显式加载一次：SQLite 存储打开时要读设置，引擎的 getSettings 此时不能反过来加载状态
   // （否则递归）。这里一次性把状态读进来，之后 getSettings 直接返回存档里的设置。
   try {
