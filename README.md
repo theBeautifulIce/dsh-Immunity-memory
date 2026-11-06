@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -22,7 +22,7 @@
 
 > 技术插件 id 仍为 **`dsh-memory-plugin`**，仓库与项目名为 **`dsh-Immunity-memory`**。改名只影响项目品牌，不影响已有安装、配置路径或工具名。
 
-> **v0.2.0 新增**：写入审计 Hook、待确认候选队列、独立子智能体审计 token 账本，以及实体键 / 来源原话 / 版本取代。详见 [Release v0.2.0](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.2.0)。
+> **v0.3.0 新增**：冲突合并与保留、遗忘曲线、按项目隔离的记忆空间、维护历史 / 慢查询 / 注入命中率 / 记忆健康分，以及可拦截 / 可改写的通用写入生命周期 Hook。详见 [Release v0.3.0](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.3.0)。
 
 ---
 
@@ -57,6 +57,11 @@
 | **四本记事本** | 记忆、日常、资产、踩坑；踩坑笔记固定“现象 / 根因 / 解决办法 / 预防”四段，支持 record / search / check |
 | **混合检索** | FTS5 bm25 全文 + 384 维哈希向量余弦 + 关系图谱 BFS；默认权重 0.4 / 0.4 / 0.2，自动归一化，可按设置调整 |
 | **写入保护** | 最小正文长度、Jaccard 去重、不可变层只读、L2 冲突检测；可修改层写入和修改必须显式填写 `ttlDays`，绝不默认永久 |
+| **冲突解决** | L2 冲突可显式「保留一侧」或「合并正文/标签」；败者归档并写取代关系，全程审计 |
+| **遗忘曲线** | 按最后访问时间做指数衰减，半衰期与分数地板可调；只影响检索排序，不改写 importance |
+| **项目空间** | 条目可绑定 `workspace`；写入默认当前工作目录，检索默认当前项目 + 全局，`"*"` 可跨项目 |
+| **写入 Hook** | `createItem` / `updateItem` / 导入 / 冲突解决支持 before/after 生命周期 Hook，可改写、可拦截、失败放行 |
+| **诊断** | 记忆健康分、维护历史、慢查询、注入命中率，统一在维护面板和 `diagnostics` API 展示 |
 | **记忆模板** | 每个模板按 L0/L1/L3 逐条配置不可变记忆，可新增多套并热切换；L2 与 L4-L7 始终共享，不会因切换模板被复制或删除 |
 | **写入审计** | 每次 `memory_write` / `memory_update` 前由无工具权限的独立子智能体对照用户原话审计；可开关、可影子运行，失败/超时放行；待确认候选在界面批准后才落库，审计 token 计入账本 |
 | **固化机制** | 反复写入、更新或命中的记忆进入候选；经 `memory_consolidate` 审计或界面确认后永久固化到 L1/L3，全程写审计 |
@@ -230,6 +235,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 | `retrieval.weights` | `0.4 / 0.4 / 0.2` | 全文 / 语义 / 图谱融合权重，自动归一化 |
 | `retrieval.graphDepth` | `2` | 图谱 BFS 深度 |
 | `retrieval.graphMinWeight` | `0.5` | 图谱边的最小权重 |
+| `retrieval.forgetting` | 开 / 90 天 / 0.25 | 遗忘曲线：半衰期与分数地板；只影响排序，不改 importance |
 | `write.dedupeThreshold` | `0.9` | Jaccard 去重阈值 |
 | `write.defaultTtlDays` | `30` | 新建可修改条目的建议保鲜期；仍要求显式传入 |
 | `prompt.inject` | `true` | 是否把记忆注入系统提示词 |
@@ -239,7 +245,8 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 | `hook.enforce` | `true` | 拒绝时阻止写入；关闭则只记录影子审计 |
 | `hook.minConfidence` | `0.7` | 低于该置信度的 reject 不拦截；needs_user 始终进入候选 |
 | `hook.timeoutSeconds` | `45` | 子智能体审计超时；超时按失败放行 |
-| `maintenance.*` | 见设置页 | 自动维护间隔、归档天数、资源上限、审计保留条数 |
+| `maintenance.*` | 见设置页 | 自动维护间隔、归档天数、资源上限、审计保留条数、慢查询阈值/上限、维护历史上限 |
+| `workspace`（条目） | 空 = 全局 | 写入默认当前工作目录；检索默认当前项目 + 全局；`"*"` 跨项目 |
 | `storage.backupKeep` | `3` | 轮转备份保留份数 |
 | `performance.nativeCore` | `true` | 是否启用 Rust 原生核心 |
 | `tools.enabled` | `true` | 是否向模型暴露记忆工具 |
@@ -286,6 +293,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 │  ├─ lib/
 │  │  ├─ engine.js            # 记忆引擎：CRUD、检索路由、冲突、维护、导出
 │  │  ├─ audit.js             # 写入审计 Hook：抓取用户原话、子智能体裁决、候选队列、token 汇总
+│  │  ├─ write-hooks.js       # 写入/更新/导入/冲突解决的 before/after 生命周期 Hook
 │  │  ├─ go-store.js          # Go 服务客户端：spawn、握手、增量同步、检索、备份
 │  │  ├─ storage.js           # 存储选择：Go → Node SQLite → JSON
 │  │  ├─ search.js            # Node 回退检索：BM25 + 余弦 + 图谱 + 融合
@@ -332,13 +340,17 @@ node scripts/inspect-db.mjs   # 只读查看当前记忆库
 
 ## 路线图
 
+v0.3.0 已交付：
+
+- **记忆质量**：冲突合并 / 保留策略、遗忘曲线、按项目隔离的记忆空间；
+- **可观测性**：维护任务历史、慢查询、注入命中率与记忆健康分；
+- **写入 Hook**：`createItem` / `updateItem` / 导入 / 冲突解决的 before/after 生命周期 Hook，可拦截、可改写、失败放行。
+
 近期优先级：
 
 1. **跨平台发布**：补齐 Linux/macOS 预编译二进制与发布流水线；
 2. **检索质量**：可插拔 embedding、真实语义模型适配、检索评估集；
-3. **记忆质量**：冲突合并策略、遗忘曲线、按项目隔离的记忆空间；
-4. **可观测性**：维护任务面板、慢查询、注入命中率与记忆健康分；
-5. **生态**：从 GitHub 直接安装、版本升级/回滚、示例模板包。
+3. **生态**：从 GitHub 直接安装、版本升级/回滚、示例模板包。
 
 详见 [`ROADMAP.md`](ROADMAP.md)。
 

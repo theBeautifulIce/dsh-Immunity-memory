@@ -38,6 +38,8 @@ export const API_METHODS = [
   'items.update',
   'items.delete',
   'items.bulk',
+  'conflicts.resolve',
+  'hooks.list',
   'settings.get',
   'settings.save',
   'settings.reset',
@@ -61,6 +63,7 @@ export const API_METHODS = [
   'data.export',
   'data.import',
   'health',
+  'diagnostics',
   'search.stats',
   'indexes.rebuild',
   'backups.list',
@@ -110,6 +113,8 @@ function createMethods(engineOf, context = {}) {
           runs: engine().auditRuns({ limit: 20 }),
         },
         injection: engine().injectionStats(),
+        diagnostics: engine().diagnostics(),
+        writeHooks: engine().writeHooks.list(),
         usage: engine().usageStats({}),
         templates: engine().templates(),
         consolidation: {
@@ -119,6 +124,12 @@ function createMethods(engineOf, context = {}) {
     },
     status() {
       return engine().status()
+    },
+    diagnostics() {
+      return engine().diagnostics()
+    },
+    'hooks.list'() {
+      return engine().writeHooks.list()
     },
     'items.list'(params) {
       return engine().listItems(params ?? {})
@@ -146,6 +157,9 @@ function createMethods(engineOf, context = {}) {
     },
     'items.bulk'(params) {
       return engine().bulkAction(params?.ids ?? [], String(params?.action ?? ''), 'user')
+    },
+    async 'conflicts.resolve'(params) {
+      return engine().resolveConflict(params ?? {}, 'user')
     },
     'settings.get'() {
       return { settings: engine().getSettings(), schema: SETTINGS_SCHEMA }

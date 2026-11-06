@@ -331,6 +331,10 @@ export function registerTools(ctx, engine, log) {
           type: 'string',
           description: 'Short verbatim quote from the user or source that justifies this memory.',
         },
+        workspace: {
+          type: 'string',
+          description: 'Project space. Defaults to the current working directory; pass an empty string to store a global memory visible in every project.',
+        },
         supersedes: {
           type: 'array',
           items: { type: 'string' },
@@ -343,6 +347,7 @@ export function registerTools(ctx, engine, log) {
     async execute(args, exec) {
       const item = await engine.createItem({
         ...args,
+        workspace: args.workspace === undefined ? workspaceOf(exec) : args.workspace,
         sessionId: sessionIdOf(exec),
         turn: typeof exec?.turn === 'number' ? exec.turn : undefined,
       }, 'agent')
@@ -361,12 +366,20 @@ export function registerTools(ctx, engine, log) {
         layer: { type: 'string', enum: LAYER_ENUM, description: 'Restrict to one layer.' },
         type: { type: 'string', enum: ['memory', 'note'], description: 'Restrict to memories or notebook entries.' },
         status: { type: 'string', enum: ['active', 'archived', 'conflicted', 'all'], description: 'Default active.' },
+        workspace: {
+          type: 'string',
+          description: 'Project space filter. Defaults to the current working directory; pass "*" to search every project.',
+        },
       },
       required: ['query'],
     },
     output: searchOutput,
-    async execute(args) {
-      const result = await engine.searchItems({ ...(args ?? {}), actor: 'agent' })
+    async execute(args, exec) {
+      const result = await engine.searchItems({
+        ...(args ?? {}),
+        workspace: args?.workspace === undefined ? workspaceOf(exec) : args.workspace,
+        actor: 'agent',
+      })
       return { ...result, items: result.items.map(toToolItem) }
     },
   })
@@ -380,8 +393,8 @@ export function registerTools(ctx, engine, log) {
       required: ['id'],
     },
     output: getOutput,
-    async execute(args) {
-      const item = engine.getItem(String(args?.id ?? ''))
+    async execute(args, exec) {
+      const item = engine.getItem(String(args?.id ?? ''), workspaceOf(exec))
       if (item === undefined) throw new Error(`找不到条目 ${String(args?.id ?? '')}`)
       return { item: toToolItem(item) }
     },
@@ -418,8 +431,10 @@ export function registerTools(ctx, engine, log) {
     output: updateOutput,
     async execute(args, exec) {
       const { id, ...patch } = args ?? {}
+      const itemId = String(id ?? '')
+      if (engine.getItem(itemId, workspaceOf(exec)) === undefined) throw new Error(`找不到条目 ${itemId}`)
       if (typeof exec?.turn === 'number') patch.turn = exec.turn
-      const item = await engine.updateItem(String(id ?? ''), patch, 'agent')
+      const item = await engine.updateItem(itemId, patch, 'agent')
       return { item: toToolItem(item) }
     },
   })
@@ -435,8 +450,13 @@ export function registerTools(ctx, engine, log) {
       required: ['ids'],
     },
     output: deleteOutput,
-    async execute(args) {
-      return await engine.deleteItems(args?.ids ?? [], 'agent')
+    async execute(args, exec) {
+      const ids = Array.isArray(args?.ids) ? args.ids : []
+      const scope = workspaceOf(exec)
+      for (const id of ids) {
+        if (engine.getItem(String(id), scope) === undefined) throw new Error(`找不到条目 ${String(id)}`)
+      }
+      return await engine.deleteItems(ids, 'agent')
     },
   })
 
@@ -620,6 +640,12 @@ function clip(value, max) {
 function sessionIdOf(exec) {
   const candidate = exec?.sessionId ?? exec?.session?.id ?? exec?.agent?.session?.id ?? exec?.agent?.sessionId
   return typeof candidate === 'string' ? candidate : null
+}
+
+function workspaceOf(exec) {
+  const candidate = exec?.workspace ?? exec?.cwd ?? exec?.agent?.workspace
+    ?? exec?.agent?.session?.cwd ?? exec?.agent?.session?.workspace
+  return typeof candidate === 'string' && candidate.trim() !== '' ? candidate : undefined
 }
 
 export { TOOL_NAMES }

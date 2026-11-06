@@ -779,9 +779,199 @@ await test('并发批准同一候选只写入一次', async () => {
   assert.equal(items.length, 1)
 })
 
+await test('项目空间隔离同键记忆，并保留全局条目', async () => {
+  const alpha = await engine.createItem({
+    layer: 'L4', title: '项目甲独有', content: '项目甲的隔离测试内容。',
+    ttlDays: 30, workspace: 'D:/Project/Alpha', key: 'project/space',
+  }, 'user')
+  const beta = await engine.createItem({
+    layer: 'L4', title: '项目乙独有', content: '项目乙的隔离测试内容。',
+    ttlDays: 30, workspace: 'D:/Project/Beta', key: 'project/space',
+  }, 'user')
+  const global = await engine.createItem({
+    layer: 'L4', title: '全局共享', content: '所有项目都能看到的全局测试内容。',
+    ttlDays: 30, workspace: '',
+  }, 'user')
+  assert.equal(alpha.workspace, 'd:/project/alpha')
+  assert.notEqual(alpha.id, beta.id, '不同项目允许使用相同实体键')
+  assert.equal(global.workspace, null)
+  const hits = (await engine.searchItems({ query: '隔离测试内容', workspace: 'd:/project/alpha' })).items
+  assert.ok(hits.some((item) => item.id === alpha.id))
+  assert.ok(!hits.some((item) => item.id === beta.id), '不应检索到其他项目的记忆')
+  assert.equal(engine.getItem(beta.id, 'd:/project/alpha'), undefined, '跨项目按 id 读取应拒绝')
+  const globalHits = (await engine.searchItems({ query: '全局测试内容', workspace: 'd:/project/alpha' })).items
+  assert.ok(globalHits.some((item) => item.id === global.id), '全局条目应在项目检索中可见')
+})
+
+await test('冲突合并刷新 TTL、归档败者并写取代关系', async () => {
+  const workspace = 'd:/project/conflict'
+  const winner = await engine.createItem({
+    layer: 'L2', title: '冲突保留方', content: '这是保留方的完整正文。', ttlDays: 30, workspace,
+  }, 'user')
+  const loser = await engine.createItem({
+    layer: 'L2', title: '冲突被合并方', content: '这是被合并方的完整正文。', ttlDays: 30, workspace,
+  }, 'user')
+  const resolved = await engine.resolveConflict({
+    winnerId: winner.id, loserId: loser.id, strategy: 'merge', ttlDays: 90,
+  }, 'user')
+  assert.equal(resolved.strategy, 'merge')
+  assert.equal(resolved.winner.ttlDays, 90, '合并应刷新保鲜期')
+  assert.ok(resolved.winner.content.includes('保留方的完整正文'))
+  assert.ok(resolved.winner.content.includes('被合并方的完整正文'))
+  const archived = engine.getItem(loser.id)
+  assert.equal(archived.status, 'archived')
+  assert.equal(archived.supersededBy, winner.id)
+  assert.ok(engine.getItem(winner.id).supersedes.includes(loser.id))
+})
+
+await test('冲突解决拒绝跨项目条目', async () => {
+  const left = await engine.createItem({
+    layer: 'L2', title: '跨项目冲突甲方', content: '这是跨项目隔离测试的甲方正文。',
+    ttlDays: 30, workspace: 'd:/project/conflict-a',
+  }, 'user')
+  const right = await engine.createItem({
+    layer: 'L2', title: '跨项目冲突乙方', content: '这是跨项目隔离测试的乙方正文。',
+    ttlDays: 30, workspace: 'd:/project/conflict-b',
+  }, 'user')
+  await assert.rejects(
+    engine.resolveConflict({ winnerId: left.id, loserId: right.id, strategy: 'merge' }, 'user'),
+    /同层同项目/,
+  )
+})
+
+await test('冲突保留策略不改写保留方正文', async () => {
+  const workspace = 'd:/project/conflict-keep'
+  const winner = await engine.createItem({
+    layer: 'L2', title: '保留策略甲方', content: '这是甲方的原始完整正文。', ttlDays: 30, workspace,
+  }, 'user')
+  const loser = await engine.createItem({
+    layer: 'L2', title: '保留策略乙方', content: '这是乙方的原始完整正文。', ttlDays: 30, workspace,
+  }, 'user')
+  const resolved = await engine.resolveConflict({
+    winnerId: winner.id, loserId: loser.id, strategy: 'keep',
+  }, 'user')
+  assert.equal(resolved.winner.content, '这是甲方的原始完整正文。')
+  assert.equal(engine.getItem(loser.id).status, 'archived')
+})
+
+await test('诊断快照包含健康分、维护历史与慢查询', async () => {
+  const original = engine.getSettings()
+  await engine.replaceSettings(applySettingsPatch(original, {
+    maintenance: { slowQueryMs: 0, historyKeep: 5 },
+  }))
+  try {
+    await engine.runMaintenance({ tasks: ['cleanup'] })
+    const before = engine.diagnostics()
+    assert.ok(typeof before.health.score === 'number')
+    assert.ok(before.health.score <= 100 && before.health.score >= 0)
+    assert.ok(['healthy', 'attention', 'risk'].includes(before.health.grade))
+    assert.ok(before.maintenanceRuns.length >= 1, '维护历史应被记录')
+    await engine.searchItems({ query: '诊断慢查询', workspace: 'd:/project/diag' })
+    const after = engine.diagnostics()
+    assert.ok(after.slowQueries.length > before.slowQueries.length, '超过阈值应记录慢查询')
+    assert.ok(typeof after.injection.hitRate === 'number')
+  } finally {
+    await engine.replaceSettings(original)
+  }
+})
+
+await test('写入 Hook 可改写输入并记录到注册表', async () => {
+  const suffix = Date.now().toString(36)
+  const off = engine.writeHooks.onBeforeWrite((context) => {
+    assert.equal(context.action, 'create')
+    return { patch: { title: `被 Hook 改写的标题 ${suffix}` } }
+  }, 'test-rewrite')
+  try {
+    assert.ok(engine.writeHooks.list().before.some((entry) => entry.name === 'test-rewrite'))
+    const item = await engine.createItem({
+      layer: 'L4',
+      title: `原始标题 ${suffix}`,
+      content: `Hook 改写输入的测试正文 ${suffix}`,
+      ttlDays: 30,
+      importance: 6,
+      quote: `这是 Hook 测试的用户原话 ${suffix}`,
+    })
+    assert.equal(item.title, `被 Hook 改写的标题 ${suffix}`)
+  } finally {
+    off()
+  }
+})
+
+await test('写入 Hook 可以拦截 create 与 update', async () => {
+  const suffix = Date.now().toString(36)
+  const item = await engine.createItem({
+    layer: 'L4',
+    title: `待拦截条目 ${suffix}`,
+    content: `这条用于验证拒绝路径 ${suffix}`,
+    ttlDays: 30,
+    importance: 5,
+    quote: `拒绝路径测试原话 ${suffix}`,
+  })
+  const off = engine.writeHooks.onBeforeWrite(() => false, 'test-deny')
+  try {
+    await assert.rejects(
+      engine.createItem({
+        layer: 'L4',
+        title: `被拒绝的新条目 ${suffix}`,
+        content: `这条不应该被写入 ${suffix}`,
+        ttlDays: 30,
+        importance: 5,
+        quote: `拒绝写入测试原话 ${suffix}`,
+      }),
+      /写入被 Hook/
+    )
+    await assert.rejects(engine.updateItem(item.id, { title: `被拒绝的更新 ${suffix}` }), /写入被 Hook/)
+  } finally {
+    off()
+  }
+  assert.equal(engine.getItem(item.id).title, `待拦截条目 ${suffix}`)
+})
+
+await test('写入 Hook 抛错时失败放行', async () => {
+  const suffix = Date.now().toString(36)
+  const off = engine.writeHooks.onBeforeWrite(() => {
+    throw new Error('hook exploded')
+  }, 'test-fail-open')
+  try {
+    const item = await engine.createItem({
+      layer: 'L4',
+      title: `失败放行条目 ${suffix}`,
+      content: `Hook 抛错时仍应写入 ${suffix}`,
+      ttlDays: 30,
+      importance: 5,
+      quote: `失败放行测试原话 ${suffix}`,
+    })
+    assert.equal(item.status, 'active')
+  } finally {
+    off()
+  }
+})
+
+await test('更新 Hook 能拿到修改前后内容', async () => {
+  const suffix = Date.now().toString(36)
+  const item = await engine.createItem({
+    layer: 'L4',
+    title: `更新 Hook 原条目 ${suffix}`,
+    content: `更新 Hook 的原始正文 ${suffix}`,
+    ttlDays: 30,
+    importance: 5,
+    quote: `更新 Hook 测试原话 ${suffix}`,
+  })
+  const seen = []
+  const off = engine.writeHooks.onAfterWrite((context) => {
+    if (context.action === 'update' && context.item?.id === item.id) seen.push(context)
+  }, 'test-after-update')
+  try {
+    await engine.updateItem(item.id, { title: `更新 Hook 新标题 ${suffix}`, ttlDays: 30 })
+  } finally {
+    off()
+  }
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].before.title, `更新 Hook 原条目 ${suffix}`)
+  assert.equal(seen[0].item.title, `更新 Hook 新标题 ${suffix}`)
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)
-
-
 
 
 

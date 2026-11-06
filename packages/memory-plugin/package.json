@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory-plugin",
-  "version": "0.2.0",
-  "description": "dsh-Immunity-memory: cross-session long-term memory for DeepSeek Harness with eight layers, notebooks, hybrid retrieval, write-audit hook, consolidation, token accounting and a visual UI.",
+  "version": "0.3.0",
+  "description": "dsh-Immunity-memory: cross-session long-term memory for DeepSeek Harness with eight layers, notebooks, hybrid retrieval, write hooks, conflict resolution, forgetting curve, project spaces, diagnostics and a visual UI.",
   "type": "module",
   "main": "index.js",
   "repository": {
@@ -22,7 +22,7 @@
   "icon": "./icon.svg",
   "meta": {
     "title": "记忆插件 (dsh-memory-plugin)",
-    "description": "给 DeepSeek Harness 的跨会话长期记忆：八层记忆、四本记事本、FTS5 + 向量 + 图谱混合检索、模板热切换、写入审计 Hook、固化审计、用量账本与可视化界面。"
+    "description": "给 DeepSeek Harness 的跨会话长期记忆：八层记忆、四本记事本、混合检索、冲突合并、遗忘曲线、项目空间、写入生命周期 Hook、诊断与可视化界面。"
   },
   "files": [
     "index.js",

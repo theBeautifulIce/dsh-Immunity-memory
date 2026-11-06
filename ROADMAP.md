@@ -28,17 +28,17 @@ after user feedback, DSH API changes, or performance findings.
 
 - [ ] Pluggable embedding providers; keep HashEmbedding as the offline default.
 - [ ] Retrieval evaluation set with recall@k / MRR, run in CI.
-- [ ] Conflict-merge policy for L2 and consolidation candidates.
-- [ ] Forgetting curve and importance decay, with an audit trail.
-- [ ] Per-project / per-workspace memory spaces.
+- [x] Conflict-merge policy for L2 and consolidation candidates.
+- [x] Forgetting curve in retrieval scoring (importance is not silently rewritten).
+- [x] Per-project / per-workspace memory spaces.
 - [ ] Better duplicate detection across notebooks and layers.
 - [ ] Template packs: export/import a set of L0/L1/L3 entries.
 
 ## v0.4 — Operations and observability
 
-- [ ] Maintenance dashboard: last run, duration, archived, deduped, promoted.
-- [ ] Slow-query log and retrieval score breakdown in the UI.
-- [ ] Injection hit rate, token cost trend, and memory health score.
+- [x] Maintenance dashboard: last run, duration, archived, deduped, promoted.
+- [x] Slow-query log and retrieval score breakdown in the UI.
+- [x] Injection hit rate, token cost trend, and memory health score.
 - [ ] Backup verification (restore into a temporary store and run integrity).
 - [ ] Retention policies per layer and per notebook.
 - [ ] Structured JSON logs with rotation and a downloadable diagnostics bundle.

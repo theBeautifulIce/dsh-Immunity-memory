@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
+Memory-quality and observability release: conflict resolution, forgetting curve,
+per-project spaces, maintenance/slow-query diagnostics, memory health score, and
+generic write-lifecycle hooks.
+
+### Added
+
+- Conflict resolution (`conflicts.resolve`): explicitly keep one side, or merge
+  title/content/tags into the winner, archive the loser with `supersededBy` /
+  `validTo`, and record the decision in the audit log. The editor exposes
+  “keep this entry” and “merge body” actions.
+- Forgetting curve: retrieval score multiplies the base score by a configurable
+  exponential decay (`retrieval.forgetting.*`, based on `lastAccessAt`), with a
+  floor so old memories remain reachable. Importance itself is not silently
+  rewritten.
+- Per-project memory spaces: entries carry an optional normalized `workspace`;
+  writes default to the current session cwd, searches default to that project
+  plus global entries, and `workspace: "*"` searches everything. Same-key and
+  conflict detection are scoped to one workspace.
+- Observability: `diagnostics` API and maintenance card show a 0–100 health
+  score with issue breakdown, recent maintenance runs, slow queries, and the
+  latest injection hit rate. `maintenance.slowQueryMs` / `slowQueryKeep` and
+  `maintenance.historyKeep` are configurable.
+- Generic write hooks (`lib/write-hooks.js`): register before/after handlers for
+  create, update, import and conflict resolution. Before hooks can rewrite input
+  or block with a reason; hook errors fail open. `hooks.list` and the bootstrap
+  payload expose the registry; the maintenance page shows registered hooks.
+
+### Changed
+
+- `memory_write` / `memory_search` accept `workspace`; `memory_get`,
+  `memory_update` and `memory_forget` validate the current project scope.
+- `promptDigest` records the ids it injected, so the next searches can compute a
+  real injection hit rate.
+
+### Fixed
+
+- Slow-query logging treats `maintenance.slowQueryMs = 0` as “log every search”
+  instead of silently clamping to 1 ms.
+- Conflict resolution rejects cross-project or cross-layer pairs instead of
+  merging unrelated entries.
+- Same-key writes still renew TTL, and conflict rejection no longer archives an
+  update target that was never applied.
+
 ## [0.2.0] - 2026-11-06
 
 Write-audit hook with a pending-candidate queue, isolated-judge token accounting,

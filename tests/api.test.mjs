@@ -96,6 +96,9 @@ try {
     assert.ok(typeof body.value.storage.path === 'string')
     assert.equal(body.value.hook.stats.enabled, false)
     assert.ok(Array.isArray(body.value.hook.runs))
+    assert.ok(body.value.diagnostics)
+    assert.ok(Array.isArray(body.value.writeHooks.before))
+    assert.ok(Array.isArray(body.value.writeHooks.after))
   })
 
   await test('mountApi 支持自定义路径（旧前缀兼容）', async () => {
@@ -249,6 +252,45 @@ try {
     assert.ok(decided.body.value.appliedItemId.startsWith('mem_'))
     const item = await engine.getItem(decided.body.value.appliedItemId)
     assert.equal(item.title, '接口候选')
+  })
+
+  await test('hooks.list 与 diagnostics 暴露新增可观测接口', async () => {
+    const hooks = await call('hooks.list', {})
+    assert.equal(hooks.status, 200)
+    assert.ok(Array.isArray(hooks.body.value.before))
+    assert.ok(Array.isArray(hooks.body.value.after))
+    const diag = await call('diagnostics', {})
+    assert.equal(diag.status, 200)
+    assert.ok(typeof diag.body.value.health.score === 'number')
+    assert.ok(Array.isArray(diag.body.value.slowQueries))
+  })
+
+  await test('conflicts.resolve 可通过 API 保留一侧', async () => {
+    const left = await call('items.create', {
+      layer: 'L2',
+      title: 'API 冲突甲方',
+      content: '甲方主张使用统一的数据格式来减少接口适配成本。',
+      ttlDays: 30,
+      importance: 6,
+    })
+    const right = await call('items.create', {
+      layer: 'L2',
+      title: 'API 冲突乙方',
+      content: '乙方主张保留各端格式，由网关在边界做转换。',
+      ttlDays: 30,
+      importance: 5,
+    })
+    assert.equal(left.status, 200)
+    assert.equal(right.status, 200)
+    const resolved = await call('conflicts.resolve', {
+      winnerId: left.body.value.item.id,
+      loserId: right.body.value.item.id,
+      strategy: 'keep',
+    })
+    assert.equal(resolved.status, 200)
+    assert.equal(resolved.body.value.winner.status, 'active')
+    assert.equal(resolved.body.value.loser.status, 'archived')
+    assert.equal(resolved.body.value.loser.supersededBy, left.body.value.item.id)
   })
 
   await test('data.export / data.import 往返', async () => {

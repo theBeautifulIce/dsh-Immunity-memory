@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -22,7 +22,7 @@
 
 > The technical plugin id remains **`dsh-memory-plugin`**; the repository and project name is **`dsh-Immunity-memory`**. The rename only affects branding, not existing installs, config paths, or tool names.
 
-> **New in v0.2.0**: write-audit hook, pending-candidate queue, isolated judge token accounting, and entity keys / provenance / supersedes. See the [v0.2.0 release](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.2.0).
+> **New in v0.3.0**: conflict merge/keep, forgetting curve, per-project memory spaces, maintenance history / slow queries / injection hit rate / memory health score, and interceptable write-lifecycle hooks. See the [v0.3.0 release](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.3.0).
 
 ---
 
@@ -57,6 +57,11 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | **Four notebooks** | Memory, Daily, Asset, Pitfall. Pitfall notes use the fixed "symptom / root cause / fix / prevention" shape and support record / search / check |
 | **Hybrid retrieval** | FTS5 bm25 + 384-d hashed-vector cosine + graph BFS; default weights 0.4 / 0.4 / 0.2, auto-normalized and configurable |
 | **Write protection** | Minimum content length, Jaccard dedupe, immutable-layer protection, L2 conflict detection; every mutable write/update must provide explicit `ttlDays`, never a silent permanent default |
+| **Conflict resolution** | L2 conflicts can keep one side or merge body/tags; the loser is archived with a supersedes link and the decision is audited |
+| **Forgetting curve** | Exponential decay by last access with configurable half-life and score floor; ranking only, `importance` is never rewritten |
+| **Project spaces** | Entries can carry `workspace`; writes default to the cwd, searches see the current project plus global entries, and `"*"` spans projects |
+| **Write hooks** | Before/after lifecycle hooks for `createItem` / `updateItem` / import / conflict resolution; rewrite, block, and fail-open |
+| **Diagnostics** | Memory health score, maintenance history, slow queries, and injection hit rate in the maintenance panel and `diagnostics` API |
 | **Memory templates** | Each template configures immutable memories per L0/L1/L3, with multiple templates and hot switching; L2 and L4-L7 are shared and are never copied or deleted by a switch |
 | **Write audit** | Before every `memory_write` / `memory_update`, a tool-less isolated subagent audits it against the user's turn; optional enforce or shadow mode, fail-open on errors/timeouts, with pending candidates approved in the UI and per-run token accounting |
 | **Consolidation** | Frequently written, updated, or recalled memories become candidates; after `memory_consolidate` review or UI approval they become permanent L1/L3 memories, fully audited |
@@ -230,6 +235,7 @@ Settings save immediately and can be reset to defaults. The most useful keys:
 | `retrieval.weights` | `0.4 / 0.4 / 0.2` | Full-text / semantic / graph fusion weights, auto-normalized |
 | `retrieval.graphDepth` | `2` | Graph BFS depth |
 | `retrieval.graphMinWeight` | `0.5` | Minimum graph edge weight |
+| `retrieval.forgetting` | on / 90d / 0.25 | Forgetting curve: half-life and score floor; ranking only, importance is not rewritten |
 | `write.dedupeThreshold` | `0.9` | Jaccard duplicate threshold |
 | `write.defaultTtlDays` | `30` | Suggested TTL for new mutable entries; an explicit value is still required |
 | `prompt.inject` | `true` | Inject memories into the system prompt |
@@ -239,7 +245,8 @@ Settings save immediately and can be reset to defaults. The most useful keys:
 | `hook.enforce` | `true` | Block rejected writes; off records shadow audits only |
 | `hook.minConfidence` | `0.7` | Rejects below this confidence do not block; `needs_user` always queues |
 | `hook.timeoutSeconds` | `45` | Subagent audit timeout; timeouts fail open |
-| `maintenance.*` | See Settings | Maintenance interval, archive age, resource caps, audit retention |
+| `maintenance.*` | See Settings | Maintenance interval, archive age, resource caps, audit retention, slow-query threshold/keep, history keep |
+| `workspace` (entry) | empty = global | Writes default to the cwd; searches see the current project plus global; `"*"` spans projects |
 | `storage.backupKeep` | `3` | Rotating backups to keep |
 | `performance.nativeCore` | `true` | Enable the Rust native core |
 | `tools.enabled` | `true` | Expose memory tools to the model |
@@ -286,6 +293,7 @@ Numbers vary with hardware, data distribution, and whether the native core is en
 │  ├─ lib/
 │  │  ├─ engine.js            # memory engine: CRUD, retrieval routing, conflict, maintenance, export
 │  │  ├─ audit.js             # write-audit hook: user-turn capture, judge subagent, candidates, tokens
+│  │  ├─ write-hooks.js       # before/after lifecycle hooks for create/update/import/conflict
 │  │  ├─ go-store.js          # Go client: spawn, handshake, incremental sync, search, backup
 │  │  ├─ storage.js           # storage selection: Go → Node SQLite → JSON
 │  │  ├─ search.js            # Node fallback: BM25 + cosine + graph + fusion
@@ -332,13 +340,17 @@ This repository is maintained as a long-lived project, not a one-off script:
 
 ## Roadmap
 
+Shipped in v0.3.0:
+
+- **Memory quality**: conflict merge / keep, forgetting curve, per-project memory spaces;
+- **Observability**: maintenance run history, slow queries, injection hit rate, memory health score;
+- **Write hooks**: before/after lifecycle hooks for `createItem` / `updateItem` / import / conflict resolution, with rewrite, block and fail-open behavior.
+
 Near-term priorities:
 
 1. **Cross-platform releases**: Linux/macOS prebuilt binaries and a release pipeline;
 2. **Retrieval quality**: pluggable embeddings, real semantic model adapters, retrieval evaluation set;
-3. **Memory quality**: conflict merge policy, forgetting curve, per-project memory spaces;
-4. **Observability**: maintenance dashboard, slow queries, injection hit rate, memory health score;
-5. **Ecosystem**: install directly from GitHub, upgrade/rollback, example template packs.
+3. **Ecosystem**: install directly from GitHub, upgrade/rollback, example template packs.
 
 See [`ROADMAP.md`](ROADMAP.md) for details.
 

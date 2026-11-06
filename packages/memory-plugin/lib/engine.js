@@ -64,6 +64,8 @@ const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4
 
 /** 新建一条记忆/记事本条目。 */
 export async function createEngine({ store, getSettings, initialSettings, log, native }) {
+  const { createWriteHookRegistry } = await import('./write-hooks.js')
+  const writeHooks = createWriteHookRegistry({ log })
   let state
   /** id → item 的索引，检索时避免每次重建 Map。 */
   let itemMap = new Map()
@@ -682,7 +684,22 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const query = typeof options.query === 'string' ? options.query.trim() : ''
     const limit = clampInt(options.limit, 1, active.retrieval.maxLimit, active.retrieval.defaultLimit)
     const status = options.status ?? 'usable'
+    const workspace = normalizeWorkspace(options.workspace)
     const started = Date.now()
+    // 所有检索出口统一记账：搜索次数、慢查询、最近一次注入的命中情况。
+    const finish = (payload) => {
+      const tookMs = Date.now() - started
+      current.meta.searches = (current.meta.searches ?? 0) + 1
+      noteSlowQuery(current, active, {
+        at: new Date().toISOString(),
+        query: truncate(query, 120),
+        tookMs,
+        results: payload.items.length,
+        path: payload.breakdown,
+      })
+      noteInjectionHits(current, payload.items)
+      return { ...payload, tookMs }
+    }
 
     if (query === '') {
       // 空查询=按重要度/时间列一批，不需要经过索引
@@ -694,18 +711,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         reinforce(item, 'hit')
       }
       if (sorted.length > 0) scheduleAccessPersist()
-      current.meta.searches = (current.meta.searches ?? 0) + 1
       const listed = sorted.map((item) => ({ ...decorate(item), score: round(scoreItem(item, new Set(), active, Date.now())) }))
-      return {
+      return finish({
         items: listed,
         total: scope.length,
         query,
         limit,
         tokens: 0,
         usage: recordUsage('memory_search', options, listed),
-        tookMs: Date.now() - started,
         breakdown: 'listing',
-      }
+      })
     }
 
     // 1) 有 Go 服务时：FTS5 + 语义 + 图谱 + 融合全部由 Go 完成
@@ -729,26 +744,27 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       for (const hit of result.hits ?? []) {
         const item = itemMap.get(hit.id)
         if (item === undefined) continue
+        if (workspace !== null && item.workspace !== null && item.workspace !== workspace) continue
         if (isExpiredItem(item, started)) continue
         item.accessCount = (item.accessCount ?? 0) + 1
         item.lastAccessAt = new Date().toISOString()
         reinforce(item, 'hit')
-        hits.push({ ...decorate(item), score: round(hit.score), breakdown: hit.breakdown })
+        const score = hit.score * forgettingFactor(item, active, started)
+        hits.push({ ...decorate(item), score: round(score), breakdown: hit.breakdown })
       }
+      hits.sort((left, right) => right.score - left.score)
       if (hits.length > 0) scheduleAccessPersist()
-      current.meta.searches = (current.meta.searches ?? 0) + 1
-      return {
+      return finish({
         items: hits,
         total: result.total ?? hits.length,
         query,
         limit,
         tokens: tokenize(query).size,
         usage: recordUsage('memory_search', options, hits),
-        tookMs: Date.now() - started,
         weights: result.weights,
         cached: false,
         breakdown: 'go',
-      }
+      })
     }
 
     // 2) 回退：Node 内置倒排 + 语义 + 图谱
@@ -767,31 +783,35 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     for (const hit of result.items) {
       const item = itemMap.get(hit.item.id)
       if (item === undefined) continue
+      if (workspace !== null && item.workspace !== null && item.workspace !== workspace) continue
       if (isExpiredItem(item, started)) continue
       item.accessCount = (item.accessCount ?? 0) + 1
       item.lastAccessAt = new Date().toISOString()
       reinforce(item, 'hit')
-      hits.push({ ...decorate(item), score: round(hit.score), breakdown: hit.breakdown })
+      const score = hit.score * forgettingFactor(item, active, started)
+      hits.push({ ...decorate(item), score: round(score), breakdown: hit.breakdown })
     }
+    hits.sort((left, right) => right.score - left.score)
     if (hits.length > 0) scheduleAccessPersist()
-    current.meta.searches = (current.meta.searches ?? 0) + 1
-    return {
+    return finish({
       items: hits,
       total: result.total,
       query,
       limit,
       tokens: tokenize(query).size,
       usage: recordUsage('memory_search', options, hits),
-      tookMs: Date.now() - started,
       weights: result.weights,
       cached: result.cached === true,
       breakdown: 'hybrid',
-    }
+    })
   }
 
-  function getItem(id) {
+  function getItem(id, workspace) {
     const item = currentState().items.find((candidate) => candidate.id === id)
-    return item === undefined ? undefined : decorate(item)
+    if (item === undefined) return undefined
+    const scope = normalizeWorkspace(workspace)
+    if (scope !== null && item.workspace !== null && item.workspace !== scope) return undefined
+    return decorate(item)
   }
 
   /**
@@ -970,7 +990,20 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
 
   // ---------------------------------------------------------------- 写入 ----
 
-  async function createItem(input = {}, actor = 'user') {
+  async function createItem(input = {}, actor = 'user', options = {}) {
+    const beforeHook = options.skipHooks === true
+      ? { allowed: true, input }
+      : await writeHooks.runBefore({ action: 'create', input, target: null, actor })
+    if (beforeHook.allowed === false) {
+      throw createError('WRITE_BLOCKED', beforeHook.reason)
+    }
+    input = beforeHook.input
+    const afterCreate = async (item) => {
+      if (options.skipHooks !== true) {
+        await writeHooks.runAfter({ action: 'create', actor, input, before: null, item })
+      }
+      return item
+    }
     const current = await ensureLoaded()
     const active = settings()
     assertEnabled(active)
@@ -994,10 +1027,11 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (title === '' && content.trim() === '') throw createError('EMPTY', '标题和正文不能同时为空')
     const now = new Date().toISOString()
     const key = normalizeKey(input.key)
+    const workspace = normalizeWorkspace(input.workspace)
     const source = normalizeSource({
       kind: actor === 'agent' ? 'agent' : actor === 'import' ? 'import' : 'user',
       sessionId: input.sessionId,
-      workspace: input.workspace,
+      workspace,
       quote: input.quote ?? input.source?.quote,
       turn: input.turn ?? input.source?.turn,
       confidence: input.confidence ?? input.source?.confidence,
@@ -1016,6 +1050,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       pinned: input.pinned === true,
       ttlDays: type === 'memory' ? normalizeTtl(input.ttlDays, active, layer) : null,
       key,
+      workspace,
       source,
       supersedes,
       validFrom: now,
@@ -1033,6 +1068,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         && candidate.type === type
         && candidate.layer === layer
         && candidate.notebook === notebook
+        && candidate.workspace === workspace
         && candidate.supersededBy === null
         && (candidate.status === 'active' || candidate.status === 'conflicted'))
       if (existing !== undefined) {
@@ -1058,9 +1094,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           reinforce(existing, 'create')
           indexItem(existing)
           await persist()
-          return decorate(existing)
+          return afterCreate(decorate(existing))
         }
-        return updateItem(existing.id, {
+        const beforeExisting = clone(existing)
+        const updated = await updateItem(existing.id, {
           title,
           content,
           tags: item.tags,
@@ -1071,7 +1108,11 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           turn: source.turn,
           confidence: source.confidence,
           supersedes,
-        }, actor)
+        }, actor, { skipHooks: true })
+        if (options.skipHooks !== true) {
+          await writeHooks.runAfter({ action: 'update', actor, input, before: beforeExisting, item: updated })
+        }
+        return updated
       }
     }
 
@@ -1092,16 +1133,23 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     recordChange('create', null, item, actor)
     current.meta.writes = (current.meta.writes ?? 0) + 1
     await persist()
-    return decorate(item)
+    return afterCreate(decorate(item))
   }
 
-  async function updateItem(id, patch = {}, actor = 'user') {
+  async function updateItem(id, patch = {}, actor = 'user', options = {}) {
     const current = await ensureLoaded()
     const active = settings()
     const index = current.items.findIndex((candidate) => candidate.id === id)
     if (index < 0) throw createError('NOT_FOUND', `找不到条目 ${id}`)
     const before = current.items[index]
     const beforeChange = clone(before)
+    const beforeHook = options.skipHooks === true
+      ? { allowed: true, input: patch }
+      : await writeHooks.runBefore({ action: 'update', input: patch, target: clone(before), actor })
+    if (beforeHook.allowed === false) {
+      throw createError('WRITE_BLOCKED', beforeHook.reason)
+    }
+    patch = beforeHook.input
     assertLayerWritable(active, before.layer)
     const next = { ...before }
     if (patch.title !== undefined) next.title = truncate(String(patch.title).trim(), MAX_TITLE) || before.title
@@ -1117,6 +1165,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
     if (patch.notebook !== undefined && next.type === 'note') next.notebook = normalizeNotebook(patch.notebook)
     if (patch.pinned !== undefined) next.pinned = patch.pinned === true
+    if (patch.workspace !== undefined) {
+      next.workspace = normalizeWorkspace(patch.workspace)
+      next.source = normalizeSource({ ...before.source, workspace: next.workspace })
+    }
     if (patch.status !== undefined) {
       if (!ITEM_STATUSES.includes(patch.status)) throw createError('INVALID_STATUS', `未知状态 ${patch.status}`)
       next.status = patch.status
@@ -1130,6 +1182,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           && candidate.type === next.type
           && candidate.layer === next.layer
           && candidate.notebook === next.notebook
+          && candidate.workspace === next.workspace
           && candidate.status === 'active'
           && candidate.supersededBy === null)
         if (clash !== undefined) throw createError('KEY_CONFLICT', `实体键 ${nextKey} 已被 ${clash.id} 占用`)
@@ -1148,6 +1201,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (patch.supersedes !== undefined) next.supersedes = normalizeIdList(patch.supersedes)
     if (patch.title === undefined && patch.content === undefined && patch.tags === undefined
       && patch.importance === undefined && patch.layer === undefined && patch.pinned === undefined
+      && patch.workspace === undefined
       && patch.status === undefined && patch.ttlDays === undefined && patch.notebook === undefined
       && patch.key === undefined && patch.quote === undefined && patch.turn === undefined
       && patch.confidence === undefined && patch.source === undefined && patch.supersedes === undefined) {
@@ -1173,7 +1227,11 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     audit('update', `${current.items[index].layer}/${current.items[index].title}`, actor)
     recordChange('update', beforeChange, current.items[index], actor)
     await persist()
-    return decorate(current.items[index])
+    const updated = decorate(current.items[index])
+    if (options.skipHooks !== true) {
+      await writeHooks.runAfter({ action: 'update', actor, input: patch, before: beforeChange, item: updated })
+    }
+    return updated
   }
 
   /** 把被取代的旧条目归档，并写入双向链接；不可变层不参与自动归档。 */
@@ -1445,6 +1503,22 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (dirty) reindexAll()
     report.totals = summarize(current, active)
     current.meta.lastMaintenance = report.ranAt
+    // 维护面板的历史表：只保留轻量摘要，不重复存整份候选列表。
+    const history = Array.isArray(current.meta.maintenanceRuns) ? current.meta.maintenanceRuns : []
+    history.push({
+      ranAt: report.ranAt,
+      tasks: report.tasks.map((entry) => ({
+        task: entry.task,
+        changed: entry.changed ?? 0,
+        note: truncate(String(entry.note ?? ''), 200),
+      })),
+      totals: {
+        total: report.totals?.total ?? 0,
+        active: report.totals?.byStatus?.active ?? 0,
+        conflicted: report.totals?.byStatus?.conflicted ?? 0,
+      },
+    })
+    current.meta.maintenanceRuns = history.slice(-clampInt(active.maintenance.historyKeep, 1, 200, 20))
     audit('maintenance', wanted.join(','), 'system')
     await persist()
     return report
@@ -1460,6 +1534,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     for (const candidate of items) {
       if (candidate.id === item.id) continue
       if (candidate.type !== item.type) continue
+      if (candidate.workspace !== item.workspace) continue
       const score = jaccard(tokens, tokenize(`${candidate.title} ${candidate.content}`))
       if (score >= threshold && score > bestScore) {
         best = candidate
@@ -1477,6 +1552,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     let marked = 0
     for (const other of current.items) {
       if (other.id === item.id || other.layer !== item.layer) continue
+      if (other.workspace !== item.workspace) continue
       const score = jaccard(tokens, tokenize(`${other.title} ${other.content}`))
       if (score < threshold) continue
       if (!item.conflicts.includes(other.id)) item.conflicts.push(other.id)
@@ -1486,6 +1562,79 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       marked += 1
     }
     return marked
+  }
+
+  /**
+   * 解决一条冲突：保留一侧，或把两侧正文合并成一条。
+   * 这是显式人工动作，不会自动改写；败者归档并写 supersededBy，保留完整审计。
+   */
+  async function resolveConflict(input = {}, actor = 'user') {
+    const hook = await writeHooks.runBefore({
+      action: 'conflict.resolve',
+      input,
+      target: null,
+      actor,
+    })
+    if (hook.allowed === false) throw createError('WRITE_BLOCKED', hook.reason)
+    input = hook.input
+    const current = await ensureLoaded()
+    const active = settings()
+    assertEnabled(active)
+    const winnerId = String(input.winnerId ?? input.leftId ?? '')
+    const loserId = String(input.loserId ?? input.rightId ?? '')
+    if (winnerId === '' || loserId === '' || winnerId === loserId) {
+      throw createError('INVALID_CONFLICT', '需要两个不同的条目 id')
+    }
+    const winner = current.items.find((item) => item.id === winnerId)
+    const loser = current.items.find((item) => item.id === loserId)
+    if (winner === undefined || loser === undefined) throw createError('NOT_FOUND', '冲突条目不存在')
+    if (winner.type !== loser.type) throw createError('INVALID_CONFLICT', '不同类型不能合并')
+    if (!layerInfo(winner.layer).conflictable || !layerInfo(loser.layer).conflictable) {
+      throw createError('INVALID_CONFLICT', '只有可冲突层支持合并')
+    }
+    if (winner.layer !== loser.layer || winner.workspace !== loser.workspace) {
+      throw createError('INVALID_CONFLICT', '只有同层同项目的条目可以解决冲突')
+    }
+    const strategy = input.strategy === 'merge' ? 'merge' : 'keep'
+    const now = new Date().toISOString()
+    const beforeWinner = clone(winner)
+    const beforeLoser = clone(loser)
+    if (strategy === 'merge') {
+      if (winner.type === 'memory') {
+        winner.ttlDays = normalizeTtl(input.ttlDays ?? winner.ttlDays, active, winner.layer)
+        winner.expiresAt = expiresAtFor(winner, active)
+      }
+      winner.title = truncate(String(input.title ?? winner.title), MAX_TITLE) || winner.title
+      winner.content = truncate(String(input.content ?? `${winner.content}\n\n---\n\n${loser.content}`), MAX_CONTENT)
+      winner.tags = normalizeTags([...(winner.tags ?? []), ...(loser.tags ?? []), ...(Array.isArray(input.tags) ? input.tags : [])])
+      winner.version = (winner.version ?? 1) + 1
+      winner.updatedAt = now
+      recordChange('conflict.merge', beforeWinner, winner, actor, { reason: `合并 ${loser.id}` })
+    }
+    winner.status = 'active'
+    winner.conflicts = (winner.conflicts ?? []).filter((id) => id !== loser.id)
+    winner.supersedes = normalizeIdList([...(winner.supersedes ?? []), loser.id])
+    loser.status = 'archived'
+    loser.supersededBy = winner.id
+    loser.validTo = now
+    loser.updatedAt = now
+    loser.version = (loser.version ?? 1) + 1
+    loser.conflicts = (loser.conflicts ?? []).filter((id) => id !== winner.id)
+    recordChange('conflict.resolve', beforeLoser, loser, actor, { reason: `由 ${winner.id} 保留` })
+    reinforce(winner, 'update')
+    reindexAll()
+    audit('conflict.resolve', `${strategy} ${winner.title} ← ${loser.title}`, actor)
+    await persist()
+    const resolved = { strategy, winner: decorate(winner), loser: decorate(loser) }
+    await writeHooks.runAfter({
+      action: 'conflict.resolve',
+      actor,
+      input,
+      before: { winner: beforeWinner, loser: beforeLoser },
+      item: resolved.winner,
+      result: resolved,
+    })
+    return resolved
   }
 
   /**
@@ -1510,6 +1659,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       const right = byId.get(pair.b)
       if (left === undefined || right === undefined) continue
       if (left.type !== right.type) continue
+      if (left.workspace !== right.workspace) continue
       if (layerInfo(left.layer).conflictable && layerInfo(right.layer).conflictable) {
         if (!left.conflicts.includes(right.id)) left.conflicts.push(right.id)
         if (!right.conflicts.includes(left.id)) right.conflicts.push(left.id)
@@ -1614,6 +1764,11 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
   }
 
+  /** 健康分、慢查询、维护历史与最近一次注入命中率。 */
+  function diagnostics() {
+    return diagnosticsSnapshot(currentState(), settings())
+  }
+
   function status() {
     const current = currentState()
     const active = settings()
@@ -1645,6 +1800,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   }
 
   async function importData(payload, mode = 'merge') {
+    const hook = await writeHooks.runBefore({
+      action: 'import',
+      input: { payload, mode },
+      target: null,
+      actor: 'user',
+    })
+    if (hook.allowed === false) throw createError('WRITE_BLOCKED', hook.reason)
+    payload = hook.input.payload
+    mode = hook.input.mode === 'replace' ? 'replace' : 'merge'
+    const originalPayload = payload
     const current = await ensureLoaded()
     const active = settings()
     const incoming = Array.isArray(payload?.items) ? payload.items : []
@@ -1687,7 +1852,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (payload?.settings !== undefined && mode === 'replace') current.settings = normalizeSettings(payload.settings)
     audit('import', `导入 ${imported.length} 条（跳过 ${skipped}${ttlFilled > 0 ? `，补全保鲜期 ${ttlFilled}` : ''}）`, 'user')
     await persist()
-    return { imported: imported.length, skipped, ttlFilled, mode }
+    const summary = { imported: imported.length, skipped, ttlFilled, mode }
+    await writeHooks.runAfter({
+      action: 'import',
+      actor: 'user',
+      input: { payload: originalPayload, mode },
+      before: null,
+      item: null,
+      summary,
+    })
+    return summary
   }
 
   /** 模板不可变层的条目数量（用于 API/UI 展示，不包含共享记忆）。 */
@@ -1704,7 +1878,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
    * promptDigest 只要文本；injectionStats 还要每层 token 明细，两者共用这一份结果，
    * 避免 UI 看到的预算与实际注入的不是同一套算法。
    */
-  function buildDigest(now = Date.now()) {
+  function buildDigest(now = Date.now(), workspace = undefined) {
     const current = currentState()
     const active = settings()
     const template = activeTemplate(active)
@@ -1766,6 +1940,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (item.supersededBy !== null && item.supersededBy !== undefined) return false
       if (isExpiredItem(item, now)) return false
       if (!layerEnabled(active, item.layer)) return false
+      if (workspace !== undefined && item.workspace !== null && item.workspace !== workspace) return false
       if (item.type !== 'memory') return false
       // 模板已经提供不可变层时，以模板为准，避免数据库里的旧同层条目重复注入。
       if (configuredImmutable && layerInfo(item.layer).immutable) return false
@@ -1871,13 +2046,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   }
 
   /** 提示词注入用的摘要文本。 */
-  function promptDigest(now = Date.now()) {
-    return buildDigest(now).text
+  function promptDigest(now = Date.now(), workspace = null) {
+    const built = buildDigest(now, normalizeWorkspace(workspace))
+    noteInjection(currentState(), built.lines.filter((line) => line.source === 'memory').map((line) => line.id))
+    return built.text
   }
 
   /** 注入预算明细（UI 与 API 用）。 */
-  function injectionStats(now = Date.now()) {
-    return buildDigest(now)
+  function injectionStats(now = Date.now(), workspace = undefined) {
+    return buildDigest(now, workspace === undefined ? undefined : normalizeWorkspace(workspace))
   }
 
   /** 内置 + 自定义模板；自定义模板由用户随时新增、编辑、删除、切换。 */
@@ -2139,6 +2316,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     recordPitfall,
     checkPitfalls,
     meta: () => currentState().meta,
+    writeHooks,
+    diagnostics,
     injectionStats,
     usageStats,
     templates,
@@ -2166,6 +2345,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     // 写入
     createItem,
     updateItem,
+    resolveConflict,
     deleteItems,
     bulkAction,
     runMaintenance,
@@ -2226,9 +2406,14 @@ function filterItems(items, options, active) {
   const tag = typeof options.tag === 'string' && options.tag.trim() !== '' ? options.tag.trim().toLowerCase() : undefined
   const query = typeof options.query === 'string' ? options.query.trim().toLowerCase() : ''
   const minImportance = clampInt(options.minImportance, 1, 10, 1)
+  const workspace = typeof options.workspace === 'string' && options.workspace.trim() !== '' && options.workspace !== '*'
+    ? normalizeWorkspace(options.workspace)
+    : undefined
   const now = Date.now()
   return items.filter((item) => {
     if (!layerEnabled(active, item.layer)) return false
+    // 项目空间隔离：全局条目（workspace=null）对所有项目可见，项目条目只在本项目可见。
+    if (workspace !== undefined && item.workspace !== null && item.workspace !== workspace) return false
     if (layer !== undefined && item.layer !== layer) return false
     if (type !== undefined && item.type !== type) return false
     if (notebook !== undefined && item.notebook !== notebook) return false
@@ -2292,7 +2477,8 @@ function scoreItem(item, queryTokens, active, now) {
   const access = clampNumber(Math.log1p(item.accessCount ?? 0) / Math.log(11), 0, 1, 0)
   const pin = item.pinned ? active.retrieval.pinnedBoost : 0
   const weight = STATUS_WEIGHT[item.status] ?? 0.5
-  return (relevance * 0.55 + importance * 0.2 + recency * 0.15 + access * 0.1 + pin) * weight
+  const base = (relevance * 0.55 + importance * 0.2 + recency * 0.15 + access * 0.1) * weight
+  return (base * forgettingFactor(item, active, now)) + pin * weight
 }
 
 function recencyScore(iso, halfLifeDays, now) {
@@ -2301,6 +2487,116 @@ function recencyScore(iso, halfLifeDays, now) {
   const days = Math.max(0, (now - stamp) / 86400000)
   const halfLife = Math.max(1, halfLifeDays)
   return Math.pow(0.5, days / halfLife)
+}
+
+/**
+ * 遗忘曲线：离最后一次访问越久，检索权重越低；地板保证旧记忆不会彻底消失。
+ * 只作用于排序，不改写用户填写的 importance，避免静默篡改数据。
+ */
+function forgettingFactor(item, active, now) {
+  const config = active?.retrieval?.forgetting
+  if (config === null || typeof config !== 'object' || config.enabled === false) return 1
+  const stamp = Date.parse(item?.lastAccessAt ?? item?.updatedAt ?? item?.createdAt ?? '')
+  if (!Number.isFinite(stamp)) return 1
+  const days = Math.max(0, (now - stamp) / 86400000)
+  const halfLife = Math.max(1, Number(config.halfLifeDays) || 90)
+  const floor = clampNumber(config.floor, 0, 1, 0.25)
+  return floor + (1 - floor) * Math.pow(0.5, days / halfLife)
+}
+
+/** 慢查询只留最近 N 条；阈值与上限都走设置，0 表示关闭。 */
+function noteSlowQuery(current, active, entry) {
+  const keep = clampInt(active?.maintenance?.slowQueryKeep, 0, 500, 50)
+  if (keep === 0) return
+  const threshold = clampInt(active?.maintenance?.slowQueryMs, 0, 60000, 200)
+  if (!Number.isFinite(entry.tookMs) || entry.tookMs < threshold) return
+  const list = Array.isArray(current.meta.slowQueries) ? current.meta.slowQueries : []
+  list.push({
+    at: entry.at,
+    query: truncate(String(entry.query ?? ''), 120),
+    tookMs: Math.round(entry.tookMs),
+    results: clampInt(entry.results, 0, Number.MAX_SAFE_INTEGER, 0),
+    path: truncate(String(entry.path ?? ''), 20),
+  })
+  current.meta.slowQueries = list.slice(-keep)
+}
+
+/** 记录一次实际注入的条目集合；同一组不重置已命中记录。 */
+function noteInjection(current, ids) {
+  const unique = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string'))]
+  const previous = current.meta.injection
+  const previousIds = Array.isArray(previous?.ids) ? previous.ids : []
+  const same = previousIds.length === unique.length && unique.every((id, index) => previousIds[index] === id)
+  if (same) {
+    previous.at = new Date().toISOString()
+    return
+  }
+  current.meta.injection = {
+    at: new Date().toISOString(),
+    ids: unique,
+    used: [],
+    hitRate: 0,
+  }
+}
+
+/** 检索命中注入过的条目时，累计“被用到”的条目数。 */
+function noteInjectionHits(current, items) {
+  const snapshot = current.meta.injection
+  if (snapshot === null || typeof snapshot !== 'object' || !Array.isArray(snapshot.ids)) return
+  const injected = new Set(snapshot.ids)
+  const used = new Set(Array.isArray(snapshot.used) ? snapshot.used : [])
+  for (const item of items) {
+    if (injected.has(item.id)) used.add(item.id)
+  }
+  snapshot.used = [...used]
+  snapshot.hitRate = injected.size === 0 ? 0 : round(used.size / injected.size)
+}
+
+/** 健康分：冲突、过期、缺保鲜期、长期未访问与重复项各扣分。 */
+function diagnosticsSnapshot(current, active) {
+  const now = Date.now()
+  const items = current.items
+  const activeItems = items.filter((item) => item.status === 'active' || item.status === 'conflicted')
+  const conflicted = items.filter((item) => item.status === 'conflicted').length
+  const expired = activeItems.filter((item) => isExpiredItem(item, now)).length
+  const missingTtl = activeItems.filter((item) => item.type === 'memory'
+    && layerInfo(item.layer).immutable !== true
+    && (item.expiresAt === null || item.expiresAt === undefined)).length
+  const duplicate = items.filter((item) => typeof item.duplicateOf === 'string').length
+  const stale = activeItems.filter((item) => {
+    if (item.pinned) return false
+    const stamp = Date.parse(item.lastAccessAt ?? item.updatedAt ?? item.createdAt ?? '')
+    return Number.isFinite(stamp) && (now - stamp) / 86400000 > Math.max(1, active.maintenance.archiveAfterDays)
+  }).length
+  const issues = []
+  if (conflicted > 0) issues.push({ id: 'conflicts', count: conflicted, severity: 'high', label: { zh: '待解决冲突', en: 'Unresolved conflicts' } })
+  if (expired > 0) issues.push({ id: 'expired', count: expired, severity: 'medium', label: { zh: '已过期但仍活跃', en: 'Expired but still active' } })
+  if (missingTtl > 0) issues.push({ id: 'ttl', count: missingTtl, severity: 'high', label: { zh: '缺少保鲜期', en: 'Missing freshness period' } })
+  if (stale > 0) issues.push({ id: 'stale', count: stale, severity: 'low', label: { zh: '长期未访问', en: 'Long unused' } })
+  if (duplicate > 0) issues.push({ id: 'duplicates', count: duplicate, severity: 'low', label: { zh: '疑似重复', en: 'Possible duplicates' } })
+  let score = 100 - conflicted * 8 - expired * 4 - missingTtl * 2 - stale * 1 - duplicate * 1
+  score = Math.max(0, Math.min(100, Math.round(score)))
+  const grade = score >= 85 ? 'healthy' : score >= 65 ? 'attention' : 'risk'
+  const injection = current.meta.injection
+  const injected = Array.isArray(injection?.ids) ? injection.ids.length : 0
+  const used = Array.isArray(injection?.used) ? injection.used.length : 0
+  return {
+    at: new Date().toISOString(),
+    health: {
+      score,
+      grade,
+      issues,
+      counts: { total: items.length, active: activeItems.length, conflicted, expired, missingTtl, stale, duplicate },
+    },
+    slowQueries: Array.isArray(current.meta.slowQueries) ? current.meta.slowQueries.slice(-50) : [],
+    maintenanceRuns: Array.isArray(current.meta.maintenanceRuns) ? current.meta.maintenanceRuns.slice(-20) : [],
+    injection: {
+      at: injection?.at ?? null,
+      injected,
+      used,
+      hitRate: injected === 0 ? 0 : round(used / injected),
+    },
+  }
 }
 
 /** 原生核心需要的时间戳是"秒"，条目里存的是 ISO 字符串。 */
@@ -2560,6 +2856,7 @@ function normalizeItem(raw) {
     ttlDays: typeof raw.ttlDays === 'number' && Number.isFinite(raw.ttlDays) ? Math.max(1, Math.round(raw.ttlDays)) : null,
     expiresAt: typeof raw.expiresAt === 'string' && Number.isFinite(Date.parse(raw.expiresAt)) ? raw.expiresAt : null,
     key: safeNormalizeKey(raw.key),
+    workspace: normalizeWorkspace(raw.workspace ?? raw.source?.workspace),
     source: normalizeSource(raw.source),
     supersedes: normalizeIdList(raw.supersedes),
     supersededBy: typeof raw.supersededBy === 'string' ? truncate(raw.supersededBy, 64) : null,
@@ -2607,6 +2904,13 @@ function normalizeLayer(value) {
 
 function normalizeNotebook(value) {
   return NOTEBOOK_IDS.includes(value) ? value : 'memory'
+}
+
+/** 项目空间标识：只做路径规范化，不去读磁盘；空值表示全局记忆。 */
+function normalizeWorkspace(value) {
+  if (typeof value !== 'string') return null
+  const text = value.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  return text === '' ? null : truncate(text.toLowerCase(), 400)
 }
 
 function normalizeTags(value) {

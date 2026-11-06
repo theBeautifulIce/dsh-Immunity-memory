@@ -1013,6 +1013,28 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function resolveConflict(otherId, strategy) {
+        if (selectedId === null) return
+        try {
+          const value = await api('conflicts.resolve', {
+            winnerId: selectedId,
+            loserId: otherId,
+            strategy,
+          })
+          notify(strategy === 'merge'
+            ? txt('已合并并归档另一条', 'Merged and archived the other entry')
+            : txt('已保留本条并归档另一条', 'Kept this entry and archived the other'))
+          await reload()
+          await onChanged()
+          if (value.winner !== undefined) {
+            setSelectedId(value.winner.id)
+            setDraft(toDraft(value.winner))
+          }
+        } catch (error) {
+          notify(error.message, 'error')
+        }
+      }
+
       async function bulk(action, ids) {
         try {
           const value = await api('items.bulk', { ids, action })
@@ -1152,6 +1174,7 @@ window.__ModuleLoader__.load({
               settings,
               onSave: save,
               onDelete: remove,
+              onResolveConflict: resolveConflict,
               onBulk: (action) => bulk(action, creating ? [] : [selectedId]),
               onClose: () => {
                 setDraft(null)
@@ -1164,9 +1187,12 @@ window.__ModuleLoader__.load({
 
     function toDraft(item) {
       return {
+        id: item.id,
+        conflicts: Array.isArray(item.conflicts) ? item.conflicts : [],
         title: item.title ?? '',
         content: item.content ?? '',
         tags: (item.tags ?? []).join(', '),
+        workspace: item.workspace ?? '',
         importance: item.importance ?? 5,
         layer: item.layer ?? 'L5',
         notebook: item.notebook ?? 'memory',
@@ -1183,6 +1209,7 @@ window.__ModuleLoader__.load({
         title: String(draft.title ?? ''),
         content: String(draft.content ?? ''),
         tags: String(draft.tags ?? '').split(/[,，;；\s]+/).map((tag) => tag.trim()).filter((tag) => tag !== ''),
+        workspace: String(draft.workspace ?? '').trim(),
         importance: Number(draft.importance) || 5,
         layer: String(draft.layer ?? 'L5'),
         pinned: draft.pinned === true,
@@ -1194,7 +1221,7 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    function ItemEditor({ lang, draft, setDraft, creating, saving, isNote, settings, onSave, onDelete, onBulk, onClose }) {
+    function ItemEditor({ lang, draft, setDraft, creating, saving, isNote, settings, onSave, onDelete, onResolveConflict, onBulk, onClose }) {
       const txt = (zh, en) => (lang === 'zh' ? zh : en)
       const update = (key, value) => setDraft({ ...draft, [key]: value })
       const immutable = ['L0', 'L1', 'L3'].includes(draft.layer)
@@ -1215,6 +1242,29 @@ window.__ModuleLoader__.load({
             `${draft.layer} 是不可变层，默认只读。需要修改请在设置里打开“允许改写不可变层”。`,
             `${draft.layer} is immutable and read-only. Enable immutable edits in settings to change it.`))
           : null,
+        creating || (draft.conflicts ?? []).length === 0
+          ? null
+          : h('div', { className: 'mp-toast', style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+            h('strong', null, txt(`与 ${draft.conflicts.length} 条记忆存在冲突`, `${draft.conflicts.length} conflicting entr${draft.conflicts.length === 1 ? 'y' : 'ies'}`)),
+            h('span', { className: 'mp-hint' }, txt(
+              '解决冲突是显式动作：保留本条会归档对方；合并会把对方正文追加到本条并归档对方。',
+              'Resolution is explicit: keep archives the other side; merge appends its body and archives it.')),
+            (draft.conflicts ?? []).map((otherId) => h('div', {
+              key: otherId,
+              style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' },
+            },
+              h('span', { className: 'mp-hint' }, otherId),
+              h('div', { className: 'mp-toolbar' },
+                h('button', {
+                  type: 'button',
+                  className: 'mp-btn',
+                  onClick: () => onResolveConflict(otherId, 'keep'),
+                }, txt('保留本条', 'Keep this')),
+                h('button', {
+                  type: 'button',
+                  className: 'mp-btn is-primary',
+                  onClick: () => onResolveConflict(otherId, 'merge'),
+                }, txt('合并正文', 'Merge bodies')))))),
         h('label', { className: 'mp-field' },
           h('span', { className: 'mp-label' }, txt('标题', 'Title')),
           h('input', {
@@ -1240,6 +1290,17 @@ window.__ModuleLoader__.load({
             placeholder: txt('用逗号分隔，例如：构建, 偏好', 'Comma separated, e.g. build, preference'),
             onChange: (event) => update('tags', event.target.value),
           })),
+        h('label', { className: 'mp-field' },
+          h('span', { className: 'mp-label' }, txt('项目空间', 'Project space')),
+          h('input', {
+            className: 'mp-input',
+            value: draft.workspace ?? '',
+            placeholder: txt('留空 = 所有项目可见的全局记忆', 'Empty = global, visible in every project'),
+            onChange: (event) => update('workspace', event.target.value),
+          }),
+          h('span', { className: 'mp-hint' }, txt(
+            '智能体写入时自动取当前工作目录；检索默认只看当前项目与全局记忆。',
+            'Agent writes use the current working directory; searches see the current project plus global memories.'))),
         h('div', { className: 'mp-grid2' },
           h('label', { className: 'mp-field' },
             h('span', { className: 'mp-label' }, txt('分层', 'Layer')),
@@ -2269,6 +2330,7 @@ window.__ModuleLoader__.load({
       const [running, setRunning] = useState(false)
       const [prompt, setPrompt] = useState(null)
       const [audit, setAudit] = useState([])
+      const [diagnostics, setDiagnostics] = useState(boot.diagnostics ?? null)
       const [importText, setImportText] = useState('')
       const [importMode, setImportMode] = useState('merge')
 
@@ -2281,9 +2343,18 @@ window.__ModuleLoader__.load({
         }
       }, [api, notify])
 
+      const loadDiagnostics = useCallback(async () => {
+        try {
+          setDiagnostics(await api('diagnostics', {}))
+        } catch (error) {
+          notify(error.message, 'error')
+        }
+      }, [api, notify])
+
       useEffect(() => {
         loadAudit()
-      }, [loadAudit])
+        loadDiagnostics()
+      }, [loadAudit, loadDiagnostics])
 
       async function run(tasks) {
         setRunning(true)
@@ -2292,6 +2363,7 @@ window.__ModuleLoader__.load({
           setReport(value)
           notify(txt('维护完成', 'Maintenance finished'))
           await loadAudit()
+          await loadDiagnostics()
           await onChanged()
         } catch (error) {
           notify(error.message, 'error')
@@ -2378,7 +2450,30 @@ window.__ModuleLoader__.load({
         { id: ['compact'], label: txt('压缩日志', 'Compact log'), desc: txt('按上限裁剪审计日志', 'Trim the audit log to the configured cap') },
       ]
 
+      const health = diagnostics?.health ?? null
+      const gradeLabel = health?.grade === 'healthy'
+        ? txt('健康', 'Healthy')
+        : health?.grade === 'attention' ? txt('需关注', 'Needs attention') : txt('有风险', 'At risk')
+      const hitRate = diagnostics?.injection?.hitRate ?? 0
       return h('div', { className: 'mp-panel' },
+        health === null ? null : h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('记忆健康分', 'Memory health')),
+          h('div', { className: 'mp-grid2' },
+            h('div', { className: 'mp-kpi' }, h('b', null, String(health.score)), txt('健康分 / 100', 'Score / 100')),
+            h('div', { className: 'mp-kpi' }, h('b', null, gradeLabel), txt('总体状态', 'Overall')),
+            h('div', { className: 'mp-kpi' }, h('b', null, String(health.counts.conflicted)), txt('待解决冲突', 'Unresolved conflicts')),
+            h('div', { className: 'mp-kpi' }, h('b', null, `${Math.round(hitRate * 100)}%`), txt('最近注入命中率', 'Last injection hit rate'))),
+          h('div', { className: 'mp-badges', style: { marginTop: '10px' } },
+            (health.issues ?? []).length === 0
+              ? h('span', { className: 'mp-badge' }, txt('没有发现明显问题', 'No obvious issues'))
+              : (health.issues ?? []).map((issue) => h('span', {
+                key: issue.id,
+                className: 'mp-badge',
+                style: issue.severity === 'high' ? { color: 'var(--dsw-alias-state-error-primary,#dc2626)' } : undefined,
+              }, `${labelOf(issue.label)} ${issue.count}`))),
+          h('div', { className: 'mp-hint', style: { marginTop: '8px' } }, txt(
+            '健康分由冲突、过期、缺保鲜期、长期未访问与重复项计算；注入命中率指最近一次注入的条目在检索中被用到的比例。',
+            'Health combines conflicts, expiry, missing TTL, stale and duplicate entries. Hit rate is the share of the last injected entries later retrieved.'))),
         h('div', { className: 'mp-card' },
           h('div', { className: 'mp-card-title' }, txt('维护任务', 'Maintenance')),
           h('div', { className: 'mp-hint' }, txt(
@@ -2421,6 +2516,38 @@ window.__ModuleLoader__.load({
               readOnly: true,
               value: prompt.text === '' ? txt('（当前没有注入内容：插件关闭、注入关闭或没有可用记忆）', '(Nothing is injected: disabled, injection off, or no usable memories)') : prompt.text,
             }))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('可观测性', 'Observability')),
+          h('div', { className: 'mp-grid2' },
+            h('div', { className: 'mp-kpi' }, h('b', null, String(diagnostics?.injection?.injected ?? 0)), txt('最近注入条目', 'Last injected')),
+            h('div', { className: 'mp-kpi' }, h('b', null, String(diagnostics?.injection?.used ?? 0)), txt('之后被检索', 'Later retrieved')),
+            h('div', { className: 'mp-kpi' }, h('b', null, `${Math.round((diagnostics?.injection?.hitRate ?? 0) * 100)}%`), txt('命中率', 'Hit rate'))),
+          h('div', { className: 'mp-toolbar' },
+            h('button', { type: 'button', className: 'mp-btn', onClick: loadDiagnostics }, txt('刷新诊断', 'Refresh diagnostics'))),
+          h('div', { className: 'mp-label', style: { marginTop: '10px' } }, txt('最近维护', 'Recent maintenance')),
+          (diagnostics?.maintenanceRuns ?? []).length === 0
+            ? h('div', { className: 'mp-hint' }, txt('还没有维护历史。', 'No maintenance history yet.'))
+            : (diagnostics.maintenanceRuns ?? []).slice(-5).reverse().map((entry) => h('div', { key: entry.ranAt, className: 'mp-hint' },
+              `${formatTime(entry.ranAt)} · ${(entry.tasks ?? []).length} ${txt('项任务', 'tasks')} · ${txt('共', 'total')} ${entry.totals?.total ?? 0}`)),
+          h('div', { className: 'mp-label', style: { marginTop: '10px' } }, txt('慢查询', 'Slow queries')),
+          (diagnostics?.slowQueries ?? []).length === 0
+            ? h('div', { className: 'mp-hint' }, txt('没有超过阈值的检索。', 'No searches above the threshold.'))
+            : (diagnostics.slowQueries ?? []).slice(-5).reverse().map((entry, index) => h('div', { key: `${entry.at}-${index}`, className: 'mp-hint' },
+              `${formatTime(entry.at)} · ${entry.tookMs}ms · ${entry.results} ${txt('条', 'results')} · ${entry.path} · ${entry.query || '∅'}`))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('写入生命周期 Hook', 'Write lifecycle hooks')),
+          h('div', { className: 'mp-hint' }, txt(
+            '每次 createItem / updateItem 都会依次经过 before 与 after Hook；before 可以改写输入或拒绝写入，Hook 抛错时失败放行。',
+            'Every createItem / updateItem passes through before and after hooks; before can rewrite or block a write, and hook errors fail open.')),
+          h('div', { className: 'mp-grid2' },
+            h('div', { className: 'mp-kpi' }, h('b', null, String((boot.writeHooks?.before ?? []).length)), txt('before Hook', 'before hooks')),
+            h('div', { className: 'mp-kpi' }, h('b', null, String((boot.writeHooks?.after ?? []).length)), txt('after Hook', 'after hooks'))),
+          (boot.writeHooks?.before ?? []).length === 0 && (boot.writeHooks?.after ?? []).length === 0
+            ? h('div', { className: 'mp-hint' }, txt('当前没有注册额外 Hook；审计 Hook 仍在工具层独立运行。', 'No extra hooks are registered; the audit hook still runs separately at the tool layer.'))
+            : h('div', { className: 'mp-badges', style: { marginTop: '10px' } },
+              [...(boot.writeHooks?.before ?? []).map((entry) => `before:${entry.name}`),
+                ...(boot.writeHooks?.after ?? []).map((entry) => `after:${entry.name}`)]
+                .map((label) => h('span', { key: label, className: 'mp-badge' }, label)))),
         h('div', { className: 'mp-card' },
           h('div', { className: 'mp-card-title' }, txt('存储', 'Storage')),
           h('div', { className: 'mp-code' }, storage.path ?? ''),
