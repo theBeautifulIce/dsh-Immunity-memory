@@ -1464,12 +1464,9 @@ window.__ModuleLoader__.load({
       }
 
       async function decide(run, decision) {
-        let note = ''
-        if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-          note = window.prompt(txt(
-            `审计意见（${decision === 'approve' ? '批准写入' : '拒绝并归档'}，可留空）：`,
-            `Audit note (${decision === 'approve' ? 'approve write' : 'reject and archive'}, optional):`), '') ?? ''
-        }
+        // DSH 桌面端不保证实现 window.prompt；调用它可能直接抛错或挂起，
+        // 导致按钮既不进入 busy 也不发请求。审计意见是可选字段，这里直接提交空备注。
+        const note = ''
         setBusy(run.id)
         try {
           await api('audit.decide', { id: run.id, decision, note })

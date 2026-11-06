@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-06
+
+### Fixed
+
+- Approving or rejecting an audit candidate no longer depends on
+  `window.prompt`. Some DSH desktop/webview builds do not support it, so the
+  button could fail before entering the busy state or sending `audit.decide`.
+  Audit notes are optional and an empty note is now submitted directly.
+
 ## [0.4.1] - 2026-11-06
 
 UI and documentation polish for automatic memory capture.
