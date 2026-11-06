@@ -40,6 +40,8 @@ export const API_METHODS = [
   'items.bulk',
   'conflicts.resolve',
   'hooks.list',
+  'capture.stats',
+  'capture.tick',
   'settings.get',
   'settings.save',
   'settings.reset',
@@ -114,6 +116,7 @@ function createMethods(engineOf, context = {}) {
         },
         injection: engine().injectionStats(),
         diagnostics: engine().diagnostics(),
+        capture: engine().captureStats(),
         writeHooks: { service: 'memoryWriteHooks', ...engine().writeHooks.list() },
         usage: engine().usageStats({}),
         templates: engine().templates(),
@@ -130,6 +133,12 @@ function createMethods(engineOf, context = {}) {
     },
     'hooks.list'() {
       return engine().writeHooks.list()
+    },
+    'capture.stats'() {
+      return engine().captureStats()
+    },
+    async 'capture.tick'() {
+      return engine().tickCapture()
     },
     'items.list'(params) {
       return engine().listItems(params ?? {})

@@ -6,6 +6,47 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-06
+
+Automatic-memory capture release: signal detection, hourly/daily review queues,
+and a dedicated capture tool, while the agent remains responsible for every fact,
+layer, and TTL decision.
+
+### Added
+
+- `memory_capture` tool and capture service: the agent submits `facts` (each with
+  an explicit mutable layer and `ttlDays`) and `notes` (notebook entries). Reports
+  created/skipped/errors and can clear a handled reminder with `pendingId`.
+- Immediate capture signals from `session/event`: user corrections, remember
+  requests, clear satisfaction/dissatisfaction, and assistant self-correction.
+  Signals are queued, never written directly; the system prompt shows pending
+  signals and the capture rules.
+- Small/large review timers: every X hours review the previous X hours, and a
+  daily review at a configurable `HH:MM` with a configurable lookback. Queued
+  reviews are handled by the agent like any other capture.
+- `autoCapture` settings group and schema: enable/disable, immediate signals,
+  hourly/daily cadence, review windows, max facts/notes, notebook dedupe threshold,
+  and queue size.
+- Code-level notebook deduplication: NFKC normalization plus exact/Jaccard matching
+  within the same notebook; memory-layer writes still use engine semantic dedupe.
+- Seeded/queued capture state is persisted under `meta.capture`, with pending
+  signals, recent runs, and last review timestamps shown in diagnostics and the
+  maintenance panel. `capture.stats` / `capture.tick` API methods are available.
+- `memoryWriteHooks` service remains the low-level write-lifecycle extension point;
+  automatic capture is intentionally separate and model-driven.
+
+### Tests
+
+- Engine 61, tools 15, API 24, render 21; full self-check 35 syntax modules plus
+  audit 12, search 10, SQLite 13, native 6, Go service 12, engine×Go 8.
+
+### Notes
+
+- The plugin does not extract facts or guess layers/TTLs. If the model does not
+  call `memory_capture`, nothing is written; this is deliberate.
+- Triggers are heuristic and only produce reminders; token cost depends on how
+  often the agent acts on them and should be measured in real use before tuning.
+
 ## [0.3.1] - 2026-11-06
 
 Patch release exposing the write-lifecycle hook registry to other Cordis plugins.

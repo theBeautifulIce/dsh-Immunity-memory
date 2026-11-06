@@ -5,6 +5,7 @@
  * 和"模型读到的"永远是同一份数据。
  */
 import { TOOL_NAMES } from './engine.js'
+import { CAPTURE_TRIGGERS, captureLabel } from './capture.js'
 import { LAYERS, NOTEBOOKS, NOTEBOOK_IDS } from './settings.js'
 import { message } from './store.js'
 
@@ -277,6 +278,25 @@ const diffOutput = {
         return `${index + 1}. ${change.at} [${change.operation}] ${change.entity === 'note' ? '笔记' : '记忆'} ${change.title}`
           + `${where !== '' ? `（${where}）` : ''}\n   ${change.summary ?? ''}\n   id: ${change.itemId}  操作者: ${change.actor}`
       }).join('\n'))
+  },
+}
+
+const captureOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      saved: { type: 'boolean' },
+      trigger: { type: 'string' },
+      created: { type: 'number' },
+      skipped: { type: 'number' },
+      errors: { type: 'number' },
+      pending: { type: 'number' },
+    },
+    required: ['saved', 'trigger', 'created', 'skipped', 'errors', 'pending'],
+  },
+  render(args, value) {
+    const trigger = captureLabel(value?.trigger, 'zh')
+    return text(`自动记忆（${trigger}）：新建 ${value?.created ?? 0} 条，跳过 ${value?.skipped ?? 0} 条，失败 ${value?.errors ?? 0} 条；待处理信号 ${value?.pending ?? 0} 条。`)
   },
 }
 
@@ -563,6 +583,73 @@ export function registerTools(ctx, engine, log) {
     output: diffOutput,
     async execute(args) {
       return engine.diff(args ?? {})
+    },
+  })
+
+  register({
+    name: 'memory_capture',
+    description: 'Capture facts and notebook entries detected by the automatic-memory triggers. Call it when the user corrects you, asks you to remember, shows clear satisfaction or dissatisfaction, or when you notice your own mistake; hourly/daily review prompts use it too. You must choose each fact layer and TTL yourself. Notebook entries are deduplicated by code within the same notebook. Pass outcome "nothing" after reviewing a signal if nothing is worth keeping.',
+    parameters: {
+      type: 'object',
+      properties: {
+        trigger: { type: 'string', enum: CAPTURE_TRIGGERS, description: 'What triggered this capture.' },
+        pendingId: { type: 'string', description: 'Pending signal id shown in the prompt; it is cleared after a successful capture.' },
+        outcome: { type: 'string', enum: ['captured', 'nothing'], description: 'Use "nothing" after reviewing a signal when nothing should be saved.' },
+        summary: { type: 'string', description: 'Short reason or review conclusion, stored in the capture run.' },
+        facts: {
+          type: 'array',
+          description: 'Durable facts. layer and ttlDays are required for mutable memory layers; choose them from the content, not a fixed default.',
+          items: {
+            type: 'object',
+            properties: {
+              layer: { type: 'string', enum: WRITABLE_LAYER_ENUM },
+              title: { type: 'string' },
+              content: { type: 'string' },
+              ttlDays: { type: 'number' },
+              importance: { type: 'number' },
+              tags: { type: 'array', items: { type: 'string' } },
+              key: { type: 'string' },
+              workspace: { type: 'string' },
+              reason: { type: 'string', description: 'Why this fact/layer/TTL was chosen; kept as the source quote.' },
+            },
+            required: ['layer', 'content'],
+          },
+        },
+        notes: {
+          type: 'array',
+          description: 'Notebook entries; code deduplicates same-notebook content before writing.',
+          items: {
+            type: 'object',
+            properties: {
+              notebook: { type: 'string', enum: NOTEBOOK_IDS },
+              title: { type: 'string' },
+              content: { type: 'string' },
+              tags: { type: 'array', items: { type: 'string' } },
+              importance: { type: 'number' },
+              reason: { type: 'string' },
+            },
+            required: ['notebook', 'content'],
+          },
+        },
+      },
+      required: ['trigger'],
+    },
+    output: captureOutput,
+    async execute(args, exec) {
+      const workspace = workspaceOf(exec)
+      const result = await engine.capture({
+        ...(args ?? {}),
+        sessionId: sessionIdOf(exec),
+        workspace,
+      }, 'agent')
+      return {
+        saved: result.created.length > 0 || result.skipped.length > 0,
+        trigger: result.run.trigger,
+        created: result.created.length,
+        skipped: result.skipped.length,
+        errors: result.errors.length,
+        pending: result.pending,
+      }
     },
   })
 

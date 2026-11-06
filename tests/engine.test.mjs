@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { createStore } from '../packages/memory-plugin/lib/store.js'
 import { createEngine } from '../packages/memory-plugin/lib/engine.js'
 import { DEFAULT_SETTINGS, applySettingsPatch, normalizeSettings } from '../packages/memory-plugin/lib/settings.js'
+import { messageText } from '../packages/memory-plugin/lib/capture.js'
 
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-memory-test-'))
 const ctx = { get: () => (name) => join(sandbox, name) }
@@ -969,6 +970,83 @@ await test('更新 Hook 能拿到修改前后内容', async () => {
   assert.equal(seen.length, 1)
   assert.equal(seen[0].before.title, `更新 Hook 原条目 ${suffix}`)
   assert.equal(seen[0].item.title, `更新 Hook 新标题 ${suffix}`)
+})
+
+await test('session/event 消息形状能提取文本', () => {
+  assert.equal(messageText({ type: 'user/message', data: { role: 'user', content: '你把上次的配置说错了' } }), '你把上次的配置说错了')
+  assert.equal(messageText({
+    type: 'assistant/message',
+    data: { message: { role: 'assistant', content: [{ type: 'text', text: '抱歉，我刚才说错了' }] }, usage: {} },
+  }), '抱歉，我刚才说错了')
+})
+
+await test('自动记忆信号入队，捕获事实与笔记并按记事本去重', async () => {
+  const suffix = Date.now().toString(36)
+  const signal = await engine.noteCaptureSignal({
+    trigger: 'user_correction',
+    reason: '用户指出错误',
+    excerpt: `你刚才说错了 ${suffix}`,
+    text: `你刚才说错了 ${suffix}，正确做法是先读文件`,
+    sessionId: 'sess-capture',
+    turn: 7,
+  })
+  assert.equal(signal.queued, true)
+  assert.match(engine.capturePrompt(), /待处理信号/)
+  const first = await engine.capture({
+    trigger: 'user_correction',
+    pendingId: signal.entry.id,
+    summary: `修正回答 ${suffix}`,
+    facts: [{
+      layer: 'L4',
+      title: `自动捕获事实 ${suffix}`,
+      content: `回答问题前先读取相关文件，避免凭空推断 ${suffix}`,
+      ttlDays: 30,
+      importance: 5,
+      reason: `用户纠正 ${suffix}`,
+    }],
+    notes: [{
+      notebook: 'daily',
+      title: `自动捕获笔记 ${suffix}`,
+      content: `自动记忆测试笔记，内容需要足够长 ${suffix}`,
+    }],
+  }, 'agent')
+  assert.equal(first.created.length, 2)
+  assert.equal(first.pending, 0)
+  const second = await engine.capture({
+    trigger: 'manual',
+    notes: [{
+      notebook: 'daily',
+      title: `重复笔记 ${suffix}`,
+      content: `自动记忆测试笔记，内容需要足够长 ${suffix}`,
+    }],
+  }, 'agent')
+  assert.equal(second.created.length, 0)
+  assert.equal(second.skipped.length, 1)
+  assert.equal(second.skipped[0].reason, 'exact-duplicate')
+  assert.ok(engine.captureStats().runs >= 2)
+})
+
+await test('重载后待处理即时信号仍能安全渲染', async () => {
+  await engine.noteCaptureSignal({
+    trigger: 'user_correction',
+    text: '重载后仍要提醒我这条信号',
+    sessionId: 'reload-session',
+    turn: 9,
+  })
+  await engine.reload()
+  const prompt = engine.capturePrompt()
+  assert.match(prompt, /待处理信号/)
+  assert.match(prompt, /重载后仍要提醒我这条信号/)
+  const pending = engine.meta().capture.pending.at(-1)
+  await engine.capture({ trigger: 'user_correction', outcome: 'nothing', pendingId: pending.id }, 'user')
+})
+
+await test('自动记忆定时器首次只记起点，之后入队小时回顾', async () => {
+  const now = Date.now()
+  await engine.tickCapture(now)
+  const later = await engine.tickCapture(now + 5 * 3600000)
+  assert.ok(later.queued.some((entry) => entry.trigger === 'small_review'))
+  assert.match(engine.capturePrompt(), /小时回顾/)
 })
 
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

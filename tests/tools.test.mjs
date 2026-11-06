@@ -156,9 +156,9 @@ async function test(title, run) {
 
 const dispose = registerTools(fakeCtx, engine, log)
 
-await test('注册了全部 10 个工具', () => {
+await test('注册了全部 11 个工具', () => {
   assert.deepEqual([...registered.keys()].sort(), [
-    'memory_consolidate', 'memory_diff', 'memory_forget', 'memory_get', 'memory_pitfall',
+    'memory_capture', 'memory_consolidate', 'memory_diff', 'memory_forget', 'memory_get', 'memory_pitfall',
     'memory_search', 'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
   ])
 })
@@ -273,6 +273,33 @@ await test('memory_consolidate 列出候选并拒绝空操作', async () => {
     () => def.execute({ action: 'approve' }, {}),
     (error) => /id/.test(error.message),
   )
+})
+
+await test('memory_capture 写入事实与笔记并返回计数', async () => {
+  const def = registered.get('memory_capture')
+  const suffix = Date.now().toString(36)
+  const value = await def.execute({
+    trigger: 'user_remember',
+    summary: `工具捕获 ${suffix}`,
+    facts: [{
+      layer: 'L4',
+      title: `工具捕获事实 ${suffix}`,
+      content: `这是通过 memory_capture 写入的事实 ${suffix}`,
+      ttlDays: 30,
+      importance: 5,
+      reason: `用户要求记住 ${suffix}`,
+    }],
+    notes: [{
+      notebook: 'daily',
+      title: `工具捕获笔记 ${suffix}`,
+      content: `这是通过 memory_capture 写入的笔记 ${suffix}`,
+    }],
+  }, { turn: 9, cwd: 'D:/tools-project', agent: { session: { id: 'sess-tools-capture' } } })
+  assert.equal(value.created, 2)
+  assert.equal(value.errors, 0)
+  assert.equal(value.pending, 0)
+  const blocks = def.output.render({}, value)
+  assert.match(blocks[0].text, /新建 2 条/)
 })
 
 await test('memory_forget 删除后检索不到', async () => {

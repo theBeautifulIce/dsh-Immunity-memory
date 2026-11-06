@@ -2549,6 +2549,17 @@ window.__ModuleLoader__.load({
                 ...(boot.writeHooks?.after ?? []).map((entry) => `after:${entry.name}`)]
                 .map((label) => h('span', { key: label, className: 'mp-badge' }, label)))),
         h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('自动记忆', 'Automatic capture')),
+          h('div', { className: 'mp-grid2' },
+            h('div', { className: 'mp-kpi' }, h('b', null, String(diagnostics?.capture?.pending ?? boot.capture?.pending ?? 0)), txt('待处理信号', 'Pending signals')),
+            h('div', { className: 'mp-kpi' }, h('b', null, String(diagnostics?.capture?.runs ?? boot.capture?.runs ?? 0)), txt('捕获运行', 'Capture runs'))),
+          h('div', { className: 'mp-hint' }, txt(
+            '即时信号只入队提醒；写什么、写到哪一层、TTL 多长由智能体调用 memory_capture 决定，记事本条目由代码去重。',
+            'Signals only queue a reminder; the agent decides what to write, which layer and TTL. Notebook entries are deduplicated by code.')),
+          h('div', { className: 'mp-hint', style: { marginTop: '8px' } },
+            `${txt('上次小时回顾', 'Last hourly review')} ${formatTime(diagnostics?.capture?.lastSmallReviewAt ?? boot.capture?.lastSmallReviewAt ?? null)} · `
+            + `${txt('上次每日回顾', 'Last daily review')} ${formatTime(diagnostics?.capture?.lastLargeReviewAt ?? boot.capture?.lastLargeReviewAt ?? null)}`)),
+        h('div', { className: 'mp-card' },
           h('div', { className: 'mp-card-title' }, txt('存储', 'Storage')),
           h('div', { className: 'mp-code' }, storage.path ?? ''),
           h('div', { className: 'mp-hint' },

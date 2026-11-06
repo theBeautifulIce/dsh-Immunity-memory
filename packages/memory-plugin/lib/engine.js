@@ -38,6 +38,13 @@ import { emptyState, message, STORE_VERSION } from './store.js'
 import { createSearchEngine } from './search.js'
 import { fallbackCosineBatch, fallbackDedupe, fallbackImportance } from './fallback-math.js'
 import { estimateTokens, jaccard, tokenize } from './text.js'
+import {
+  CAPTURE_TRIGGERS,
+  captureLabel,
+  clipText,
+  findNoteDuplicate,
+  isDailyDue,
+} from './capture.js'
 
 export { jaccard, tokenize }
 
@@ -114,6 +121,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       meta: { ...base.meta, ...(raw.meta !== null && typeof raw.meta === 'object' ? raw.meta : {}) },
     }
     next.meta.audit = normalizeAuditStore(next.meta.audit)
+    next.meta.capture = normalizeCaptureStore(next.meta.capture)
     const items = Array.isArray(raw.items) ? raw.items : []
     const seen = new Set()
     for (const candidate of items) {
@@ -2057,6 +2065,304 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     return buildDigest(now, workspace === undefined ? undefined : normalizeWorkspace(workspace))
   }
 
+  // ------------------------------------------------------------ 自动记忆 ----
+
+  function captureState(current) {
+    if (current.meta.capture === null || typeof current.meta.capture !== 'object') {
+      current.meta.capture = normalizeCaptureStore(null)
+    }
+    return current.meta.capture
+  }
+
+  /**
+   * 记录一条即时信号。这里只入队，不写记忆；真正提取事实由智能体在
+   * memory_capture 里决定，避免插件替模型猜测该记什么。
+   */
+  async function noteCaptureSignal(signal = {}) {
+    const current = await ensureLoaded()
+    const active = settings()
+    if (active.autoCapture.enabled !== true || active.autoCapture.immediate !== true) {
+      return { queued: false, reason: 'disabled' }
+    }
+    const trigger = CAPTURE_TRIGGERS.includes(signal.trigger) ? signal.trigger : 'manual'
+    if (trigger === 'small_review' || trigger === 'large_review') {
+      throw createError('INVALID_CAPTURE_TRIGGER', '即时信号不能使用回顾触发器')
+    }
+    const capture = captureState(current)
+    const sessionId = typeof signal.sessionId === 'string' ? truncate(signal.sessionId, 120) : null
+    const turn = Number.isFinite(Number(signal.turn)) ? Number(signal.turn) : null
+    const text = clipText(String(signal.text ?? ''), 2000)
+    const duplicate = capture.pending.find((entry) => entry.trigger === trigger
+      && entry.sessionId === sessionId && entry.turn === turn
+      && (turn !== null || entry.text === text))
+    if (duplicate !== undefined) return { queued: false, duplicate: true, entry: duplicate }
+    const entry = {
+      id: `cap_${randomUUID().slice(0, 8)}`,
+      trigger,
+      reason: clipText(String(signal.reason ?? captureLabel(trigger)), 200),
+      at: new Date().toISOString(),
+      sessionId,
+      turn,
+      text,
+    }
+    capture.pending.push(entry)
+    capture.pending = capture.pending.slice(-clampInt(active.autoCapture.queueKeep, 1, 100, 20))
+    capture.lastSignalAt = entry.at
+    await persist()
+    return { queued: true, entry }
+  }
+
+  /**
+   * 小/大定时只负责排队。第一次 tick 只记起点，不立即回顾，避免刚安装就
+   * 触发一次昂贵回顾；之后按设置间隔/每日时刻入队。
+   */
+  async function tickCapture(now = Date.now()) {
+    const current = await ensureLoaded()
+    const active = settings()
+    const cfg = active.autoCapture
+    if (cfg.enabled !== true) return { queued: [] }
+    const capture = captureState(current)
+    const queued = []
+    const isoNow = new Date(now).toISOString()
+    if (cfg.smallEnabled === true) {
+      if (capture.lastSmallQueuedAt === null || capture.lastSmallQueuedAt === undefined) {
+        capture.lastSmallQueuedAt = isoNow
+      } else if (!capture.pending.some((entry) => entry.trigger === 'small_review')) {
+        const gap = now - Date.parse(capture.lastSmallQueuedAt)
+        if (Number.isFinite(gap) && gap >= clampInt(cfg.smallIntervalHours, 1, 168, 4) * 3600000) {
+          const since = capture.lastSmallReviewAt ?? new Date(now - clampInt(cfg.smallWindowHours, 1, 168, 4) * 3600000).toISOString()
+          const entry = {
+            id: `cap_${randomUUID().slice(0, 8)}`,
+            trigger: 'small_review',
+            reason: '小时回顾',
+            at: isoNow,
+            sessionId: null,
+            turn: null,
+            text: '',
+            since,
+            until: isoNow,
+          }
+          capture.pending.push(entry)
+          capture.lastSmallQueuedAt = isoNow
+          queued.push(entry)
+        }
+      }
+    }
+    if (cfg.largeEnabled === true) {
+      if (capture.lastLargeQueuedAt === null || capture.lastLargeQueuedAt === undefined) {
+        capture.lastLargeQueuedAt = isoNow
+      } else if (!capture.pending.some((entry) => entry.trigger === 'large_review')
+        && isDailyDue(now, cfg.largeAt, capture.lastLargeQueuedAt)) {
+        const since = capture.lastLargeReviewAt
+          ?? new Date(now - clampInt(cfg.largeLookbackDays, 1, 365, 7) * 86400000).toISOString()
+        const entry = {
+          id: `cap_${randomUUID().slice(0, 8)}`,
+          trigger: 'large_review',
+          reason: '每日回顾',
+          at: isoNow,
+          sessionId: null,
+          turn: null,
+          text: '',
+          since,
+          until: isoNow,
+        }
+        capture.pending.push(entry)
+        capture.lastLargeQueuedAt = isoNow
+        queued.push(entry)
+      }
+    }
+    if (queued.length > 0) {
+      capture.pending = capture.pending.slice(-clampInt(cfg.queueKeep, 1, 100, 20))
+      await persist()
+    }
+    return { queued }
+  }
+
+  /** 提示词里的自动记忆提醒：常驻一行规则，有队列时展开。 */
+  function capturePrompt(now = Date.now()) {
+    const current = currentState()
+    const active = settings()
+    if (active.autoCapture.enabled !== true) return ''
+    const capture = captureState(current)
+    const lines = [
+      '【自动记忆】当用户纠正你、要求你记住、表达明显满意/不满，或你自己发现答错时，调用 memory_capture。'
+      + '事实写到哪一层、TTL 多长由你按内容判断；若这次判断形成了可复用的规则，把它作为 L4 学习层记忆写入。'
+      + '笔记由代码按记事本去重。',
+    ]
+    const pending = capture.pending.slice(-5)
+    if (pending.length > 0) {
+      lines.push('待处理信号：')
+      for (const entry of pending) {
+        const scope = typeof entry.since === 'string' && typeof entry.until === 'string'
+          ? `（${entry.since.slice(0, 10)} 至 ${entry.until.slice(0, 10)}）`
+          : ''
+        const excerpt = entry.text === '' ? entry.reason : clipText(entry.text.replace(/\s+/g, ' '), 140)
+        lines.push(`- [${entry.id}] ${captureLabel(entry.trigger, 'zh')}${scope}：${excerpt}`)
+      }
+      lines.push('回顾后用 memory_capture 提交事实/笔记，并传 pendingId 清除对应信号；没有可记的就传 outcome:"nothing"。')
+    }
+    const dueSmall = active.autoCapture.smallEnabled === true && capture.pending.some((entry) => entry.trigger === 'small_review')
+    const dueLarge = active.autoCapture.largeEnabled === true && capture.pending.some((entry) => entry.trigger === 'large_review')
+    if (dueSmall) lines.push('小时回顾：先用 memory_diff/memory_search 看窗口内的变化，再决定写入什么。')
+    if (dueLarge) lines.push('每日回顾：总结近期表现与反复出现的问题；值得长期保留的再写入 L4/L5。')
+    return lines.join('\n')
+  }
+
+  /**
+   * 智能体显式提交捕获结果。事实必须自带 layer 与 TTL（可修改层），
+   * 笔记只做代码去重；插件不会在这里替模型补内容或猜触发原因。
+   */
+  async function capture(input = {}, actor = 'agent') {
+    const current = await ensureLoaded()
+    const active = settings()
+    if (active.autoCapture.enabled !== true) {
+      throw createError('CAPTURE_DISABLED', '自动记忆已在设置中关闭')
+    }
+    const trigger = CAPTURE_TRIGGERS.includes(input.trigger) ? input.trigger : 'manual'
+    const maxFacts = clampInt(active.autoCapture.maxFacts, 1, 20, 6)
+    const maxNotes = clampInt(active.autoCapture.maxNotes, 1, 20, 6)
+    const facts = Array.isArray(input.facts) ? input.facts.slice(0, maxFacts) : []
+    const notes = Array.isArray(input.notes) ? input.notes.slice(0, maxNotes) : []
+    const capture = captureState(current)
+    const now = new Date().toISOString()
+    const sessionId = typeof input.sessionId === 'string' ? truncate(input.sessionId, 120) : null
+    const turn = Number.isFinite(Number(input.turn)) ? Number(input.turn) : null
+    const created = []
+    const updated = []
+    const skipped = []
+    const errors = []
+    const threshold = clampNumber(active.autoCapture.noteDedupe, 0.5, 1, 0.92)
+    const workspace = normalizeWorkspace(input.workspace)
+
+    for (const fact of facts) {
+      if (fact === null || typeof fact !== 'object') {
+        errors.push({ kind: 'fact', reason: '条目不是对象' })
+        continue
+      }
+      try {
+        const item = await createItem({
+          type: 'memory',
+          layer: fact.layer,
+          title: fact.title,
+          content: fact.content,
+          ttlDays: fact.ttlDays,
+          tags: fact.tags,
+          importance: fact.importance,
+          key: fact.key,
+          workspace: fact.workspace ?? workspace,
+          quote: fact.reason ?? fact.quote,
+          sessionId,
+          turn,
+        }, actor)
+        created.push({ kind: 'fact', id: item.id, layer: item.layer, title: item.title })
+      } catch (error) {
+        errors.push({ kind: 'fact', title: clipText(fact.title ?? '', 80), error: message(error), code: error?.code ?? null })
+      }
+    }
+
+    for (const note of notes) {
+      if (note === null || typeof note !== 'object') {
+        errors.push({ kind: 'note', reason: '条目不是对象' })
+        continue
+      }
+      const content = String(note.content ?? '')
+      if (content.trim() === '') {
+        errors.push({ kind: 'note', title: clipText(note.title ?? '', 80), reason: '正文为空' })
+        continue
+      }
+      const duplicate = findNoteDuplicate(current.items, {
+        notebook: note.notebook,
+        content,
+      }, threshold)
+      if (duplicate !== undefined) {
+        duplicate.item.updatedAt = now
+        duplicate.item.lastAccessAt = now
+        duplicate.item.accessCount = (duplicate.item.accessCount ?? 0) + 1
+        indexItem(duplicate.item)
+        skipped.push({ kind: 'note', reason: duplicate.exact ? 'exact-duplicate' : 'similar-duplicate', id: duplicate.item.id, score: round(duplicate.score) })
+        continue
+      }
+      try {
+        const item = await createItem({
+          type: 'note',
+          layer: 'L4',
+          notebook: note.notebook,
+          title: note.title,
+          content,
+          tags: note.tags,
+          importance: note.importance,
+          workspace: note.workspace ?? workspace,
+          quote: note.reason ?? note.quote,
+          sessionId,
+          turn,
+        }, actor)
+        created.push({ kind: 'note', id: item.id, layer: item.layer, title: item.title, notebook: item.notebook })
+      } catch (error) {
+        errors.push({ kind: 'note', title: clipText(note.title ?? '', 80), error: message(error), code: error?.code ?? null })
+      }
+    }
+
+    if (skipped.length > 0) {
+      // 去重命中也要落盘，否则 accessCount/updatedAt 只改了内存。
+      await persist()
+    }
+
+    const run = {
+      id: `cap_${randomUUID().slice(0, 8)}`,
+      trigger,
+      at: now,
+      actor,
+      sessionId,
+      turn,
+      summary: clipText(String(input.summary ?? ''), 2000),
+      created,
+      updated,
+      skipped,
+      errors,
+    }
+    capture.runs.push(run)
+    capture.runs = capture.runs.slice(-50)
+    if (trigger === 'small_review') capture.lastSmallReviewAt = now
+    if (trigger === 'large_review') capture.lastLargeReviewAt = now
+    capture.pending = capture.pending.filter((entry) => {
+      if (typeof input.pendingId === 'string' && input.pendingId !== '') return entry.id !== input.pendingId
+      if (entry.trigger !== trigger) return true
+      return false
+    })
+    audit('capture', `自动记忆 ${captureLabel(trigger, 'zh')}：新建 ${created.length}，跳过 ${skipped.length}，失败 ${errors.length}`, actor)
+    await persist()
+    return {
+      run: { ...run, pending: capture.pending.length },
+      created,
+      updated,
+      skipped,
+      errors,
+      pending: capture.pending.length,
+    }
+  }
+
+  function captureStats() {
+    const current = currentState()
+    const capture = captureState(current)
+    return {
+      enabled: settings().autoCapture.enabled === true,
+      pending: capture.pending.length,
+      runs: capture.runs.length,
+      lastSignalAt: capture.lastSignalAt ?? null,
+      lastSmallReviewAt: capture.lastSmallReviewAt ?? null,
+      lastLargeReviewAt: capture.lastLargeReviewAt ?? null,
+      recent: capture.runs.slice(-5).reverse().map((run) => ({
+        id: run.id,
+        trigger: run.trigger,
+        at: run.at,
+        created: run.created.length,
+        skipped: run.skipped.length,
+        errors: run.errors.length,
+        summary: run.summary,
+      })),
+    }
+  }
+
   /** 内置 + 自定义模板；自定义模板由用户随时新增、编辑、删除、切换。 */
   function templates() {
     const active = settings()
@@ -2319,6 +2625,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     writeHooks,
     diagnostics,
     injectionStats,
+    // 自动记忆：只检测/排队，写入由 memory_capture 显式提交
+    noteCaptureSignal,
+    tickCapture,
+    capturePrompt,
+    capture,
+    captureStats,
     usageStats,
     templates,
     saveTemplate,
@@ -2590,6 +2902,12 @@ function diagnosticsSnapshot(current, active) {
     },
     slowQueries: Array.isArray(current.meta.slowQueries) ? current.meta.slowQueries.slice(-50) : [],
     maintenanceRuns: Array.isArray(current.meta.maintenanceRuns) ? current.meta.maintenanceRuns.slice(-20) : [],
+    capture: {
+      pending: Array.isArray(current.meta.capture?.pending) ? current.meta.capture.pending.length : 0,
+      runs: Array.isArray(current.meta.capture?.runs) ? current.meta.capture.runs.length : 0,
+      lastSmallReviewAt: current.meta.capture?.lastSmallReviewAt ?? null,
+      lastLargeReviewAt: current.meta.capture?.lastLargeReviewAt ?? null,
+    },
     injection: {
       at: injection?.at ?? null,
       injected,
@@ -2703,6 +3021,54 @@ function normalizeAuditStore(raw) {
     ? source.runs.map(normalizeAuditRun).filter((run) => run !== undefined).slice(-500)
     : []
   return { version: 1, runs }
+}
+
+function normalizeCaptureStore(raw) {
+  const source = raw !== null && typeof raw === 'object' ? raw : {}
+  const pending = Array.isArray(source.pending)
+    ? source.pending
+      .filter((entry) => entry !== null && typeof entry === 'object' && CAPTURE_TRIGGERS.includes(entry.trigger))
+      .map((entry) => ({
+        id: typeof entry.id === 'string' && /^cap_[A-Za-z0-9_-]{4,40}$/.test(entry.id) ? entry.id : `cap_${randomUUID().slice(0, 8)}`,
+        trigger: entry.trigger,
+        reason: truncate(String(entry.reason ?? ''), 200),
+        at: isoOr(entry.at, new Date().toISOString()),
+        sessionId: typeof entry.sessionId === 'string' ? truncate(entry.sessionId, 120) : null,
+        turn: Number.isFinite(Number(entry.turn)) ? Number(entry.turn) : null,
+        text: truncate(String(entry.text ?? ''), 2000),
+        since: isoOr(entry.since, null),
+        until: isoOr(entry.until, null),
+      }))
+      .slice(-100)
+    : []
+  const runs = Array.isArray(source.runs)
+    ? source.runs
+      .filter((run) => run !== null && typeof run === 'object' && CAPTURE_TRIGGERS.includes(run.trigger))
+      .map((run) => ({
+        id: typeof run.id === 'string' ? truncate(run.id, 64) : `cap_${randomUUID().slice(0, 8)}`,
+        trigger: run.trigger,
+        at: isoOr(run.at, new Date().toISOString()),
+        actor: truncate(String(run.actor ?? 'agent'), 40),
+        sessionId: typeof run.sessionId === 'string' ? truncate(run.sessionId, 120) : null,
+        turn: Number.isFinite(Number(run.turn)) ? Number(run.turn) : null,
+        summary: truncate(String(run.summary ?? ''), 2000),
+        created: Array.isArray(run.created) ? run.created.slice(0, 40) : [],
+        updated: Array.isArray(run.updated) ? run.updated.slice(0, 40) : [],
+        skipped: Array.isArray(run.skipped) ? run.skipped.slice(0, 40) : [],
+        errors: Array.isArray(run.errors) ? run.errors.slice(0, 40) : [],
+      }))
+      .slice(-50)
+    : []
+  return {
+    version: 1,
+    pending,
+    runs,
+    lastSignalAt: isoOr(source.lastSignalAt, null),
+    lastSmallReviewAt: isoOr(source.lastSmallReviewAt, null),
+    lastLargeReviewAt: isoOr(source.lastLargeReviewAt, null),
+    lastSmallQueuedAt: isoOr(source.lastSmallQueuedAt, null),
+    lastLargeQueuedAt: isoOr(source.lastLargeQueuedAt, null),
+  }
 }
 
 function normalizeAuditRun(raw) {
@@ -2991,6 +3357,7 @@ export const TOOL_NAMES = [
   'memory_consolidate',
   'memory_pitfall',
   'memory_diff',
+  'memory_capture',
 ]
 
 // 记事本列表在模块初始化后填充（NOTEBOOKS 来自 settings.js）。

@@ -21,6 +21,7 @@ import { createNativeCore } from './lib/native.js'
 import { API_PATH, LEGACY_API_PATH, mountApi, setTrustedHosts } from './lib/api.js'
 import { registerTools } from './lib/tools.js'
 import { createAuditHook } from './lib/audit.js'
+import { detectAssistantSignals, detectUserSignals, messageText } from './lib/capture.js'
 
 export const name = 'dsh-memory-plugin'
 export const inject = ['tools', 'systemPrompt']
@@ -150,13 +151,55 @@ export async function apply(ctx, config) {
     interpolate: false,
     text: () => {
       try {
-        return engine.promptDigest()
+        const digest = engine.promptDigest()
+        const capture = engine.capturePrompt()
+        return [digest, capture].filter((part) => part !== '').join('\n\n')
       } catch (error) {
         log('warn', `生成记忆摘要失败：${message(error)}`)
         return ''
       }
     },
   }), 'memory-plugin:prompt')
+
+  // 即时信号：只入队提醒，不直接写记忆。session/event 是 post-commit，
+  // 用户消息和助手消息都能拿到；子智能体会话不参与，避免审计子会话自我触发。
+  ctx.effect(() => ctx.on('session/event', (session, event) => {
+    const cfg = engine.getSettings().autoCapture
+    if (cfg?.enabled !== true || cfg?.immediate !== true) return
+    const origin = session?.header?.origin ?? session?.origin ?? session?.header?.kind
+    if (origin === 'subagent' || origin === 'subagent-run') return
+    const sessionId = typeof session?.id === 'string' ? session.id : null
+    const kind = event?.type
+    // 宿主通知、定时任务、注入上下文也会走 user/message；只处理真正的用户输入，
+    // 否则系统消息里的“记住/错了”会误触发捕获。
+    const sourceKind = event?.data?.source?.kind
+    if (kind === 'user/message' && sourceKind !== undefined && sourceKind !== 'user') return
+    const signalList = kind === 'user/message'
+      ? detectUserSignals(messageText(event))
+      : kind === 'assistant/message' ? detectAssistantSignals(messageText(event)) : []
+    for (const signal of signalList) {
+      void engine.noteCaptureSignal({
+        ...signal,
+        text: messageText(event),
+        sessionId,
+      }).catch((error) => log('warn', `记录记忆信号失败：${message(error)}`))
+    }
+  }), 'memory-plugin:capture-events')
+
+  // 小/大定时：每 5 分钟检查一次是否该入队小时/每日回顾。
+  ctx.effect(() => {
+    const tick = () => {
+      void engine.tickCapture().then((result) => {
+        if ((result.queued ?? []).length > 0) {
+          log('info', `自动记忆回顾已入队：${result.queued.map((entry) => entry.trigger).join('、')}`)
+        }
+      }).catch((error) => log('warn', `自动记忆定时检查失败：${message(error)}`))
+    }
+    tick()
+    const timer = setInterval(tick, 5 * 60 * 1000)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, 'memory-plugin:capture-timer')
 
   // 定时维护：过期清理 / 轮转 / 归档 / 去重 / 反思提升 / 资源上限。
   ctx.effect(() => {

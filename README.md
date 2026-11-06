@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.1-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.4.0-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -22,7 +22,7 @@
 
 > 技术插件 id 仍为 **`dsh-memory-plugin`**，仓库与项目名为 **`dsh-Immunity-memory`**。改名只影响项目品牌，不影响已有安装、配置路径或工具名。
 
-> **v0.3.0 新增**：冲突合并与保留、遗忘曲线、按项目隔离的记忆空间、维护历史 / 慢查询 / 注入命中率 / 记忆健康分，以及可拦截 / 可改写的通用写入生命周期 Hook。详见 [Release v0.3.0](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.3.0)。
+> **v0.4.0 新增**：自动记忆触发（用户纠错 / 让记住 / 满意或不满 / 智能体自省）、小时与每日回顾队列、`memory_capture` 工具、记事本代码去重；写什么、写哪一层、TTL 多长仍由智能体判断。详见 [Release v0.4.0](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.4.0)。
 
 ---
 
@@ -41,7 +41,7 @@
 
 | 问题 | 传统做法 | Immunity 的做法 |
 | --- | --- | --- |
-| 会话结束后忘光 | 手动复制聊天记录 | 10 个 agent 工具自动写入、检索、更新、固化 |
+| 会话结束后忘光 | 手动复制聊天记录 | 11 个 agent 工具自动写入、检索、更新、捕获、固化 |
 | 记忆越堆越乱 | 全部塞进一个列表 | 八层记忆 + 四本记事本 + 类型/层/标签过滤 |
 | 检索只靠关键词 | `LIKE` 或单路向量 | FTS5 bm25 + 384 维向量 + 图谱 BFS，三路融合 |
 | 旧记忆污染上下文 | 永久保留 | 保鲜期硬约束、过期归档、冲突检测、固化审计 |
@@ -61,6 +61,7 @@
 | **遗忘曲线** | 按最后访问时间做指数衰减，半衰期与分数地板可调；只影响检索排序，不改写 importance |
 | **项目空间** | 条目可绑定 `workspace`；写入默认当前工作目录，检索默认当前项目 + 全局，`"*"` 可跨项目 |
 | **写入 Hook** | `createItem` / `updateItem` / 导入 / 冲突解决支持 before/after 生命周期 Hook，可改写、可拦截、失败放行 |
+| **自动记忆** | 检测用户纠错、让记住、明显满意/不满与智能体自省；按小时/每日入队提醒。插件只发提醒，写什么、写哪层、TTL 多长由智能体调用 `memory_capture` 决定；记事本按同本归一化正文去重 |
 | **诊断** | 记忆健康分、维护历史、慢查询、注入命中率，统一在维护面板和 `diagnostics` API 展示 |
 | **记忆模板** | 每个模板按 L0/L1/L3 逐条配置不可变记忆，可新增多套并热切换；L2 与 L4-L7 始终共享，不会因切换模板被复制或删除 |
 | **写入审计** | 每次 `memory_write` / `memory_update` 前由无工具权限的独立子智能体对照用户原话审计；可开关、可影子运行，失败/超时放行；待确认候选在界面批准后才落库，审计 token 计入账本 |
@@ -77,7 +78,7 @@
 
 ```mermaid
 flowchart TB
-  A["DSH Agent / 对话"] -->|"10 个记忆工具"| B["Node 控制层<br/>工具 · 注入 · HTTP API · 维护编排"]
+  A["DSH Agent / 对话"] -->|"11 个记忆工具"| B["Node 控制层<br/>工具 · 注入 · HTTP API · 维护编排"]
   B -->|"回环 HTTP + JSON + 随机 token"| C["Go 记忆服务<br/>SQLite · FTS5 · 图谱 · 备份"]
   B -->|"JSON lines over stdio"| D["Rust 计算核心<br/>批量余弦 · 重要性 · 去重"]
   C --> E[("memory.sqlite3<br/>WAL + FTS5 + vectors + graph")]
@@ -88,7 +89,7 @@ flowchart TB
 
 | 层 | 语言 / 产物 | 职责 |
 | --- | --- | --- |
-| 控制层 | Node.js（宿主进程） | 插件入口 `apply(ctx)`、10 个工具、提示词注入、界面 HTTP 接口、维护与备份编排、原生组件缺失时的降级 |
+| 控制层 | Node.js（宿主进程） | 插件入口 `apply(ctx)`、11 个工具、提示词注入、界面 HTTP 接口、维护与备份编排、原生组件缺失时的降级 |
 | 服务层 | Go → `packages/memory-plugin/bin/<platform>-<arch>/memory-service` | SQLite 持久化、FTS5（bm25）、向量余弦、关系图谱 BFS、审计、备份、完整性校验、优雅退出 |
 | 计算核心 | Rust → `packages/memory-plugin/native/<platform>-<arch>/memory-core` | 批量余弦、重要性评分、去重/相似度（JSON lines over stdio） |
 | 界面层 | 浏览器端 JS（无构建） | 侧边栏整页 + `settings.section`；列表、搜索、编辑器、模板、用量、固化、diff、维护 |
@@ -193,11 +194,12 @@ node scripts/check.mjs
 
 Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\` 再运行，避免安装目录（尤其是 `link:` 开发安装）被宿主沙箱或只读策略限制。
 
-## 给智能体的 10 个工具
+## 给智能体的 11 个工具
 
 | 工具 | 作用 |
 | --- | --- |
 | `memory_write` | 写入记忆或记事本条目；必须显式选择可修改层并给出 `ttlDays`；可带实体键 `key`、来源原话 `quote`、被取代 id `supersedes` |
+| `memory_capture` | 自动记忆捕获：智能体提交事实与记事本条目，显式选择层级/TTL；记事本按同本归一化正文去重；可传 `pendingId` 清除已处理的提醒 |
 | `memory_search` | 混合检索；返回评分拆解、层级、标签、命中原因 |
 | `memory_get` | 按 id 读取完整正文、实体键与来源原话 |
 | `memory_update` | 修改标题、正文、标签、重要度、层、保鲜期；版本号递增；支持实体键与 `supersedes` |
@@ -245,6 +247,10 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 | `hook.enforce` | `true` | 拒绝时阻止写入；关闭则只记录影子审计 |
 | `hook.minConfidence` | `0.7` | 低于该置信度的 reject 不拦截；needs_user 始终进入候选 |
 | `hook.timeoutSeconds` | `45` | 子智能体审计超时；超时按失败放行 |
+| `autoCapture.enabled` / `immediate` | 开 | 自动记忆总开关与即时信号开关；只入队提醒，不直接写库 |
+| `autoCapture.smallIntervalHours` / `smallWindowHours` | `4` / `4` | 每 X 小时回顾前 X 小时的小定时 |
+| `autoCapture.largeAt` / `largeLookbackDays` | `04:00` / `7` | 每日回顾时刻与回看天数 |
+| `autoCapture.noteDedupe` | `0.92` | 记事本同本相似度去重阈值 |
 | `maintenance.*` | 见设置页 | 自动维护间隔、归档天数、资源上限、审计保留条数、慢查询阈值/上限、维护历史上限 |
 | `workspace`（条目） | 空 = 全局 | 写入默认当前工作目录；检索默认当前项目 + 全局；`"*"` 跨项目 |
 | `storage.backupKeep` | `3` | 轮转备份保留份数 |
@@ -340,8 +346,9 @@ node scripts/inspect-db.mjs   # 只读查看当前记忆库
 
 ## 路线图
 
-v0.3.0 已交付：
+v0.4.0 已交付：
 
+- **自动记忆**：即时信号检测、小时/每日回顾队列、`memory_capture` 工具与记事本代码去重；事实的层级、TTL 与是否值得写由智能体判断；
 - **记忆质量**：冲突合并 / 保留策略、遗忘曲线、按项目隔离的记忆空间；
 - **可观测性**：维护任务历史、慢查询、注入命中率与记忆健康分；
 - **写入 Hook**：`createItem` / `updateItem` / 导入 / 冲突解决的 before/after 生命周期 Hook，可拦截、可改写、失败放行。
@@ -356,7 +363,7 @@ hooks.onBeforeWrite((event) => {
 })
 ```
 
-Hook 只负责拦截 / 改写 / 放行，不会自动生成或更新记忆；自动更新需要注册方自己实现策略。
+Hook 只负责拦截 / 改写 / 放行；自动记忆则由插件检测信号、智能体调用 `memory_capture` 显式提交，二者都不替模型决定事实内容。
 
 近期优先级：
 

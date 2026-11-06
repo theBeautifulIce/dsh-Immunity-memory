@@ -266,6 +266,16 @@ try {
     assert.ok(Array.isArray(diag.body.value.slowQueries))
   })
 
+  await test('capture.stats / tick 暴露自动记忆状态', async () => {
+    const stats = await call('capture.stats', {})
+    assert.equal(stats.status, 200)
+    assert.equal(stats.body.value.enabled, true)
+    assert.equal(typeof stats.body.value.pending, 'number')
+    const tick = await call('capture.tick', {})
+    assert.equal(tick.status, 200)
+    assert.ok(Array.isArray(tick.body.value.queued))
+  })
+
   await test('conflicts.resolve 可通过 API 保留一侧', async () => {
     const left = await call('items.create', {
       layer: 'L2',

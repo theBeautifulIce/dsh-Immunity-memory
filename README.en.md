@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.1-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.4.0-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -22,7 +22,7 @@
 
 > The technical plugin id remains **`dsh-memory-plugin`**; the repository and project name is **`dsh-Immunity-memory`**. The rename only affects branding, not existing installs, config paths, or tool names.
 
-> **New in v0.3.0**: conflict merge/keep, forgetting curve, per-project memory spaces, maintenance history / slow queries / injection hit rate / memory health score, and interceptable write-lifecycle hooks. See the [v0.3.0 release](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.3.0).
+> **New in v0.4.0**: automatic capture triggers (user correction / remember request / satisfaction or dissatisfaction / self-correction), hourly and daily review queues, a `memory_capture` tool, and code-level notebook deduplication. The agent still decides what to save, which layer, and the TTL. See the [v0.4.0 release](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.4.0).
 
 ---
 
@@ -41,7 +41,7 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 
 | Problem | Typical approach | Immunity |
 | --- | --- | --- |
-| Everything is forgotten after a session | Copy chat logs manually | 10 agent tools for write, search, update, and consolidation |
+| Everything is forgotten after a session | Copy chat logs manually | 11 agent tools for write, search, update, capture, and consolidation |
 | Memory becomes a junk drawer | One flat list | Eight layers + four notebooks + type/layer/tag filters |
 | Retrieval is keyword-only | `LIKE` or a single vector search | FTS5 bm25 + 384-d vector cosine + graph BFS, fused |
 | Stale memories pollute context | Keep everything forever | Hard TTL, expiry archive, conflict detection, consolidation audit |
@@ -61,6 +61,7 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | **Forgetting curve** | Exponential decay by last access with configurable half-life and score floor; ranking only, `importance` is never rewritten |
 | **Project spaces** | Entries can carry `workspace`; writes default to the cwd, searches see the current project plus global entries, and `"*"` spans projects |
 | **Write hooks** | Before/after lifecycle hooks for `createItem` / `updateItem` / import / conflict resolution; rewrite, block, and fail-open |
+| **Automatic capture** | Detects user corrections, remember requests, clear satisfaction/dissatisfaction, and self-correction; queues hourly/daily review reminders. The plugin only reminds — the agent decides what to save, which layer, and the TTL via `memory_capture`; notebook entries are deduplicated by code |
 | **Diagnostics** | Memory health score, maintenance history, slow queries, and injection hit rate in the maintenance panel and `diagnostics` API |
 | **Memory templates** | Each template configures immutable memories per L0/L1/L3, with multiple templates and hot switching; L2 and L4-L7 are shared and are never copied or deleted by a switch |
 | **Write audit** | Before every `memory_write` / `memory_update`, a tool-less isolated subagent audits it against the user's turn; optional enforce or shadow mode, fail-open on errors/timeouts, with pending candidates approved in the UI and per-run token accounting |
@@ -77,7 +78,7 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 
 ```mermaid
 flowchart TB
-  A["DSH Agent / conversation"] -->|"10 memory tools"| B["Node control layer<br/>tools · injection · HTTP API · maintenance"]
+  A["DSH Agent / conversation"] -->|"11 memory tools"| B["Node control layer<br/>tools · injection · HTTP API · maintenance"]
   B -->|"loopback HTTP + JSON + random token"| C["Go memory service<br/>SQLite · FTS5 · graph · backup"]
   B -->|"JSON lines over stdio"| D["Rust compute core<br/>batch cosine · importance · dedupe"]
   C --> E[("memory.sqlite3<br/>WAL + FTS5 + vectors + graph")]
@@ -88,7 +89,7 @@ flowchart TB
 
 | Layer | Language / artifact | Responsibility |
 | --- | --- | --- |
-| Control | Node.js (host process) | `apply(ctx)`, 10 tools, prompt injection, UI HTTP API, maintenance/backup orchestration, fallback when native components are unavailable |
+| Control | Node.js (host process) | `apply(ctx)`, 11 tools, prompt injection, UI HTTP API, maintenance/backup orchestration, fallback when native components are unavailable |
 | Service | Go → `packages/memory-plugin/bin/<platform>-<arch>/memory-service` | SQLite persistence, FTS5 (bm25), vector cosine, graph BFS, audit, backup, integrity checks, graceful shutdown |
 | Compute | Rust → `packages/memory-plugin/native/<platform>-<arch>/memory-core` | Batch cosine, importance scoring, dedupe/similarity (JSON lines over stdio) |
 | UI | Browser-side JS (no build step) | Sidebar page + `settings.section`; lists, search, editor, templates, usage, consolidation, diff, maintenance |
@@ -193,11 +194,12 @@ Override with `DSH_HOME` or Settings → Storage → Data directory. Main tables
 
 At startup the Go binary is copied to `<store-dir>\service\<platform>-<arch>\` before execution, so install directories (especially `link:` development installs) are not constrained by host sandbox or read-only policies.
 
-## The 10 agent tools
+## The 11 agent tools
 
 | Tool | Purpose |
 | --- | --- |
 | `memory_write` | Write a memory or notebook entry; the agent must choose a mutable layer and provide `ttlDays`; optional entity `key`, source `quote`, and `supersedes` |
+| `memory_capture` | Automatic capture: submit facts and notebook entries with an explicit layer/TTL; notebook entries are deduplicated by code within the same notebook; pass `pendingId` to clear a handled reminder |
 | `memory_search` | Hybrid retrieval; returns score breakdown, layer, tags, and match reasons |
 | `memory_get` | Read full content, entity key, and source quote by id |
 | `memory_update` | Change title, content, tags, importance, layer, TTL; increments version; supports `key` and `supersedes` |
@@ -245,6 +247,10 @@ Settings save immediately and can be reset to defaults. The most useful keys:
 | `hook.enforce` | `true` | Block rejected writes; off records shadow audits only |
 | `hook.minConfidence` | `0.7` | Rejects below this confidence do not block; `needs_user` always queues |
 | `hook.timeoutSeconds` | `45` | Subagent audit timeout; timeouts fail open |
+| `autoCapture.enabled` / `immediate` | on | Master switch and immediate-signal switch; signals only queue reminders, never write directly |
+| `autoCapture.smallIntervalHours` / `smallWindowHours` | `4` / `4` | Hourly review cadence and lookback window |
+| `autoCapture.largeAt` / `largeLookbackDays` | `04:00` / `7` | Daily review time and lookback days |
+| `autoCapture.noteDedupe` | `0.92` | Notebook similarity threshold for same-notebook dedupe |
 | `maintenance.*` | See Settings | Maintenance interval, archive age, resource caps, audit retention, slow-query threshold/keep, history keep |
 | `workspace` (entry) | empty = global | Writes default to the cwd; searches see the current project plus global; `"*"` spans projects |
 | `storage.backupKeep` | `3` | Rotating backups to keep |
@@ -340,8 +346,9 @@ This repository is maintained as a long-lived project, not a one-off script:
 
 ## Roadmap
 
-Shipped in v0.3.0:
+Shipped in v0.4.0:
 
+- **Automatic capture**: immediate-signal detection, hourly/daily review queues, the `memory_capture` tool, and code-level notebook deduplication; the agent decides the layer, TTL, and whether a fact is worth saving;
 - **Memory quality**: conflict merge / keep, forgetting curve, per-project memory spaces;
 - **Observability**: maintenance run history, slow queries, injection hit rate, memory health score;
 - **Write hooks**: before/after lifecycle hooks for `createItem` / `updateItem` / import / conflict resolution, with rewrite, block and fail-open behavior.
@@ -356,7 +363,7 @@ hooks.onBeforeWrite((event) => {
 })
 ```
 
-Hooks only intercept, rewrite, or allow writes; they do not create or update memories by themselves. Automatic updates require a policy implemented by the registering plugin.
+Hooks only intercept, rewrite, or allow writes. Automatic capture is separate: the plugin detects signals and the agent explicitly submits facts through `memory_capture`; neither path lets the plugin decide facts for the model.
 
 Near-term priorities:
 

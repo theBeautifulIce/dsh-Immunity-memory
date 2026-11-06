@@ -12,7 +12,7 @@ after user feedback, DSH API changes, or performance findings.
 4. **Agent chooses the mutable layer**: the setting should not hard-code one
    writable layer for all content.
 5. **TTL by default for mutable memories**: no silent permanent default.
-6. **Small public surface**: 10 stable tools before adding more.
+6. **Small public surface**: keep the tool surface stable and justify each addition.
 
 ## v0.2 — Stability and distribution
 
@@ -34,7 +34,18 @@ after user feedback, DSH API changes, or performance findings.
 - [ ] Better duplicate detection across notebooks and layers.
 - [ ] Template packs: export/import a set of L0/L1/L3 entries.
 
-## v0.4 — Operations and observability
+## v0.4 — Automatic memory capture
+
+- [x] Immediate signals: user correction, remember request, satisfaction/
+      dissatisfaction, and assistant self-correction.
+- [x] Hourly review of the previous window and a configurable daily review.
+- [x] `memory_capture` tool: the agent explicitly chooses facts, layers, and TTLs.
+- [x] Code-level notebook deduplication; memory layers keep semantic dedupe.
+- [x] Capture state, diagnostics, and maintenance-panel card.
+- [ ] Measure real token cost of capture/review and add adaptive throttling.
+- [ ] Optional user-defined trigger rules without code changes.
+
+## v0.5 — Operations and observability
 
 - [x] Maintenance dashboard: last run, duration, archived, deduped, promoted.
 - [x] Slow-query log and retrieval score breakdown in the UI.
