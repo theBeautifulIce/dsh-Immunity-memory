@@ -174,7 +174,7 @@ function render(title, element) {
 const shell = render('MemorySettingsPage 加载态', React.createElement(settingsReg.Component))
 assert.ok(shell.includes('mp-root'), '应包含根容器样式类名')
 
-const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel } = mod.__internals
+const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView } = mod.__internals
 render('MemorySettingsPage（直接调用）', React.createElement(MemorySettingsPage))
 
 // 侧边栏入口：整页容器必须自己滚动（main 槽位是 overflow:hidden 的列）。
@@ -223,6 +223,22 @@ render('UsagePanel 用量', React.createElement(UsagePanel, { api, lang: 'zh', b
 render('PitfallPanel 踩坑笔记', React.createElement(PitfallPanel, {
   api, lang: 'zh', notify: noop, onChanged: noop,
 }))
+const diffView = render('DiffView 红绿差异', React.createElement(DiffView, {
+  lang: 'zh',
+  change: {
+    operation: 'update',
+    itemId: 'mem_diff',
+    title: '差异展示',
+    changed: ['title', 'content'],
+    before: { id: 'mem_diff', type: 'memory', version: 1, title: '旧标题', content: '第一行\n旧内容\n保留行' },
+    after: { id: 'mem_diff', type: 'memory', version: 2, title: '新标题', content: '第一行\n新内容\n保留行' },
+  },
+}))
+for (const token of ['mp-diff-line is-remove', 'mp-diff-line is-add', '旧标题', '新标题', '旧内容', '新内容', '保留行']) {
+  assert.ok(diffView.includes(token), `DiffView 应包含“${token}”`)
+}
+assert.ok(!diffView.includes('&quot;before&quot;'), 'DiffView 不应直接输出 JSON')
+
 render('DiffPanel 时间段变更', React.createElement(DiffPanel, { api, lang: 'zh', notify: noop }))
 render('ConsolidationPanel 固化', React.createElement(ConsolidationPanel, {
   api, lang: 'zh', boot, notify: noop, onChanged: noop,

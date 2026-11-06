@@ -208,6 +208,30 @@ window.__ModuleLoader__.load({
       .mp-kpi b { display:block; font-size:18px; line-height:1.2 }
       .mp-consolidate-row { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px; padding:8px 10px;
         display:flex; flex-direction:column; gap:6px }
+      .mp-change-card.is-create { border-left:3px solid var(--dsw-alias-state-success-primary,#2da44e) }
+      .mp-change-card.is-delete { border-left:3px solid var(--dsw-alias-state-error-primary,#cf222e) }
+      .mp-change-card.is-update { border-left:3px solid var(--dsw-alias-state-warning-primary,#bf8700) }
+      .mp-change-card.is-bulk, .mp-change-card.is-consolidate { border-left:3px solid #8250df }
+      .mp-diff { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.14)); border-radius:8px;
+        overflow:hidden; background:var(--dsw-alias-bg-layer-1,#fff);
+        font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; line-height:1.6 }
+      .mp-diff-hunk { padding:4px 9px; background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.05));
+        color:var(--dsw-alias-label-secondary,#57606a); border-top:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.08));
+        font-size:10px; letter-spacing:.02em }
+      .mp-diff-hunk:first-child { border-top:0 }
+      .mp-diff-line { display:flex; align-items:flex-start; gap:6px; padding:2px 9px;
+        border-left:3px solid transparent; white-space:pre-wrap; overflow-wrap:anywhere }
+      .mp-diff-line.is-add { background:rgba(46,160,67,.13); border-left-color:var(--dsw-alias-state-success-primary,#2da44e) }
+      .mp-diff-line.is-remove { background:rgba(207,34,46,.13); border-left-color:var(--dsw-alias-state-error-primary,#cf222e) }
+      .mp-diff-line.is-context { color:var(--dsw-alias-label-tertiary,#6e7781) }
+      .mp-diff-marker { flex:0 0 1.1em; text-align:center; font-weight:700; user-select:none }
+      .mp-diff-line.is-add .mp-diff-marker { color:var(--dsw-alias-state-success-primary,#1a7f37) }
+      .mp-diff-line.is-remove .mp-diff-marker { color:var(--dsw-alias-state-error-primary,#cf222e) }
+      .mp-diff-code { flex:1 1 auto; min-width:0 }
+      .mp-diff-field { font-weight:650; color:var(--dsw-alias-label-secondary,#57606a) }
+      .mp-diff-value { color:var(--dsw-alias-label-primary,#1f2329) }
+      .mp-diff-note { padding:5px 9px; border-top:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.12));
+        color:var(--dsw-alias-state-warning-primary,#9a6700); font-size:10px }
       .mp-template-manage { border:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.2)); border-radius:8px;
         padding:8px 10px; display:flex; flex-direction:column; gap:8px }
       .mp-template-row { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap }
@@ -1622,6 +1646,212 @@ window.__ModuleLoader__.load({
       )
     }
 
+    const DIFF_FIELD_ORDER = ['title', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'content']
+    const DIFF_FIELD_LABELS = {
+      zh: {
+        title: '标题', layer: '记忆层', notebook: '记事本', tags: '标签', importance: '重要度',
+        status: '状态', pinned: '置顶', ttlDays: '保鲜期', expiresAt: '过期时间', content: '正文',
+      },
+      en: {
+        title: 'Title', layer: 'Layer', notebook: 'Notebook', tags: 'Tags', importance: 'Importance',
+        status: 'Status', pinned: 'Pinned', ttlDays: 'TTL', expiresAt: 'Expires at', content: 'Content',
+      },
+    }
+    const DIFF_OPERATION_LABELS = {
+      zh: { create: '新增', update: '修改', delete: '删除', bulk: '批量操作', consolidate: '固化' },
+      en: { create: 'Created', update: 'Updated', delete: 'Deleted', bulk: 'Bulk action', consolidate: 'Consolidated' },
+    }
+    const DIFF_LAYER_NAMES = {
+      zh: { L0: '灵魂层', L1: '思想核心', L2: '思想流动', L3: '本能行为', L4: '学习行为', L5: '目标记忆', L6: '轮转记忆', L7: '情境感知' },
+      en: { L0: 'Soul', L1: 'Core ideas', L2: 'Flowing ideas', L3: 'Instincts', L4: 'Learned behaviour', L5: 'Goals', L6: 'Rotating memory', L7: 'Session context' },
+    }
+    const DIFF_NOTEBOOK_NAMES = {
+      zh: { memory: '记忆', daily: '日常', asset: '资产', pitfall: '踩坑' },
+      en: { memory: 'Memory', daily: 'Daily', asset: 'Assets', pitfall: 'Pitfalls' },
+    }
+    const DIFF_STATUS_NAMES = {
+      zh: { active: '活跃', archived: '归档', expired: '过期', conflicted: '冲突' },
+      en: { active: 'Active', archived: 'Archived', expired: 'Expired', conflicted: 'Conflicted' },
+    }
+
+    function splitDiffLines(value) {
+      const text = String(value ?? '').replace(/\r\n?/g, '\n')
+      return text === '' ? [] : text.split('\n')
+    }
+
+    /** 行级 LCS；超过 700 行或 25 万格时退回“整段删/整段增”，避免主线程卡顿。 */
+    function buildLineDiff(beforeText, afterText) {
+      const left = splitDiffLines(beforeText)
+      const right = splitDiffLines(afterText)
+      if (left.length === 0 && right.length === 0) return []
+      if (left.length === 0) return right.map((text, index) => ({ type: 'add', text, afterLine: index + 1 }))
+      if (right.length === 0) return left.map((text, index) => ({ type: 'remove', text, beforeLine: index + 1 }))
+      if (left.length > 700 || right.length > 700 || left.length * right.length > 250000) {
+        return [
+          ...left.map((text, index) => ({ type: 'remove', text, beforeLine: index + 1 })),
+          ...right.map((text, index) => ({ type: 'add', text, afterLine: index + 1 })),
+        ]
+      }
+      const rows = left.length
+      const cols = right.length
+      const table = Array.from({ length: rows + 1 }, () => new Uint16Array(cols + 1))
+      for (let i = rows - 1; i >= 0; i -= 1) {
+        for (let j = cols - 1; j >= 0; j -= 1) {
+          table[i][j] = left[i] === right[j]
+            ? table[i + 1][j + 1] + 1
+            : Math.max(table[i + 1][j], table[i][j + 1])
+        }
+      }
+      const result = []
+      let i = 0
+      let j = 0
+      while (i < rows && j < cols) {
+        if (left[i] === right[j]) {
+          result.push({ type: 'context', text: left[i], beforeLine: i + 1, afterLine: j + 1 })
+          i += 1
+          j += 1
+        } else if (table[i + 1][j] >= table[i][j + 1]) {
+          result.push({ type: 'remove', text: left[i], beforeLine: i + 1 })
+          i += 1
+        } else {
+          result.push({ type: 'add', text: right[j], afterLine: j + 1 })
+          j += 1
+        }
+      }
+      while (i < rows) {
+        result.push({ type: 'remove', text: left[i], beforeLine: i + 1 })
+        i += 1
+      }
+      while (j < cols) {
+        result.push({ type: 'add', text: right[j], afterLine: j + 1 })
+        j += 1
+      }
+      return result
+    }
+
+    function formatDiffDate(value) {
+      if (value === null || value === undefined || value === '') return ''
+      const date = new Date(value)
+      if (Number.isNaN(date.getTime())) return String(value)
+      const pad = (number) => String(number).padStart(2, '0')
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+    }
+
+    function formatDiffValue(field, value, lang) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      if (field === 'layer') {
+        if (value === null || value === undefined || value === '') return txt('（无）', '(none)')
+        return `${value}${DIFF_LAYER_NAMES[lang]?.[value] ? ` · ${DIFF_LAYER_NAMES[lang][value]}` : ''}`
+      }
+      if (field === 'notebook') {
+        if (value === null || value === undefined || value === '') return txt('（无）', '(none)')
+        return DIFF_NOTEBOOK_NAMES[lang]?.[value] ?? String(value)
+      }
+      if (field === 'status') {
+        if (value === null || value === undefined || value === '') return txt('（无）', '(none)')
+        return DIFF_STATUS_NAMES[lang]?.[value] ?? String(value)
+      }
+      if (field === 'tags') {
+        const tags = Array.isArray(value) ? value.filter((tag) => String(tag).trim() !== '') : []
+        return tags.length === 0 ? txt('（无标签）', '(no tags)') : tags.map((tag) => `#${tag}`).join(' ')
+      }
+      if (field === 'pinned') return value ? txt('是', 'Yes') : txt('否', 'No')
+      if (field === 'ttlDays') {
+        if (value === null || value === undefined || value === '') return txt('永久', 'Permanent')
+        return txt(`${value} 天`, `${value} days`)
+      }
+      if (field === 'expiresAt') return value ? formatDiffDate(value) : txt('永不过期', 'Never expires')
+      if (value === null || value === undefined || value === '') return txt('（空）', '(empty)')
+      if (typeof value === 'object') {
+        try {
+          return JSON.stringify(value)
+        } catch {
+          return String(value)
+        }
+      }
+      return String(value)
+    }
+
+    /** 人类可读的统一 diff：同一视图里红色删除、绿色新增，正文按行做 LCS。 */
+    function DiffView({ change, lang = 'zh' }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const labels = DIFF_FIELD_LABELS[lang] ?? DIFF_FIELD_LABELS.zh
+      const before = change?.before ?? null
+      const after = change?.after ?? null
+      const changed = new Set(Array.isArray(change?.changed) ? change.changed : [])
+      const whole = change?.operation === 'create' || change?.operation === 'delete'
+      const present = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])
+      const fields = DIFF_FIELD_ORDER
+        .filter((field) => present.has(field) && (whole || changed.size === 0 || changed.has(field)))
+      for (const field of present) {
+        if (!DIFF_FIELD_ORDER.includes(field) && field !== 'id' && field !== 'type' && field !== 'version'
+          && !field.startsWith('content') && (whole || changed.has(field))) fields.push(field)
+      }
+      const blocks = []
+      for (const field of fields) {
+        if (field === 'content') continue
+        const hasBefore = before !== null && Object.prototype.hasOwnProperty.call(before, field)
+        const hasAfter = after !== null && Object.prototype.hasOwnProperty.call(after, field)
+        if (!hasBefore && !hasAfter) continue
+        const oldValue = hasBefore ? before[field] : undefined
+        const newValue = hasAfter ? after[field] : undefined
+        if (hasBefore && hasAfter && JSON.stringify(oldValue) === JSON.stringify(newValue)) continue
+        const fieldLabel = labels[field] ?? field
+        blocks.push(h('div', { key: `hunk-${field}`, className: 'mp-diff-hunk' }, `@@ ${fieldLabel} @@`))
+        if (hasBefore) {
+          blocks.push(h('div', { key: `old-${field}`, className: 'mp-diff-line is-remove' },
+            h('span', { className: 'mp-diff-marker' }, '-'),
+            h('span', { className: 'mp-diff-code' },
+              h('span', { className: 'mp-diff-field' }, fieldLabel), '：',
+              h('span', { className: 'mp-diff-value' }, formatDiffValue(field, oldValue, lang)))))
+        }
+        if (hasAfter) {
+          blocks.push(h('div', { key: `new-${field}`, className: 'mp-diff-line is-add' },
+            h('span', { className: 'mp-diff-marker' }, '+'),
+            h('span', { className: 'mp-diff-code' },
+              h('span', { className: 'mp-diff-field' }, fieldLabel), '：',
+              h('span', { className: 'mp-diff-value' }, formatDiffValue(field, newValue, lang)))))
+        }
+      }
+      const beforeContent = before?.content
+      const afterContent = after?.content
+      const contentTouched = (before !== null && Object.prototype.hasOwnProperty.call(before, 'content'))
+        || (after !== null && Object.prototype.hasOwnProperty.call(after, 'content'))
+      const hasContent = (beforeContent !== undefined && beforeContent !== null && beforeContent !== '')
+        || (afterContent !== undefined && afterContent !== null && afterContent !== '')
+      if (contentTouched && hasContent && (beforeContent !== afterContent)) {
+        const rows = buildLineDiff(beforeContent, afterContent)
+        blocks.push(h('div', { key: 'hunk-content', className: 'mp-diff-hunk' }, `@@ ${labels.content} @@`))
+        const limited = rows.length > 500 ? rows.slice(0, 500) : rows
+        for (let index = 0; index < limited.length; index += 1) {
+          const row = limited[index]
+          blocks.push(h('div', { key: `line-${index}`, className: `mp-diff-line is-${row.type}` },
+            h('span', { className: 'mp-diff-marker' }, row.type === 'add' ? '+' : row.type === 'remove' ? '-' : ' '),
+            h('span', { className: 'mp-diff-code' }, row.text === '' ? ' ' : row.text)))
+        }
+        if (rows.length > 500) {
+          blocks.push(h('div', { key: 'line-limit', className: 'mp-diff-note' },
+            txt(`差异较长，仅显示前 500 行（共 ${rows.length} 行）。`, `Long diff: showing first 500 of ${rows.length} lines.`)))
+        }
+        if (before?.contentPreview || after?.contentPreview) {
+          blocks.push(h('div', { key: 'line-preview', className: 'mp-diff-note' },
+            txt('正文当前为 240 字预览；勾选“完整正文”后重新查询可查看完整差异。',
+              'Content is a 240-character preview; enable “Full content” and query again for the complete diff.')))
+        } else if (before?.contentTruncated || after?.contentTruncated) {
+          blocks.push(h('div', { key: 'line-truncated', className: 'mp-diff-note' },
+            txt('原始正文超过 4000 字，差异基于截断后的内容。', 'Original content exceeded 4,000 characters; diff uses the truncated snapshot.')))
+        }
+      }
+      if (blocks.length === 0) {
+        blocks.push(h('div', { key: 'no-change', className: 'mp-diff-note' },
+          txt('没有可展示的字段差异。', 'No displayable field changes.')))
+      }
+      return h('div', { className: 'mp-diff' },
+        h('div', { className: 'mp-diff-hunk' },
+          `@@ ${txt('版本', 'version')} ${before?.version ?? '∅'} → ${after?.version ?? '∅'} @@`),
+        blocks)
+    }
+
     function DiffPanel({ api, lang, notify }) {
       const txt = (zh, en) => (lang === 'zh' ? zh : en)
       const dateText = (offsetDays) => {
@@ -1695,18 +1925,21 @@ window.__ModuleLoader__.load({
           changes.length === 0
             ? h('div', { className: 'mp-empty' }, txt('这个时间段没有变更记录。', 'No changes in this range.'))
             : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-              changes.map((change, index) => h('div', { key: `${change.itemId}-${change.at}-${index}`, className: 'mp-consolidate-row' },
-                h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                  h('span', { className: 'mp-chip' }, change.operation),
-                  h('strong', null, change.title),
-                  h('span', { className: 'mp-hint' }, `${change.at} · ${change.actor}`),
-                  change.layer ? h('span', { className: 'mp-chip' }, `${change.layer}${change.notebook ? `·${change.notebook}` : ''}`) : null),
-                h('div', { className: 'mp-hint' }, change.summary ?? ''),
-                h('details', null,
-                  h('summary', { className: 'mp-hint' }, txt('查看变更前后', 'Before / after')),
-                  h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '11px' } },
-                    JSON.stringify({ before: change.before, after: change.after }, null, 2)))))))
-      )
+              changes.map((change, index) => h('div', {
+                key: `${change.itemId}-${change.at}-${index}`,
+                className: `mp-consolidate-row mp-change-card is-${change.operation}`,
+              },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                h('span', { className: 'mp-chip' }, DIFF_OPERATION_LABELS[lang]?.[change.operation] ?? change.operation),
+                h('strong', null, change.title),
+                h('span', { className: 'mp-hint' }, `${formatDiffDate(change.at)} · ${change.actor}`),
+                change.layer ? h('span', { className: 'mp-chip' }, `${change.layer}${change.notebook ? ` · ${DIFF_NOTEBOOK_NAMES[lang]?.[change.notebook] ?? change.notebook}` : ''}`) : null,
+                h('span', { className: 'mp-code' }, change.itemId)),
+              h('div', { className: 'mp-hint' },
+                txt('变更字段：', 'Fields: '),
+                (change.changed ?? []).map((field) => DIFF_FIELD_LABELS[lang]?.[field] ?? field).join(txt('、', ', ')) || txt('无', 'none')),
+              change.reason ? h('div', { className: 'mp-hint' }, `${txt('原因', 'Reason')}：${change.reason}`) : null,
+              h(DiffView, { change, lang }))))))
     }
 
     // ------------------------------------------------------------ 设置页 ----
@@ -2184,7 +2417,7 @@ window.__ModuleLoader__.load({
       __internals: {
         MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
         MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
-        InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel,
+        InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView,
       },
     }
   },
