@@ -168,6 +168,30 @@ test('审计日志追加，截断后整表重写', () => {
   assert.equal(store.raw().prepare('SELECT COUNT(*) AS n FROM changelog').get().n, 1)
 })
 
+test('结构化变更审计写入 change_details 并可还原', () => {
+  const state = store.read()
+  state.audit.push({
+    at: new Date().toISOString(),
+    action: 'change',
+    kind: 'change',
+    detail: 'update 笔记 mem_a1',
+    actor: 'agent',
+    change: {
+      operation: 'update', entity: 'memory', itemId: 'mem_a1', title: '构建命令',
+      layer: 'L4', notebook: null, changed: ['title'],
+      before: { title: '构建命令' }, after: { title: '构建命令（改）' }, reason: 'test',
+    },
+  })
+  store.write(state)
+  const row = store.raw().prepare("SELECT target_id, layer, change_details FROM changelog WHERE operation = 'change'").get()
+  assert.equal(row.target_id, 'mem_a1')
+  assert.equal(row.layer, 'L4')
+  const back = store.read().audit.find((entry) => entry.kind === 'change')
+  assert.equal(back.change.itemId, 'mem_a1')
+  assert.equal(back.change.operation, 'update')
+  assert.deepEqual(back.change.changed, ['title'])
+})
+
 test('关闭后重新打开数据仍在', () => {
   const before = store.read().items.length
   store.close()

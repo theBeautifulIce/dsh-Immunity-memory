@@ -110,7 +110,7 @@ const boot = {
   sortChoices: SORT_CHOICES,
   layers: LAYERS,
   notebooks: NOTEBOOKS,
-  toolNames: ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats', 'memory_usage', 'memory_consolidate'],
+  toolNames: ['memory_write', 'memory_search', 'memory_get', 'memory_update', 'memory_forget', 'memory_stats', 'memory_usage', 'memory_consolidate', 'memory_pitfall', 'memory_diff'],
   injection: {
     enabled: true,
     text: '## 长期记忆（dsh-memory-plugin）\n\n- [L5·重要度6] 示例记忆：示例正文',
@@ -130,7 +130,7 @@ const boot = {
   templates: { active: 'default', list: [{ id: 'default', name: { zh: '通用', en: 'General' } }] },
   consolidation: { candidates: [] },
   usage: { calls: 1, queryTokens: 4, resultTokens: 30, totalTokens: 34 },
-  stats: { total: 3, memory: 2, note: 1, active: 3, archived: 0, expired: 0, conflicted: 0, pinned: 1, byLayer: { L5: 2, L4: 1 }, lastWriteAt: '2026-11-05T10:00:00.000Z' },
+  stats: { total: 3, memory: 2, note: 1, active: 3, archived: 0, expired: 0, conflicted: 0, pinned: 1, byLayer: { L5: 2, L4: 1 }, byNotebook: { memory: 2, daily: 1, asset: 0, pitfall: 0 }, lastWriteAt: '2026-11-05T10:00:00.000Z' },
   storage: { path: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin\\store.json', dir: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin', exists: true, bytes: 2048, modifiedAt: '2026-11-05T10:00:00.000Z' },
   audit: [{ at: '2026-11-05T10:00:00.000Z', action: 'create', detail: 'mem_test' }],
 }
@@ -150,7 +150,7 @@ function render(title, element) {
 const shell = render('MemorySettingsPage 加载态', React.createElement(settingsReg.Component))
 assert.ok(shell.includes('mp-root'), '应包含根容器样式类名')
 
-const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge } = mod.__internals
+const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel } = mod.__internals
 render('MemorySettingsPage（直接调用）', React.createElement(MemorySettingsPage))
 
 // 侧边栏入口：整页容器必须自己滚动（main 槽位是 overflow:hidden 的列）。
@@ -174,6 +174,10 @@ render('InjectionCard 注入统计', React.createElement(InjectionCard, {
 }))
 
 render('UsagePanel 用量', React.createElement(UsagePanel, { api, lang: 'zh', boot, notify: noop }))
+render('PitfallPanel 踩坑笔记', React.createElement(PitfallPanel, {
+  api, lang: 'zh', notify: noop, onChanged: noop,
+}))
+render('DiffPanel 时间段变更', React.createElement(DiffPanel, { api, lang: 'zh', notify: noop }))
 render('ConsolidationPanel 固化', React.createElement(ConsolidationPanel, {
   api, lang: 'zh', boot, notify: noop, onChanged: noop,
 }))

@@ -81,6 +81,7 @@ export const NOTEBOOKS = [
   { id: 'memory', name: { zh: '记忆记事本', en: 'Memory notes' }, desc: { zh: '值得长期保留的事实与线索', en: 'Facts worth keeping' } },
   { id: 'daily', name: { zh: '日常记事本', en: 'Daily notes' }, desc: { zh: '按日期记录的工作日志', en: 'Dated work log' } },
   { id: 'asset', name: { zh: '资产记事本', en: 'Asset notes' }, desc: { zh: '路径、账号、配置等可复用资产', en: 'Paths, accounts and reusable assets' } },
+  { id: 'pitfall', name: { zh: '踩坑笔记', en: 'Pitfall notes' }, desc: { zh: '历史踩坑事件、根因与可复用的解决办法', en: 'Past pitfalls, root causes and reusable fixes' } },
 ]
 
 export const NOTEBOOK_IDS = NOTEBOOKS.map((notebook) => notebook.id)
@@ -298,6 +299,8 @@ export const DEFAULT_SETTINGS = {
     promoteAccessCount: 3,
     conflictThreshold: 0.82,
     auditKeep: 200,
+    // 变更历史独立于普通审计保留：diff 按时间段查询时不能只剩最近 200 条操作摘要。
+    diffKeep: 3000,
     autoPromote: false,
     rotateMinImportance: 0.3,
     maxItems: 100000,
@@ -803,6 +806,16 @@ export const SETTINGS_SCHEMA = [
         unit: { zh: '条', en: 'entries' },
         label: { zh: '审计日志保留', en: 'Audit log size' },
         hint: { zh: '保留最近多少条操作记录；0 表示不记录。', en: 'How many operations to keep; 0 disables.' },
+      },
+      {
+        path: 'maintenance.diffKeep',
+        type: 'number',
+        min: 0,
+        max: 10000,
+        step: 100,
+        unit: { zh: '条', en: 'changes' },
+        label: { zh: '变更历史保留', en: 'Change history size' },
+        hint: { zh: 'diff 查询使用的结构化变更记录上限；与审计日志分开保留。', en: 'Structured change entries kept for diff queries, retained separately from the audit log.' },
       },
       {
         path: 'maintenance.rotateMinImportance',

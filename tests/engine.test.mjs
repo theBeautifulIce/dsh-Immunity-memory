@@ -43,6 +43,7 @@ await test('默认设置可读且包含全部关键路径', async () => {
   assert.equal(settings.enabled, true)
   assert.equal(settings.write.minContentLength, DEFAULT_SETTINGS.write.minContentLength)
   assert.equal(settings.layers.L6, true)
+  assert.equal(settings.maintenance.diffKeep, 3000)
 })
 
 await test('设置 patch 只接受声明过的路径，非法值被忽略', async () => {
@@ -479,6 +480,48 @@ await test('落盘后重新加载数据仍在', async () => {
   const before = engine.stats().total
   engine.reload()
   assert.equal(engine.stats().total, before)
+})
+
+await test('结构化 diff 能按时间、类型和层筛选', async () => {
+  const created = await engine.createItem({
+    layer: 'L5',
+    title: 'diff 测试记忆',
+    content: '这是一条专门用于验证变更历史与筛选条件的记忆。',
+    ttlDays: 30,
+  }, 'agent')
+  await engine.updateItem(created.id, {
+    content: '这是一条专门用于验证变更历史与筛选条件的记忆，正文已经更新。',
+    ttlDays: 30,
+  }, 'agent')
+  const since = new Date(Date.now() - 60000).toISOString()
+  const result = await engine.diff({ since, entity: 'memory', layer: 'L5', itemId: created.id, limit: 20 })
+  assert.ok(result.total >= 2, '创建与更新都应进入 diff')
+  const update = result.changes.find((entry) => entry.operation === 'update')
+  assert.ok(update !== undefined)
+  assert.ok(update.changed.includes('content'))
+  assert.ok(update.summary.includes('正文'))
+  assert.ok(update.after.content.includes('已经更新'))
+  const notesOnly = await engine.diff({ since, entity: 'note', itemId: created.id })
+  assert.equal(notesOnly.total, 0)
+})
+
+await test('踩坑笔记可记录、检索并用于查重', async () => {
+  const recorded = await engine.recordPitfall({
+    problem: '构建时原生核心版本不匹配，握手失败',
+    cause: 'memory-core.exe 与 JS 协议版本号不一致',
+    solution: '重新运行 node scripts/build-native.mjs，并核对 protocol=1',
+    prevention: '升级插件后先跑原生核心自检，确认二进制版本',
+    tags: ['构建', '原生核心'],
+  }, 'agent')
+  assert.equal(recorded.item.notebook, 'pitfall')
+  assert.equal(recorded.item.type, 'note')
+  assert.equal(recorded.item.layer, 'L4')
+  assert.ok(recorded.item.pitfall.solution.includes('build-native.mjs'))
+  const found = await engine.searchPitfalls({ query: '原生核心 握手失败' })
+  assert.ok(found.items.some((item) => item.id === recorded.item.id))
+  const checked = await engine.checkPitfalls({ query: '原生核心 版本不匹配' })
+  assert.equal(checked.found, true)
+  assert.ok(checked.advice.includes('memory_pitfall record'))
 })
 
 await test('删除后条目消失且冲突引用被清理', async () => {

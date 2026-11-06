@@ -51,6 +51,10 @@ export const API_METHODS = [
   'templates.delete',
   'templates.apply',
   'audit.list',
+  'diff',
+  'pitfalls.list',
+  'pitfalls.record',
+  'pitfalls.check',
   'data.export',
   'data.import',
   'health',
@@ -193,6 +197,18 @@ function createMethods(engineOf, context = {}) {
     },
     'audit.list'(params) {
       return { audit: engine().auditList(params?.limit ?? 50) }
+    },
+    async diff(params) {
+      return engine().diff(params ?? {})
+    },
+    async 'pitfalls.list'(params) {
+      return engine().searchPitfalls(params ?? {})
+    },
+    async 'pitfalls.record'(params) {
+      return engine().recordPitfall(params ?? {}, 'user')
+    },
+    async 'pitfalls.check'(params) {
+      return engine().checkPitfalls(params ?? {})
     },
     'data.export'() {
       return { export: engine().exportData() }

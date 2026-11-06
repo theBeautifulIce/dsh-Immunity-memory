@@ -1,7 +1,7 @@
 # dsh-memory-plugin
 
-DSH（DeepSeek Harness）长期记忆插件：八层记忆体系、三本记事本、混合检索（FTS5 + 向量 + 图谱）、
-自动反思维护、记忆固化、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
+DSH（DeepSeek Harness）长期记忆插件：八层记忆体系、四本记事本、混合检索（FTS5 + 向量 + 图谱）、
+自动反思维护、记忆固化、踩坑笔记、变更 diff、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
 
 ## 安装
 
@@ -19,7 +19,7 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 
 | 文件 | 作用 |
 | --- | --- |
-| `index.js` | 宿主入口：注册 8 个工具、系统提示词段落、定时维护/自动备份、挂载 HTTP 接口、管理原生组件 |
+| `index.js` | 宿主入口：注册 10 个工具、系统提示词段落、定时维护/自动备份、挂载 HTTP 接口、管理原生组件 |
 | `client.js` | 客户端界面：侧边栏 `memory` 整页 + `settings.section` 入口 |
 | `lib/go-store.js` | Go 服务客户端：spawn、握手、增量同步、检索、备份、关闭 |
 | `lib/storage.js` | 存储选择：Go 服务 → Node SQLite → JSON |
@@ -27,7 +27,7 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 | `lib/search.js` | Node 回退检索：倒排 BM25 + 余弦 + 图谱 + 融合 |
 | `lib/sqlite.js` | Node 回退存储：迁移、向量表、备份 |
 | `lib/native.js` | Rust 核心客户端（JSON lines over stdio，自动 JS 兜底） |
-| `lib/settings.js` | 设置结构（schema）、八层与三本记事本定义、归一化与补丁合并 |
+| `lib/settings.js` | 设置结构（schema）、八层与四本记事本定义、归一化与补丁合并 |
 | `lib/api.js` | 设置页调用的 HTTP 接口（前缀 `/dsh-memory-plugin/api/v2`） |
 | `lib/tools.js` | agent 工具注册 |
 | `locale/*.json` | 插件列表里的标题与描述 |
@@ -54,7 +54,7 @@ Go 服务二进制缺失或启动失败时，`auto` 会自动回退并在日志/
 - `write.*`：正文字数、去重阈值、默认重要度、新建建议保鲜期；写入层由智能体按内容在可修改层中选择，不再有设置里的默认层；可修改层写入与修改必须显式给 `ttlDays`，这是硬约束
 - `prompt.*`：是否注入、内置/自定义模板、模板预算覆盖、条数与字数上限；自定义模板可新增、编辑、删除并随时切换
 - `consolidation.*`：固化开关、信号阈值、观察窗口、目标层（auto / L1 / L3）、最低重要度、单轮候选上限、是否自动应用；固化结果永久有效，不再设置固化后 TTL
-- `maintenance.*`：自动维护间隔、保鲜期、归档天数、轮转阈值、资源上限、反思提升阈值、冲突阈值
+- `maintenance.*`：自动维护间隔、保鲜期、归档天数、轮转阈值、资源上限、反思提升阈值、冲突阈值、普通审计与变更历史保留条数（`auditKeep` / `diffKeep`）
 - `storage.*`：引擎、目录、备份保留数、自动备份间隔
 - `performance.nativeCore`：是否启用 Rust 原生核心
 - `tools.enabled`：是否向模型暴露记忆工具

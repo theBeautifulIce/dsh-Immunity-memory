@@ -656,6 +656,8 @@ window.__ModuleLoader__.load({
       const tabs = [
         { id: 'memory', label: txt('记忆', 'Memories'), count: stats.memories ?? 0 },
         { id: 'note', label: txt('记事本', 'Notebooks'), count: stats.notes ?? 0 },
+        { id: 'pitfall', label: txt('踩坑', 'Pitfalls'), count: stats.byNotebook?.pitfall ?? 0 },
+        { id: 'diff', label: txt('变更', 'Changes') },
         { id: 'usage', label: txt('用量', 'Usage') },
         { id: 'consolidate', label: txt('固化', 'Consolidate'), count: boot.consolidation?.candidates?.length ?? 0 },
         { id: 'settings', label: txt('设置', 'Settings') },
@@ -706,6 +708,12 @@ window.__ModuleLoader__.load({
             notify,
             onSaved: refreshBoot,
           })
+          : null,
+        tab === 'pitfall'
+          ? h(PitfallPanel, { api, lang, notify, onChanged: refreshBoot })
+          : null,
+        tab === 'diff'
+          ? h(DiffPanel, { api, lang, notify })
           : null,
         tab === 'usage'
           ? h(UsagePanel, { api, lang, boot, notify })
@@ -1362,6 +1370,213 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // -------------------------------------------------------- 踩坑 / 变更 ----
+
+    function PitfallPanel({ api, lang, notify, onChanged }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const [query, setQuery] = useState('')
+      const [items, setItems] = useState([])
+      const [advice, setAdvice] = useState('')
+      const [loading, setLoading] = useState(false)
+      const [showForm, setShowForm] = useState(false)
+      const [form, setForm] = useState({ title: '', problem: '', cause: '', solution: '', prevention: '' })
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('pitfalls.list', { query, limit: 20 })
+          setItems(value.items ?? [])
+          setAdvice('')
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }, [api, query, notify])
+
+      useEffect(() => {
+        load()
+      }, [])
+
+      function field(key, value) {
+        setForm((current) => ({ ...current, [key]: value }))
+      }
+
+      async function record() {
+        if (form.problem.trim() === '' || form.solution.trim() === '') {
+          notify(txt('至少填写现象和解决办法', 'Problem and solution are required'), 'error')
+          return
+        }
+        setLoading(true)
+        try {
+          await api('pitfalls.record', { ...form, layer: 'L4' })
+          notify(txt('已记录踩坑笔记', 'Pitfall recorded'))
+          setForm({ title: '', problem: '', cause: '', solution: '', prevention: '' })
+          setShowForm(false)
+          await load()
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }
+
+      async function check() {
+        if (query.trim() === '') return
+        setLoading(true)
+        try {
+          const value = await api('pitfalls.check', { query, limit: 8 })
+          setItems(value.items ?? [])
+          setAdvice(value.advice ?? '')
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }
+
+      return h('div', { className: 'mp-panel' },
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-toolbar' },
+            h('input', {
+              className: 'mp-input is-grow',
+              placeholder: txt('搜索现象、错误信息或关键词…', 'Search symptoms, errors or keywords…'),
+              value: query,
+              onChange: (event) => setQuery(event.target.value),
+              onKeyDown: (event) => { if (event.key === 'Enter') check() },
+            }),
+            h('button', { type: 'button', className: 'mp-btn is-primary', disabled: loading, onClick: check },
+              txt('查找历史踩坑', 'Check pitfalls')),
+            h('button', { type: 'button', className: 'mp-btn', onClick: () => setShowForm((value) => !value) },
+              showForm ? txt('收起表单', 'Close form') : txt('记录新踩坑', 'Record pitfall'))),
+          h('div', { className: 'mp-hint' }, txt(
+            '踩坑笔记按「现象 / 根因 / 解决办法 / 预防」保存；智能体在排查问题前可用 memory_pitfall check 复用已有经验。',
+            'Pitfalls are stored as symptom / root cause / solution / prevention. Agents can call memory_pitfall check before debugging.')),
+          advice === '' ? null : h('div', { className: 'mp-hint' }, advice)),
+        showForm
+          ? h('div', { className: 'mp-card' },
+            h('div', { className: 'mp-card-title' }, txt('新增踩坑笔记', 'New pitfall')),
+            h('label', { className: 'mp-field' }, txt('标题（可选）', 'Title (optional)'),
+              h('input', { className: 'mp-input', value: form.title, onChange: (event) => field('title', event.target.value) })),
+            h('label', { className: 'mp-field' }, txt('现象 / 报错 *', 'Symptom / error *'),
+              h('textarea', { className: 'mp-textarea', rows: 3, value: form.problem, onChange: (event) => field('problem', event.target.value) })),
+            h('label', { className: 'mp-field' }, txt('根因', 'Root cause'),
+              h('textarea', { className: 'mp-textarea', rows: 2, value: form.cause, onChange: (event) => field('cause', event.target.value) })),
+            h('label', { className: 'mp-field' }, txt('解决办法 *', 'Solution *'),
+              h('textarea', { className: 'mp-textarea', rows: 3, value: form.solution, onChange: (event) => field('solution', event.target.value) })),
+            h('label', { className: 'mp-field' }, txt('如何预防', 'Prevention'),
+              h('textarea', { className: 'mp-textarea', rows: 2, value: form.prevention, onChange: (event) => field('prevention', event.target.value) })),
+            h('div', { className: 'mp-toolbar' },
+              h('button', { type: 'button', className: 'mp-btn is-primary', disabled: loading, onClick: record },
+                loading ? txt('保存中…', 'Saving…') : txt('保存踩坑笔记', 'Save pitfall')),
+              h('button', { type: 'button', className: 'mp-btn', onClick: () => setShowForm(false) }, txt('取消', 'Cancel'))))
+          : null,
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt(`踩坑记录 ${items.length} 条`, `${items.length} pitfalls`)),
+          items.length === 0
+            ? h('div', { className: 'mp-empty' }, txt('还没有匹配的踩坑笔记。', 'No matching pitfalls yet.'))
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+              items.map((item) => h('div', { key: item.id, className: 'mp-consolidate-row' },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                  h(LayerBadge, { item }),
+                  h('strong', null, item.title),
+                  h('span', { className: 'mp-hint' }, item.updatedAt ?? '')),
+                h('div', { className: 'mp-hint' }, `${txt('现象', 'Symptom')}：${item.pitfall?.problem ?? item.content}`),
+                h('div', { className: 'mp-hint' }, `${txt('解决办法', 'Solution')}：${item.pitfall?.solution ?? '—'}`),
+                item.pitfall?.cause ? h('div', { className: 'mp-hint' }, `${txt('根因', 'Cause')}：${item.pitfall.cause}`) : null,
+                item.pitfall?.prevention ? h('div', { className: 'mp-hint' }, `${txt('预防', 'Prevention')}：${item.pitfall.prevention}`) : null,
+                h('div', { className: 'mp-hint' }, `id: ${item.id}`)))))
+      )
+    }
+
+    function DiffPanel({ api, lang, notify }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const dateText = (offsetDays) => {
+        const date = new Date(Date.now() - offsetDays * 86400000)
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      }
+      const [since, setSince] = useState(() => dateText(7))
+      const [until, setUntil] = useState(() => dateText(0))
+      const [entity, setEntity] = useState('all')
+      const [layer, setLayer] = useState('')
+      const [operation, setOperation] = useState('')
+      const [includeContent, setIncludeContent] = useState(false)
+      const [result, setResult] = useState(null)
+      const [loading, setLoading] = useState(false)
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('diff', {
+            since: `${since}T00:00:00`,
+            until: `${until}T23:59:59`,
+            entity,
+            layer: layer === '' ? undefined : layer,
+            operation: operation === '' ? undefined : operation,
+            includeContent,
+            limit: 200,
+          })
+          setResult(value)
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }, [api, since, until, entity, layer, operation, includeContent, notify])
+
+      useEffect(() => {
+        load()
+      }, [])
+
+      const changes = result?.changes ?? []
+      return h('div', { className: 'mp-panel' },
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('时间段变更', 'Changes over time')),
+          h('div', { className: 'mp-toolbar' },
+            h('label', { className: 'mp-field' }, txt('开始', 'From'),
+              h('input', { className: 'mp-input', type: 'date', value: since, onChange: (event) => setSince(event.target.value) })),
+            h('label', { className: 'mp-field' }, txt('结束', 'To'),
+              h('input', { className: 'mp-input', type: 'date', value: until, onChange: (event) => setUntil(event.target.value) })),
+            h('label', { className: 'mp-field' }, txt('类型', 'Entity'),
+              h('select', { className: 'mp-select', value: entity, onChange: (event) => setEntity(event.target.value) },
+                h('option', { value: 'all' }, txt('全部', 'All')),
+                h('option', { value: 'memory' }, txt('记忆', 'Memories')),
+                h('option', { value: 'note' }, txt('笔记', 'Notes')))),
+            h('label', { className: 'mp-field' }, txt('记忆层', 'Layer'),
+              h('select', { className: 'mp-select', value: layer, onChange: (event) => setLayer(event.target.value) },
+                h('option', { value: '' }, txt('全部层', 'All layers')),
+                ['L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7'].map((id) => h('option', { key: id, value: id }, id)))),
+            h('label', { className: 'mp-field' }, txt('操作', 'Operation'),
+              h('select', { className: 'mp-select', value: operation, onChange: (event) => setOperation(event.target.value) },
+                h('option', { value: '' }, txt('全部操作', 'All operations')),
+                ['create', 'update', 'delete', 'bulk', 'consolidate'].map((id) => h('option', { key: id, value: id }, id)))),
+            h('label', { className: 'mp-field', style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } },
+              h('input', { type: 'checkbox', checked: includeContent, onChange: (event) => setIncludeContent(event.target.checked) }),
+              txt('完整正文', 'Full content')),
+            h('button', { type: 'button', className: 'mp-btn is-primary', disabled: loading, onClick: load },
+              loading ? txt('查询中…', 'Loading…') : txt('查询变更', 'Show changes'))),
+          result === null ? null : h('div', { className: 'mp-hint' },
+            `${result.range.since} → ${result.range.until} · ${txt('共', 'total')} ${result.total} ${txt('条', 'changes')}`
+            + ` · ${txt('保留', 'retention')} ${result.retention?.kept ?? 0}/${result.retention?.limit ?? 0}`)),
+        h('div', { className: 'mp-card' },
+          changes.length === 0
+            ? h('div', { className: 'mp-empty' }, txt('这个时间段没有变更记录。', 'No changes in this range.'))
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+              changes.map((change, index) => h('div', { key: `${change.itemId}-${change.at}-${index}`, className: 'mp-consolidate-row' },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                  h('span', { className: 'mp-chip' }, change.operation),
+                  h('strong', null, change.title),
+                  h('span', { className: 'mp-hint' }, `${change.at} · ${change.actor}`),
+                  change.layer ? h('span', { className: 'mp-chip' }, `${change.layer}${change.notebook ? `·${change.notebook}` : ''}`) : null),
+                h('div', { className: 'mp-hint' }, change.summary ?? ''),
+                h('details', null,
+                  h('summary', { className: 'mp-hint' }, txt('查看变更前后', 'Before / after')),
+                  h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '11px' } },
+                    JSON.stringify({ before: change.before, after: change.after }, null, 2)))))))
+      )
+    }
+
     // ------------------------------------------------------------ 设置页 ----
 
     function SettingsPanel({ api, lang, boot, notify, onSaved }) {
@@ -1837,7 +2052,7 @@ window.__ModuleLoader__.load({
       __internals: {
         MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
         MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
-        InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge,
+        InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel,
       },
     }
   },

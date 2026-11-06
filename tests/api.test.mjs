@@ -188,10 +188,31 @@ try {
     assert.equal(deleted.body.value.list.some((entry) => entry.id === id), false)
   })
 
+  await test('pitfalls.record / check 可记录并检索踩坑', async () => {
+    const recorded = await call('pitfalls.record', {
+      problem: '接口测试：重复安装插件后接口路径冲突',
+      cause: '旧前缀路由仍被上一代实例占用',
+      solution: '改用带版本号的 API_PATH，并保留旧前缀兼容探测',
+      prevention: '升级时同时验证新旧前缀',
+    })
+    assert.equal(recorded.body.value.item.notebook, 'pitfall')
+    const checked = await call('pitfalls.check', { query: '接口路径冲突 重复安装' })
+    assert.equal(checked.body.value.found, true)
+    assert.ok(checked.body.value.items.length >= 1)
+  })
+
+  await test('diff 返回结构化变更与时间范围', async () => {
+    const since = new Date(Date.now() - 60000).toISOString()
+    const { body } = await call('diff', { since, entity: 'all', limit: 20 })
+    assert.ok(body.value.total >= 1)
+    assert.ok(Array.isArray(body.value.changes))
+    assert.equal(body.value.range.since, since)
+  })
+
   await test('audit.list 记录过前面的写操作', async () => {
     const { body } = await call('audit.list', { limit: 10 })
     assert.ok(body.value.audit.length >= 1)
-    assert.ok(body.value.audit.some((entry) => entry.action === 'create'))
+    assert.ok(body.value.audit.some((entry) => entry.kind === 'change'))
   })
 
   await test('data.export / data.import 往返', async () => {

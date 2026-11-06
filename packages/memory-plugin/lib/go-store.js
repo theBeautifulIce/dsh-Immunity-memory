@@ -51,6 +51,10 @@ export function resolveDatabasePath(ctx, settings) {
 }
 
 /** 条目签名：与 sqlite 回退层保持同样的增量判断口径。 */
+function auditSignature(entry) {
+  return `${entry.at}|${entry.action}|${entry.change?.itemId ?? ''}|${entry.change?.operation ?? ''}`
+}
+
 function itemSignature(item) {
   return [
     item.updatedAt ?? '',
@@ -258,7 +262,7 @@ export function createGoStore(ctx, log, getSettings) {
       const snapshot = await request('/snapshot', {})
       const state = snapshot.state
       knownItems = new Map((state.items ?? []).map((item) => [item.id, itemSignature(item)]))
-      knownAudit = (state.audit ?? []).map((entry) => `${entry.at}|${entry.action}`)
+      knownAudit = (state.audit ?? []).map(auditSignature)
       knownSettings = JSON.stringify(state.settings ?? {})
       knownMeta = JSON.stringify(state.meta ?? {})
       knownCreatedAt = state.createdAt ?? ''
@@ -302,7 +306,7 @@ export function createGoStore(ctx, log, getSettings) {
         knownCreatedAt = state.createdAt ?? ''
       }
       const audit = Array.isArray(state.audit) ? state.audit : []
-      const nextAudit = audit.map((entry) => `${entry.at}|${entry.action}`)
+      const nextAudit = audit.map(auditSignature)
       const prefixMatch = nextAudit.length >= knownAudit.length
         && knownAudit.every((entry, index) => nextAudit[index] === entry)
       if (prefixMatch) {

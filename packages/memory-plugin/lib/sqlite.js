@@ -376,7 +376,7 @@ export function createSqliteStore(ctx, log, getSettings) {
         }
         syncRelationships(db, items)
         appendAudit(db, Array.isArray(state.audit) ? state.audit : [], knownAudit)
-        knownAudit = (state.audit ?? []).map((entry) => `${entry.at}|${entry.action}`)
+        knownAudit = (state.audit ?? []).map(auditSignature)
         db.exec('COMMIT')
         return new Date().toISOString()
       } catch (error) {
@@ -568,12 +568,25 @@ function readAll(database) {
     const related = conflicts.get(item.id) ?? []
     if (related.length > 0) item.conflicts = [...new Set([...(item.conflicts ?? []), ...related])]
   }
-  const audit = database.prepare('SELECT * FROM changelog ORDER BY timestamp ASC').all().map((row) => ({
-    at: row.timestamp,
-    action: row.operation,
-    detail: row.reason ?? row.change_details ?? '',
-    actor: row.triggered_by ?? 'system',
-  }))
+  const audit = database.prepare('SELECT * FROM changelog ORDER BY timestamp ASC').all().map((row) => {
+    const change = parseChangeDetails(row.change_details)
+    if (change !== null && typeof change === 'object' && typeof change.itemId === 'string') {
+      return {
+        at: row.timestamp,
+        action: 'change',
+        kind: 'change',
+        detail: row.reason ?? '',
+        actor: row.triggered_by ?? 'system',
+        change,
+      }
+    }
+    return {
+      at: row.timestamp,
+      action: row.operation,
+      detail: row.reason ?? row.change_details ?? '',
+      actor: row.triggered_by ?? 'system',
+    }
+  })
   return {
     version: readConfigValue(database, 'version') ?? SCHEMA_VERSION,
     createdAt: readConfigValue(database, 'createdAt') ?? new Date().toISOString(),
@@ -805,9 +818,13 @@ function syncRelationships(database, items) {
   }
 }
 
+function auditSignature(entry) {
+  return `${entry.at}|${entry.action}|${entry.change?.itemId ?? ''}|${entry.change?.operation ?? ''}`
+}
+
 function appendAudit(database, audit, knownAudit) {
   const unchanged = audit.length >= knownAudit.length
-    && knownAudit.every((entry, index) => audit[index] !== undefined && `${audit[index].at}|${audit[index].action}` === entry)
+    && knownAudit.every((entry, index) => audit[index] !== undefined && auditSignature(audit[index]) === entry)
   if (unchanged) {
     for (const entry of audit.slice(knownAudit.length)) insertAudit(database, entry)
     return
@@ -817,15 +834,18 @@ function appendAudit(database, audit, knownAudit) {
 }
 
 function insertAudit(database, entry) {
+  const change = entry.kind === 'change' && entry.change !== null && typeof entry.change === 'object'
+    ? JSON.stringify(entry.change)
+    : null
   database.prepare(
     'INSERT INTO changelog (id, timestamp, operation, layer, target_id, change_details, reason, triggered_by, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).run(
     randomUUID(),
     entry.at ?? new Date().toISOString(),
     entry.action ?? 'unknown',
-    '-',
-    '-',
-    null,
+    entry.change?.layer ?? '-',
+    entry.change?.itemId ?? '-',
+    change,
     entry.detail ?? '',
     entry.actor ?? 'system',
     null,
@@ -872,6 +892,16 @@ function safeJson(text, fallback) {
     return Array.isArray(parsed) ? parsed : fallback
   } catch {
     return fallback
+  }
+}
+
+function parseChangeDetails(text) {
+  if (text === null || text === undefined || text === '') return null
+  try {
+    const parsed = JSON.parse(text)
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
   }
 }
 

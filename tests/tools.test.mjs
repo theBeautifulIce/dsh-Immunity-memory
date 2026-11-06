@@ -156,10 +156,10 @@ async function test(title, run) {
 
 const dispose = registerTools(fakeCtx, engine, log)
 
-await test('注册了全部 8 个工具', () => {
+await test('注册了全部 10 个工具', () => {
   assert.deepEqual([...registered.keys()].sort(), [
-    'memory_consolidate', 'memory_forget', 'memory_get', 'memory_search',
-    'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
+    'memory_consolidate', 'memory_diff', 'memory_forget', 'memory_get', 'memory_pitfall',
+    'memory_search', 'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
   ])
 })
 
@@ -195,6 +195,31 @@ await test('memory_update 改标题', async () => {
   const value = await def.execute({ id: found.items[0].id, importance: 9, ttlDays: 30 }, {})
   assert.equal(value.item.importance, 9)
   assert.ok(def.output.render({ id: value.item.id }, value)[0].text.includes('已更新'))
+})
+
+await test('memory_pitfall 记录后可检索并渲染解决办法', async () => {
+  const def = registered.get('memory_pitfall')
+  const recorded = await def.execute({
+    action: 'record',
+    problem: '工具测试：SQLite 数据库被占用无法删除',
+    cause: '仍有连接没有关闭',
+    solution: '先关闭存储与引擎，再重试删除临时目录',
+    prevention: '测试结束统一释放 store',
+  }, {})
+  assert.equal(recorded.item.notebook, 'pitfall')
+  const checked = await def.execute({ action: 'check', query: '数据库被占用 无法删除' }, {})
+  assert.equal(checked.found, true)
+  const rendered = def.output.render({ action: 'check' }, checked)[0].text
+  assert.ok(rendered.includes('先关闭存储'))
+})
+
+await test('memory_diff 记录写入并渲染时间线', async () => {
+  const def = registered.get('memory_diff')
+  const value = await def.execute({ since: new Date(Date.now() - 60000).toISOString(), limit: 50 }, {})
+  assert.ok(value.total >= 1)
+  assert.ok(Array.isArray(value.changes))
+  const rendered = def.output.render({}, value)[0].text
+  assert.ok(rendered.includes('变更'))
 })
 
 await test('memory_stats 统计与渲染一致', async () => {

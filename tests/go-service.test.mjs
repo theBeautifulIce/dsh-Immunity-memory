@@ -168,6 +168,28 @@ try {
     assert.ok(snapshot.state.audit.some((entry) => entry.action === 'create'))
   })
 
+  await test('结构化变更审计写入 changelog 并可读回', async () => {
+    await api('/audit/append', {
+      entries: [{
+        at: now,
+        action: 'change',
+        kind: 'change',
+        detail: 'update 记忆 m1',
+        actor: 'agent',
+        change: {
+          operation: 'update', entity: 'memory', itemId: 'm1', title: '构建缓存',
+          layer: 'L4', notebook: null, changed: ['title'],
+          before: { title: '构建缓存' }, after: { title: '构建缓存（新）' }, reason: 'test',
+        },
+      }],
+    })
+    const snapshot = await api('/snapshot')
+    const entry = snapshot.state.audit.find((candidate) => candidate.kind === 'change')
+    assert.equal(entry.change.itemId, 'm1')
+    assert.equal(entry.change.layer, 'L4')
+    assert.equal(entry.change.changed[0], 'title')
+  })
+
   await test('删除条目会清掉索引', async () => {
     await api('/items/delete', { ids: ['m2'] })
     const stats = await api('/stats')

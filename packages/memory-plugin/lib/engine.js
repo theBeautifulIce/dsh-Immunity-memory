@@ -44,6 +44,11 @@ const MAX_TAGS = 24
 const MAX_TAG_LENGTH = 48
 const MAX_CONTENT = 200000
 const DEDUPE_SCAN_LIMIT = 1200
+// 变更快照只保留可审阅的字段；正文过长时保留开头并在 UI/API 标记截断。
+const MAX_CHANGE_CONTENT = 4000
+const MAX_CHANGE_TEXT = 8000
+const MAX_CHANGE_AUDIT = 12000
+const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt']
 
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
 
@@ -106,13 +111,9 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const audit = Array.isArray(raw.audit) ? raw.audit : []
     next.audit = audit
       .filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.action === 'string')
-      .slice(-5000)
-      .map((entry) => ({
-        at: isoOr(entry.at, new Date(0).toISOString()),
-        action: String(entry.action).slice(0, 60),
-        detail: typeof entry.detail === 'string' ? entry.detail.slice(0, 400) : '',
-        actor: typeof entry.actor === 'string' ? entry.actor.slice(0, 40) : 'system',
-      }))
+      .slice(-MAX_CHANGE_AUDIT)
+      .map(normalizeAuditEntry)
+      .filter((entry) => entry !== undefined)
     return next
   }
 
@@ -239,15 +240,98 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
   }
 
+  /**
+   * 审计与变更历史共用一条持久化通道：
+   * - 普通操作只保留 `at/action/detail/actor`；
+   * - 结构化变更额外带 `kind:'change'` 与 `change` 快照，用于 diff。
+   *
+   * 两者分开限流：普通审计默认 200 条，变更历史默认 3000 条，避免 compact
+   * 把用户要查的时间段整段裁掉。旧版本没有 kind 的审计记录完全兼容。
+   */
+  function trimAudit(current) {
+    const active = settings()
+    if (active.privacy.auditLog === false) {
+      current.audit = []
+      return
+    }
+    const auditKeep = Math.max(0, clampInt(active.maintenance.auditKeep, 0, 5000, 200))
+    const diffKeep = Math.max(0, clampInt(active.maintenance.diffKeep, 0, 10000, 3000))
+    const regular = current.audit.filter((entry) => entry.kind !== 'change').slice(-auditKeep)
+    const changes = current.audit.filter((entry) => entry.kind === 'change').slice(-diffKeep)
+    current.audit = [...regular, ...changes].sort((left, right) => left.at.localeCompare(right.at))
+  }
+
   function audit(action, detail, actor = 'system') {
     const current = currentState()
-    const keep = settings().maintenance.auditKeep
-    if (!settings().privacy.auditLog || keep <= 0) {
+    const active = settings()
+    if (active.privacy.auditLog === false) {
       current.audit = []
       return
     }
     current.audit.push({ at: new Date().toISOString(), action, detail: truncate(detail, 400), actor })
-    if (current.audit.length > keep) current.audit = current.audit.slice(-keep)
+    trimAudit(current)
+  }
+
+  /** 记录一条可 diff 的条目变更；before/after 只保存发生变化的字段。 */
+  function recordChange(operation, before, after, actor = 'system', options = {}) {
+    const current = currentState()
+    const active = settings()
+    if (active.privacy.auditLog === false || clampInt(active.maintenance.diffKeep, 0, 10000, 3000) <= 0) return
+    const changed = before === null || before === undefined
+      ? CHANGE_FIELDS
+      : after === null || after === undefined
+        ? CHANGE_FIELDS
+        : CHANGE_FIELDS.filter((field) => !sameValue(before[field], after[field]))
+    if (changed.length === 0 && options.force !== true) return
+    const source = after ?? before
+    if (source === undefined || source === null) return
+    const entry = {
+      at: new Date().toISOString(),
+      action: 'change',
+      kind: 'change',
+      detail: truncate(`[${operation}] ${source.layer ?? ''} ${source.title ?? source.id ?? ''}`.trim(), 400),
+      actor,
+      change: {
+        operation,
+        entity: source.type === 'note' ? 'note' : 'memory',
+        itemId: String(source.id),
+        title: String(source.title ?? ''),
+        layer: String(source.layer ?? ''),
+        notebook: source.notebook ?? null,
+        changed,
+        before: before === null || before === undefined ? null : changeSnapshot(before, changed),
+        after: after === null || after === undefined ? null : changeSnapshot(after, changed),
+        reason: typeof options.reason === 'string' ? truncate(options.reason, 400) : '',
+      },
+    }
+    current.audit.push(entry)
+    trimAudit(current)
+  }
+
+  /** 变更快照：只保留发生变化的字段，正文超限时截断并标记。 */
+  function changeSnapshot(item, changed) {
+    const snapshot = {}
+    for (const field of changed) {
+      if (!CHANGE_FIELDS.includes(field)) continue
+      if (field === 'content') {
+        const text = String(item.content ?? '')
+        snapshot.content = truncate(text, MAX_CHANGE_CONTENT)
+        snapshot.contentLength = text.length
+        snapshot.contentTruncated = text.length > MAX_CHANGE_CONTENT
+      } else if (field === 'tags') {
+        snapshot.tags = Array.isArray(item.tags) ? item.tags.slice(0, 24) : []
+      } else if (field === 'title') {
+        snapshot.title = truncate(item.title, MAX_CHANGE_TEXT)
+      } else if (field === 'notebook') {
+        snapshot.notebook = item.notebook ?? null
+      } else {
+        snapshot[field] = item[field] ?? null
+      }
+    }
+    snapshot.id = item.id
+    snapshot.type = item.type
+    snapshot.version = item.version
+    return snapshot
   }
 
   // ------------------------------------------------------- 用量 / 强化信号 ----
@@ -531,6 +615,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       throw createError('NOT_CANDIDATE', `条目 ${id} 不在固化候选状态，请先扫描强化信号`)
     }
     const fromLayer = item.layer
+    const beforeChange = clone(item)
     item.layer = targetLayer
     item.ttlDays = null
     item.expiresAt = null
@@ -550,6 +635,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       score: (current.meta.reinforcement?.[id]?.count ?? 0) * (1 + item.importance / 10),
     }
     indexItem(item)
+    recordChange('consolidate', beforeChange, item, actor, { reason: `永久固化 ${fromLayer} → ${targetLayer}${note === '' ? '' : `；${note}`}` })
     audit('consolidation.approved', `${id} ${fromLayer} → ${targetLayer} ${item.title}（永久固化${note === '' ? '' : `；${note}`}）`, actor)
     await persist()
     return { decision: 'approve', record: records[id], item: decorate(item) }
@@ -695,6 +781,180 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     return item === undefined ? undefined : decorate(item)
   }
 
+  /**
+   * 时间段变更查询。数据来自结构化审计记录（kind='change'），
+   * 可按实体类型、记忆层、条目 id 和时间范围过滤；默认最近 7 天。
+   */
+  async function diff(options = {}) {
+    const current = await ensureLoaded()
+    const active = settings()
+    const now = Date.now()
+    const since = parseTimeOption(options.since, now - 7 * 86400000)
+    const until = parseTimeOption(options.until, now)
+    if (since === undefined || until === undefined) {
+      throw createError('INVALID_RANGE', 'since/until 必须是 ISO 时间或可解析的日期')
+    }
+    if (since > until) throw createError('INVALID_RANGE', 'since 不能晚于 until')
+    const entity = ['memory', 'note', 'all'].includes(options.entity) ? options.entity : 'all'
+    const layer = LAYER_IDS.includes(options.layer) ? options.layer : undefined
+    const itemId = typeof options.itemId === 'string' && options.itemId !== '' ? options.itemId : undefined
+    const operation = typeof options.operation === 'string' && options.operation !== '' ? options.operation : undefined
+    const limit = clampInt(options.limit, 1, 200, 50)
+    const offset = clampInt(options.offset, 0, Number.MAX_SAFE_INTEGER, 0)
+    const from = new Date(since).toISOString()
+    const to = new Date(until).toISOString()
+    const all = current.audit
+      .filter((entry) => entry.kind === 'change' && entry.change !== undefined)
+      .filter((entry) => entry.at >= from && entry.at <= to)
+      .filter((entry) => entity === 'all' || entry.change.entity === entity)
+      .filter((entry) => layer === undefined || entry.change.layer === layer)
+      .filter((entry) => itemId === undefined || entry.change.itemId === itemId)
+      .filter((entry) => operation === undefined || entry.change.operation === operation)
+      .sort((left, right) => right.at.localeCompare(left.at))
+    const counts = {
+      operation: {},
+      entity: { memory: 0, note: 0 },
+      layer: Object.fromEntries(LAYER_IDS.map((id) => [id, 0])),
+    }
+    for (const entry of all) {
+      const change = entry.change
+      counts.operation[change.operation] = (counts.operation[change.operation] ?? 0) + 1
+      counts.entity[change.entity] = (counts.entity[change.entity] ?? 0) + 1
+      if (change.layer !== '') counts.layer[change.layer] = (counts.layer[change.layer] ?? 0) + 1
+    }
+    const page = all.slice(offset, offset + limit).map((entry) => ({
+      at: entry.at,
+      actor: entry.actor,
+      summary: changeSummary(entry.change),
+      ...entry.change,
+      before: trimChangeSnapshot(entry.change.before, options.includeContent === true),
+      after: trimChangeSnapshot(entry.change.after, options.includeContent === true),
+    }))
+    const changes = current.audit.filter((entry) => entry.kind === 'change')
+    return {
+      range: { since: from, until: to },
+      filters: { entity, layer: layer ?? null, itemId: itemId ?? null, operation: operation ?? null },
+      total: all.length,
+      offset,
+      limit,
+      counts,
+      changes: page,
+      retention: {
+        limit: Math.max(0, clampInt(active.maintenance.diffKeep, 0, 10000, 3000)),
+        kept: changes.length,
+        oldest: changes[0]?.at ?? null,
+        newest: changes[changes.length - 1]?.at ?? null,
+      },
+    }
+  }
+
+  /** 解析踩坑 Markdown 的四个固定段落；缺失字段返回空串。 */
+  function parsePitfallContent(content) {
+    const text = String(content ?? '')
+    const section = (name) => {
+      const pattern = new RegExp(`(?:^|\\n)##\\s*${name}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`)
+      return pattern.exec(text)?.[1]?.trim() ?? ''
+    }
+    return {
+      problem: section('现象'),
+      cause: section('根因'),
+      solution: section('解决办法'),
+      prevention: section('预防'),
+    }
+  }
+
+  function decoratePitfall(item) {
+    return { ...decorate(item), pitfall: parsePitfallContent(item.content) }
+  }
+
+  /** 新增一条踩坑笔记；内容统一成四段，便于人和智能体稳定读取。 */
+  async function recordPitfall(input = {}, actor = 'agent') {
+    const active = settings()
+    assertEnabled(active)
+    const problem = truncate(String(input.problem ?? input.title ?? '').trim(), MAX_CONTENT)
+    const cause = truncate(String(input.cause ?? '').trim(), MAX_CONTENT)
+    const solution = truncate(String(input.solution ?? '').trim(), MAX_CONTENT)
+    const prevention = truncate(String(input.prevention ?? '').trim(), MAX_CONTENT)
+    if (problem === '' || solution === '') {
+      throw createError('PITFALL_REQUIRED', '踩坑笔记至少需要 problem（现象）和 solution（解决办法）')
+    }
+    const title = truncate(String(input.title ?? problem).trim(), 120) || '未命名踩坑'
+    const content = [
+      '## 现象',
+      problem,
+      '',
+      '## 根因',
+      cause === '' ? '待补充。' : cause,
+      '',
+      '## 解决办法',
+      solution,
+      '',
+      '## 预防',
+      prevention === '' ? '待补充。' : prevention,
+    ].join('\n')
+    const layer = input.layer === undefined ? 'L4' : normalizeLayer(input.layer)
+    const item = await createItem({
+      type: 'note',
+      notebook: 'pitfall',
+      layer,
+      title,
+      content,
+      tags: ['踩坑', ...(Array.isArray(input.tags) ? input.tags : [])],
+      importance: input.importance ?? 7,
+      pinned: input.pinned === true,
+      sessionId: input.sessionId,
+      workspace: input.workspace,
+    }, actor)
+    return { item: decoratePitfall(item), duplicateOf: item.duplicateOf ?? null }
+  }
+
+  /** 查踩坑：query 为空时按最近更新列出；有 query 时走混合检索。 */
+  async function searchPitfalls(options = {}) {
+    const active = settings()
+    const limit = clampInt(options.limit, 1, 50, 10)
+    const query = typeof options.query === 'string' ? options.query.trim() : ''
+    if (query === '') {
+      const result = listItems({ type: 'note', notebook: 'pitfall', status: 'usable', limit, sort: 'updated' })
+      return {
+        query,
+        total: result.total,
+        items: result.items.map(decoratePitfall),
+      }
+    }
+    const result = await searchItems({
+      ...options,
+      query,
+      type: 'note',
+      notebook: 'pitfall',
+      status: 'usable',
+      limit,
+      actor: options.actor ?? 'agent',
+    })
+    return {
+      query,
+      total: result.total,
+      items: result.items.map(decoratePitfall),
+      tookMs: result.tookMs,
+      usage: result.usage,
+    }
+  }
+
+  /** 智能体写入前查重：返回已有踩坑及解决办法，避免重复踩同一个坑。 */
+  async function checkPitfalls(input = {}) {
+    const query = typeof input.query === 'string' ? input.query.trim() : ''
+    if (query === '') throw createError('QUERY_REQUIRED', 'check 需要 query（当前任务/错误现象）')
+    const result = await searchPitfalls({ query, limit: input.limit ?? 5 })
+    return {
+      query,
+      found: result.items.length > 0,
+      total: result.total,
+      items: result.items,
+      advice: result.items.length === 0
+        ? '没有找到历史踩坑记录；遇到新问题并解决后，用 memory_pitfall record 记录下来。'
+        : '先复用这些历史解决办法；如果仍不适用，解决新问题后用 memory_pitfall record 补充。',
+    }
+  }
+
   // ---------------------------------------------------------------- 写入 ----
 
   async function createItem(input = {}, actor = 'user') {
@@ -757,6 +1017,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     indexItem(item)
     detectConflicts(current, item, active)
     audit('create', `${item.layer}/${item.type} ${item.title}`, actor)
+    recordChange('create', null, item, actor)
     current.meta.writes = (current.meta.writes ?? 0) + 1
     await persist()
     return decorate(item)
@@ -768,6 +1029,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const index = current.items.findIndex((candidate) => candidate.id === id)
     if (index < 0) throw createError('NOT_FOUND', `找不到条目 ${id}`)
     const before = current.items[index]
+    const beforeChange = clone(before)
     assertLayerWritable(active, before.layer)
     const next = { ...before }
     if (patch.title !== undefined) next.title = truncate(String(patch.title).trim(), MAX_TITLE) || before.title
@@ -808,6 +1070,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     indexItem(current.items[index])
     detectConflicts(current, current.items[index], active)
     audit('update', `${current.items[index].layer}/${current.items[index].title}`, actor)
+    recordChange('update', beforeChange, current.items[index], actor)
     await persist()
     return decorate(current.items[index])
   }
@@ -818,6 +1081,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const wanted = new Set((Array.isArray(ids) ? ids : [ids]).filter((id) => typeof id === 'string'))
     if (wanted.size === 0) return { deleted: 0 }
     const removed = []
+    const removedItems = []
     current.items = current.items.filter((item) => {
       if (!wanted.has(item.id)) return true
       if (layerInfo(item.layer).immutable && !active.write.allowImmutableEdit) {
@@ -825,6 +1089,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         return true
       }
       removed.push(item.id)
+      removedItems.push(clone(item))
       return false
     })
     for (const item of current.items) {
@@ -834,6 +1099,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (removed.length > 0) {
       for (const id of removed) unindexItem(id)
       pruneMetaFor(current.items.map((item) => item.id))
+      for (const item of removedItems) recordChange('delete', item, null, actor)
       audit('delete', `删除 ${removed.length} 条：${removed.slice(0, 5).join(', ')}`, actor)
       await persist()
     }
@@ -854,6 +1120,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (!wanted.has(item.id)) continue
       if (layerInfo(item.layer).immutable && !active.write.allowImmutableEdit) continue
       const before = changed
+      const beforeChange = clone(item)
       if (action === 'archive' && item.status !== 'archived') {
         item.status = 'archived'
         changed += 1
@@ -900,6 +1167,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         }
         item.updatedAt = new Date().toISOString()
         item.version = (item.version ?? 1) + 1
+        recordChange('bulk', beforeChange, item, actor, { reason: action })
       }
     }
     if (changed > 0) {
@@ -1509,6 +1777,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     layers: () => LAYERS,
     notebooks: () => NOTEBOOK_LIST,
     auditList: (limit = 50) => currentState().audit.slice(-clampInt(limit, 1, 1000, 50)).reverse(),
+    diff,
+    searchPitfalls,
+    recordPitfall,
+    checkPitfalls,
     meta: () => currentState().meta,
     injectionStats,
     usageStats,
@@ -1675,6 +1947,92 @@ function toImportanceInput(item) {
   }
 }
 
+/** since/until 同时接受 ISO 时间、日期串和毫秒时间戳；非法返回 undefined。 */
+function parseTimeOption(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const parsed = Date.parse(String(value))
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function changeSummary(change) {
+  const labels = change.changed.length === 0
+    ? '无字段变化'
+    : change.changed.map((field) => (field === 'content' ? '正文' : field)).join('/')
+  return `${change.operation} ${change.entity === 'note' ? '笔记' : '记忆'}「${change.title}」· ${labels}`
+}
+
+/** 不含正文的 diff 列表默认只给预览，避免一次返回数百 KB。 */
+function trimChangeSnapshot(snapshot, includeContent) {
+  if (snapshot === null || snapshot === undefined) return null
+  if (includeContent === true || typeof snapshot.content !== 'string' || snapshot.content.length <= 240) return snapshot
+  return { ...snapshot, content: `${snapshot.content.slice(0, 240)}…`, contentPreview: true }
+}
+
+function sameValue(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) return JSON.stringify(left ?? []) === JSON.stringify(right ?? [])
+  return left === right
+}
+
+/** 恢复审计行；旧记录没有 kind/change 时保持原样。 */
+function normalizeAuditEntry(entry) {
+  const base = {
+    at: isoOr(entry.at, new Date(0).toISOString()),
+    action: truncate(String(entry.action), 60),
+    detail: typeof entry.detail === 'string' ? truncate(entry.detail, 400) : '',
+    actor: typeof entry.actor === 'string' ? truncate(entry.actor, 40) : 'system',
+  }
+  if (entry.kind !== 'change' || entry.change === null || typeof entry.change !== 'object') return base
+  const change = normalizeChangeRecord(entry.change)
+  return change === undefined ? base : { ...base, kind: 'change', change }
+}
+
+/** 只接受 diff 需要的显式字段，避免把任意磁盘 JSON 带进前端。 */
+function normalizeChangeRecord(raw) {
+  if (raw === null || typeof raw !== 'object' || typeof raw.itemId !== 'string') return undefined
+  const changed = Array.isArray(raw.changed)
+    ? raw.changed.filter((field) => CHANGE_FIELDS.includes(field)).slice(0, CHANGE_FIELDS.length)
+    : []
+  return {
+    operation: truncate(String(raw.operation ?? 'update'), 30),
+    entity: raw.entity === 'note' ? 'note' : 'memory',
+    itemId: truncate(raw.itemId, 64),
+    title: truncate(String(raw.title ?? ''), 240),
+    layer: LAYER_IDS.includes(raw.layer) ? raw.layer : '',
+    notebook: NOTEBOOK_IDS.includes(raw.notebook) ? raw.notebook : null,
+    changed,
+    before: normalizeChangeSnapshot(raw.before),
+    after: normalizeChangeSnapshot(raw.after),
+    reason: truncate(String(raw.reason ?? ''), 400),
+  }
+}
+
+function normalizeChangeSnapshot(raw) {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null
+  const out = {
+    id: truncate(String(raw.id ?? ''), 64),
+    type: raw.type === 'note' ? 'note' : 'memory',
+    version: clampInt(raw.version, 1, Number.MAX_SAFE_INTEGER, 1),
+  }
+  for (const field of CHANGE_FIELDS) {
+    if (!(field in raw)) continue
+    if (field === 'content') {
+      out.content = truncate(String(raw.content ?? ''), MAX_CHANGE_CONTENT)
+      out.contentLength = clampInt(raw.contentLength, 0, Number.MAX_SAFE_INTEGER, out.content.length)
+      out.contentTruncated = raw.contentTruncated === true
+    } else if (field === 'tags') {
+      out.tags = Array.isArray(raw.tags) ? raw.tags.filter((tag) => typeof tag === 'string').slice(0, 24) : []
+    } else if (field === 'notebook') {
+      out.notebook = NOTEBOOK_IDS.includes(raw.notebook) ? raw.notebook : null
+    } else if (field === 'title') {
+      out.title = truncate(String(raw.title ?? ''), 240)
+    } else {
+      out[field] = raw[field]
+    }
+  }
+  return out
+}
+
 function normalizeItem(raw) {
   if (raw === null || typeof raw !== 'object') return undefined
   const layer = LAYER_IDS.includes(raw.layer) ? raw.layer : 'L5'
@@ -1823,6 +2181,8 @@ export const TOOL_NAMES = [
   'memory_stats',
   'memory_usage',
   'memory_consolidate',
+  'memory_pitfall',
+  'memory_diff',
 ]
 
 // 记事本列表在模块初始化后填充（NOTEBOOKS 来自 settings.js）。

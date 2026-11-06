@@ -207,6 +207,72 @@ const consolidateOutput = {
   },
 }
 
+const pitfallOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string' },
+      item: { oneOf: [itemSchema, { type: 'null' }] },
+      items: { type: 'array', items: itemSchema },
+      total: { type: 'number' },
+      found: { type: 'boolean' },
+      query: { type: 'string' },
+      advice: { type: 'string' },
+    },
+    required: [],
+  },
+  render(args, value) {
+    const action = String(args?.action ?? 'search')
+    if (action === 'record') {
+      const item = value?.item
+      return text(item === undefined || item === null
+        ? '踩坑笔记未保存。'
+        : `已记录踩坑「${item.title}」到 ${item.layer}（${item.layerName}），id: ${item.id}。`)
+    }
+    if (action === 'check') {
+      const items = value?.items ?? []
+      if (value?.found !== true) return text(`没有找到相关历史踩坑。\n${value?.advice ?? ''}`.trim())
+      return text(`找到 ${items.length} 条相关踩坑，先复用已有解决办法：\n`
+        + items.map((item, index) => `${index + 1}. ${item.title}\n   现象：${clip(item.pitfall?.problem ?? item.content, 160)}\n   解决：${clip(item.pitfall?.solution ?? '', 220)}\n   id: ${item.id}`).join('\n'))
+    }
+    const items = value?.items ?? []
+    if (items.length === 0) return text(`没有找到与「${String(args?.query ?? '')}」相关的踩坑笔记。`)
+    return text(`踩坑笔记 ${value?.total ?? items.length} 条，显示 ${items.length} 条：\n`
+      + items.map((item, index) => `${index + 1}. ${item.title} [${item.layer}]\n   现象：${clip(item.pitfall?.problem ?? item.content, 140)}\n   解决：${clip(item.pitfall?.solution ?? '', 180)}\n   id: ${item.id}`).join('\n'))
+  },
+}
+
+const diffOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      range: { type: 'object', additionalProperties: true },
+      filters: { type: 'object', additionalProperties: true },
+      total: { type: 'number' },
+      offset: { type: 'number' },
+      limit: { type: 'number' },
+      counts: { type: 'object', additionalProperties: true },
+      changes: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      retention: { type: 'object', additionalProperties: true },
+    },
+    required: ['total', 'changes'],
+  },
+  render(args, value) {
+    const changes = value?.changes ?? []
+    const range = value?.range ?? {}
+    if (changes.length === 0) {
+      return text(`时间范围 ${range.since ?? '?'} → ${range.until ?? '?'} 内没有变更记录。`)
+    }
+    return text(`时间范围 ${range.since ?? '?'} → ${range.until ?? '?'}：共 ${value?.total ?? changes.length} 条变更`
+      + `（显示 ${changes.length} 条，保留 ${value?.retention?.kept ?? '?'}/${value?.retention?.limit ?? '?'} 条）：\n`
+      + changes.map((change, index) => {
+        const where = change.layer !== '' ? `${change.layer}${change.notebook ? `·${change.notebook}` : ''}` : change.notebook ?? ''
+        return `${index + 1}. ${change.at} [${change.operation}] ${change.entity === 'note' ? '笔记' : '记忆'} ${change.title}`
+          + `${where !== '' ? `（${where}）` : ''}\n   ${change.summary ?? ''}\n   id: ${change.itemId}  操作者: ${change.actor}`
+      }).join('\n'))
+  },
+}
+
 /**
  * 注册全部工具，返回释放函数。
  * ctx.tools.register(definition, options) 的 definition 必须带 output。
@@ -388,6 +454,66 @@ export function registerTools(ctx, engine, log) {
         targetLayer: args?.targetLayer,
         note: args?.note,
       }, 'agent')
+    },
+  })
+
+  register({
+    name: 'memory_pitfall',
+    description: 'Record, search or check historical pitfalls (mistakes, root causes and reusable fixes) so the same problem is not solved twice. Use action=check before debugging a familiar error, action=record after solving a new one.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['record', 'search', 'check'], description: 'record a new pitfall; search/list pitfalls; check whether a task or error has a known pitfall.' },
+        query: { type: 'string', description: 'Task, error message or keywords. Required for search/check.' },
+        problem: { type: 'string', description: 'What happened / the symptom. Required for record.' },
+        cause: { type: 'string', description: 'Root cause, if known.' },
+        solution: { type: 'string', description: 'The fix or workaround. Required for record.' },
+        prevention: { type: 'string', description: 'How to avoid it next time.' },
+        title: { type: 'string', description: 'Short title; defaults to the problem.' },
+        layer: { type: 'string', enum: WRITABLE_LAYER_ENUM, description: 'Defaults to L4.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Extra tags; “踩坑” is added automatically.' },
+        limit: { type: 'number', description: 'Max results (1-50, default 10; check defaults to 5).' },
+      },
+      required: ['action'],
+    },
+    output: pitfallOutput,
+    async execute(args) {
+      const action = String(args?.action ?? 'search')
+      if (action === 'record') {
+        return { action, ...(await engine.recordPitfall(args ?? {}, 'agent')) }
+      }
+      if (action === 'search') {
+        const result = await engine.searchPitfalls({ ...(args ?? {}), actor: 'agent' })
+        return { action, ...result, items: result.items.map(toToolItem) }
+      }
+      if (action === 'check') {
+        const result = await engine.checkPitfalls(args ?? {})
+        return { action, ...result, items: result.items.map(toToolItem) }
+      }
+      throw new Error('action 只能是 record、search 或 check')
+    },
+  })
+
+  register({
+    name: 'memory_diff',
+    description: 'Show what changed in memories and notebooks during a time range, optionally filtered by entity type, memory layer, item id or operation. Reads the structured change history; use it to review recent updates or reconcile conflicting context.',
+    parameters: {
+      type: 'object',
+      properties: {
+        since: { type: 'string', description: 'ISO time or date lower bound; default 7 days ago.' },
+        until: { type: 'string', description: 'ISO time or date upper bound; default now.' },
+        entity: { type: 'string', enum: ['memory', 'note', 'all'], description: 'Restrict to memories, notebooks, or all.' },
+        layer: { type: 'string', enum: LAYER_ENUM, description: 'Restrict to one memory layer.' },
+        itemId: { type: 'string', description: 'Restrict to one item.' },
+        operation: { type: 'string', description: 'create/update/delete/bulk/consolidate.' },
+        limit: { type: 'number', description: 'Page size 1-200, default 50.' },
+        offset: { type: 'number', description: 'Pagination offset.' },
+        includeContent: { type: 'boolean', description: 'Include full before/after content; default only a 240-char preview.' },
+      },
+    },
+    output: diffOutput,
+    async execute(args) {
+      return engine.diff(args ?? {})
     },
   })
 

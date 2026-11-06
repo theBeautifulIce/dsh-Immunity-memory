@@ -61,10 +61,12 @@ type Item struct {
 
 // AuditEntry 是 changelog 的一行。
 type AuditEntry struct {
-	At     string `json:"at"`
-	Action string `json:"action"`
-	Detail string `json:"detail"`
-	Actor  string `json:"actor"`
+	At     string          `json:"at"`
+	Action string          `json:"action"`
+	Detail string          `json:"detail"`
+	Actor  string          `json:"actor"`
+	Kind   string          `json:"kind,omitempty"`
+	Change json.RawMessage `json:"change,omitempty"`
 }
 
 // State 是一次完整快照。
@@ -578,7 +580,7 @@ func (s *Store) conflictEdges() (map[string][]string, error) {
 }
 
 func (s *Store) loadAudit() ([]AuditEntry, error) {
-	rows, err := s.db.Query(`SELECT timestamp, operation, COALESCE(reason, ''), COALESCE(triggered_by, 'system') FROM changelog ORDER BY timestamp ASC`)
+	rows, err := s.db.Query(`SELECT timestamp, operation, COALESCE(reason, ''), COALESCE(triggered_by, 'system'), COALESCE(change_details, '') FROM changelog ORDER BY timestamp ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -586,8 +588,13 @@ func (s *Store) loadAudit() ([]AuditEntry, error) {
 	out := []AuditEntry{}
 	for rows.Next() {
 		var entry AuditEntry
-		if err := rows.Scan(&entry.At, &entry.Action, &entry.Detail, &entry.Actor); err != nil {
+		var details string
+		if err := rows.Scan(&entry.At, &entry.Action, &entry.Detail, &entry.Actor, &details); err != nil {
 			return nil, err
+		}
+		if details != "" && json.Valid([]byte(details)) {
+			entry.Kind = "change"
+			entry.Change = json.RawMessage(details)
 		}
 		out = append(out, entry)
 	}
@@ -777,9 +784,10 @@ func (s *Store) AppendAudit(entries []AuditEntry) error {
 		return err
 	}
 	for index, entry := range entries {
+		layer, targetID, details := auditChangeColumns(entry)
 		if _, err := tx.Exec(`INSERT INTO changelog (id, timestamp, operation, layer, target_id, change_details, reason, triggered_by, session_id)
-			VALUES (?, ?, ?, '-', '-', NULL, ?, ?, NULL)`,
-			fmt.Sprintf("%s-%d", entry.At, index), entry.At, entry.Action, entry.Detail, entry.Actor); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			fmt.Sprintf("%s-%s-%d", entry.At, entry.Action, index), entry.At, entry.Action, layer, targetID, details, entry.Detail, entry.Actor); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -799,15 +807,37 @@ func (s *Store) ReplaceAudit(entries []AuditEntry) error {
 		tx.Rollback()
 		return err
 	}
-	for _, entry := range entries {
+	for index, entry := range entries {
+		layer, targetID, details := auditChangeColumns(entry)
 		if _, err := tx.Exec(`INSERT INTO changelog (id, timestamp, operation, layer, target_id, change_details, reason, triggered_by, session_id)
-			VALUES (?, ?, ?, '-', '-', NULL, ?, ?, NULL)`,
-			entry.At+entry.Action+entry.Detail, entry.At, entry.Action, entry.Detail, entry.Actor); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			fmt.Sprintf("%s-%s-%d", entry.At, entry.Action, index), entry.At, entry.Action, layer, targetID, details, entry.Detail, entry.Actor); err != nil {
 			tx.Rollback()
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// auditChangeColumns 把结构化变更拆到 changelog 的索引列；旧审计保持 '-'/NULL。
+func auditChangeColumns(entry AuditEntry) (layer, targetID, details string) {
+	layer, targetID, details = "-", "-", ""
+	if entry.Kind != "change" || len(entry.Change) == 0 || !json.Valid(entry.Change) {
+		return layer, targetID, details
+	}
+	var change struct {
+		Layer  string `json:"layer"`
+		ItemID string `json:"itemId"`
+	}
+	if err := json.Unmarshal(entry.Change, &change); err == nil {
+		if change.Layer != "" {
+			layer = change.Layer
+		}
+		if change.ItemID != "" {
+			targetID = change.ItemID
+		}
+	}
+	return layer, targetID, string(entry.Change)
 }
 
 // Stats 返回各表行数与大小。
