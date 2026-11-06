@@ -12,6 +12,11 @@ All notable changes to this project are documented here. The format follows
 - Pluggable embedding providers and a retrieval evaluation set.
 - Per-project memory spaces and conflict-merge policies.
 
+### Fixed
+
+- Refresh the package metadata description so it matches the shipped
+  eight-layer memory, four notebooks, hybrid retrieval, templates, and UI.
+
 ## [0.1.0] - 2026-11-06
 
 First public release of **dsh-Immunity-memory** (technical plugin id:
