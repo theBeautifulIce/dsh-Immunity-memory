@@ -172,16 +172,27 @@ try {
     assert.ok(body.value.text.includes('长期记忆'))
   })
 
-  await test('templates.save / apply / delete 可管理自定义模板', async () => {
+  await test('templates.save / apply / delete 可管理分层自定义模板', async () => {
     const saved = await call('templates.save', {
       name: 'API 模板',
       header: '## API 自定义模板\n只注入与当前任务相关的条目。',
       topN: 3,
       maxChars: 520,
+      layers: {
+        L0: [{ title: 'API 身份', content: 'API 测试用的不可变身份。' }],
+        L1: [{ title: 'API 原则', content: '先验证，再承诺。' }],
+        L3: [{ title: 'API 反射', content: '风险先停下确认。' }],
+      },
     })
     const id = saved.body.value.active
     assert.ok(id.startsWith('tpl_'))
     assert.ok(saved.body.value.list.some((entry) => entry.id === id && entry.custom === true))
+    const savedTemplate = saved.body.value.list.find((entry) => entry.id === id)
+    assert.equal(savedTemplate.layers.L0[0].title, 'API 身份')
+    assert.equal(savedTemplate.layers.L3.length, 1)
+    const preview = await call('prompt.preview', {})
+    assert.ok(preview.body.value.text.includes('API 身份'))
+    assert.ok(preview.body.value.text.includes('风险先停下确认'))
     const applied = await call('templates.apply', { id: 'default' })
     assert.equal(applied.body.value.active, 'default')
     const deleted = await call('templates.delete', { id })

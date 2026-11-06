@@ -213,6 +213,18 @@ window.__ModuleLoader__.load({
       .mp-template-row { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap }
       .mp-template-editor { display:flex; flex-direction:column; gap:8px; border-top:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.2));
         padding-top:8px }
+      .mp-template-layers { display:flex; flex-direction:column; gap:10px; border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.12));
+        border-radius:10px; padding:10px; background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.025)) }
+      .mp-template-layers-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; flex-wrap:wrap }
+      .mp-template-layer { display:flex; flex-direction:column; gap:8px; border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.12));
+        border-radius:8px; padding:9px; background:var(--dsw-alias-bg-layer-1,#fff) }
+      .mp-template-layer-head { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap }
+      .mp-template-entry { display:flex; flex-direction:column; gap:6px; border-left:2px solid var(--dsw-alias-brand-primary,#3b82f6);
+        padding:2px 0 2px 8px }
+      .mp-template-entry-head { display:flex; align-items:center; gap:8px }
+      .mp-template-entry-head .mp-input { flex:1 }
+      .mp-template-shared { border:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.2)); border-radius:8px;
+        padding:8px 10px; display:flex; flex-direction:column; gap:3px }
       .mp-ttl-alert { border-left:3px solid var(--dsw-alias-state-warning-primary,#b45309); padding:5px 8px;
         background:rgba(180,83,9,.08); border-radius:6px; font-size:11px; color:var(--dsw-alias-state-warning-primary,#b45309) }
       .mp-editor { flex:1 1 420px; min-width:300px; display:flex; flex-direction:column; gap:10px;
@@ -356,6 +368,98 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------ 主组件 ----
 
     /**
+     * 模板的不可变层编辑器。单独抽出来，既让新建/编辑共用同一套逐层表单，
+     * 也方便渲染测试直接覆盖 L0/L1/L3 三组条目。
+     */
+    function TemplateLayerEditor({ draft, setDraft, saving, editableLayers, lang }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      if (draft === null) return null
+
+      function updateEntry(layerId, index, patch) {
+        setDraft((prev) => {
+          if (prev === null) return prev
+          const rows = [...(prev.layers?.[layerId] ?? [])]
+          rows[index] = { ...(rows[index] ?? { title: '', content: '' }), ...patch }
+          return { ...prev, layers: { ...(prev.layers ?? {}), [layerId]: rows } }
+        })
+      }
+
+      function addEntry(layerId) {
+        setDraft((prev) => {
+          if (prev === null) return prev
+          const rows = prev.layers?.[layerId] ?? []
+          if (rows.length >= 20) return prev
+          return { ...prev, layers: { ...(prev.layers ?? {}), [layerId]: [...rows, { title: '', content: '' }] } }
+        })
+      }
+
+      function removeEntry(layerId, index) {
+        setDraft((prev) => {
+          if (prev === null) return prev
+          const rows = (prev.layers?.[layerId] ?? []).filter((_, rowIndex) => rowIndex !== index)
+          return { ...prev, layers: { ...(prev.layers ?? {}), [layerId]: rows } }
+        })
+      }
+
+      function renderLayer(layer) {
+        const rows = draft.layers?.[layer.id] ?? []
+        return h('div', { key: layer.id, className: 'mp-template-layer' },
+          h('div', { className: 'mp-template-layer-head' },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+              h('span', { className: `mp-layer-badge is-${layer.id.toLowerCase()}` }, layer.id),
+              h('span', { style: { fontWeight: 600 } }, labelOf(layer.name)),
+              h('span', { className: 'mp-hint' }, labelOf(layer.desc))),
+            h('button', {
+              type: 'button',
+              className: 'mp-btn',
+              disabled: saving || rows.length >= 20,
+              onClick: () => addEntry(layer.id),
+            }, txt('添加条目', 'Add item'))),
+          rows.length === 0
+            ? h('div', { className: 'mp-hint' }, txt('这一层还没有条目，点击“添加条目”。', 'No entries in this layer yet. Click "Add item".'))
+            : rows.map((entry, index) => h('div', { key: `${layer.id}-${index}`, className: 'mp-template-entry' },
+              h('div', { className: 'mp-template-entry-head' },
+                h('input', {
+                  className: 'mp-input',
+                  maxLength: 80,
+                  placeholder: txt('条目标题，例如“身份”“核心原则”', 'Entry title, e.g. Identity or Core principle'),
+                  value: entry.title,
+                  onChange: (event) => updateEntry(layer.id, index, { title: event.target.value }),
+                }),
+                h('button', {
+                  type: 'button',
+                  className: 'mp-btn is-danger',
+                  disabled: saving,
+                  title: txt('删除这条不可变记忆', 'Delete this immutable memory'),
+                  onClick: () => removeEntry(layer.id, index),
+                }, txt('删除', 'Delete'))),
+              h('textarea', {
+                className: 'mp-textarea',
+                rows: 4,
+                maxLength: 2000,
+                placeholder: txt('这一层固定不变的内容…', 'Immutable content for this layer…'),
+                value: entry.content,
+                onChange: (event) => updateEntry(layer.id, index, { content: event.target.value }),
+              }))))
+      }
+
+      return h('div', { className: 'mp-template-layers' },
+        h('div', { className: 'mp-template-layers-head' },
+          h('div', null,
+            h('div', { className: 'mp-label' }, txt('不可变层（随模板切换）', 'Immutable layers (switch with the template)')),
+            h('div', { className: 'mp-hint' }, txt(
+              '按 L0 灵魂层 → L1 思想核心 → L3 本能行为逐层填写；每条独立记忆都有标题和内容。',
+              'Fill L0 Soul → L1 Core thoughts → L3 Instincts. Every entry is a separate titled memory.'))),
+          h('span', { className: 'mp-chip' }, txt('L0 / L1 / L3', 'L0 / L1 / L3'))),
+        editableLayers.map(renderLayer),
+        h('div', { className: 'mp-template-shared' },
+          h('div', { className: 'mp-label' }, txt('L2 思想流动 + L4-L7 可改写层：共享复用', 'L2 thought flow + L4-L7 mutable layers: shared')),
+          h('div', { className: 'mp-hint' }, txt(
+            '这些层来自共享记忆库，切换模板时不会复制、改写或删除；新模板只替换 L0/L1/L3 和注入预算。',
+            'These layers live in the shared memory store. Switching templates never copies, rewrites or deletes them; a template only replaces L0/L1/L3 and the injection budget.'))))
+    }
+
+    /**
      * 顶部注入预算卡：默认只看总 token，展开后按层拆分。
      * 模板切换走 templates.apply；系统提示词下一轮就按新模板生成。
      */
@@ -369,6 +473,9 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState(null)
       const [templateId, setTemplateId] = useState(boot.settings?.prompt?.template ?? injection.template?.id ?? 'default')
       const customTemplates = templates.filter((entry) => entry.custom === true)
+      const editableLayers = (boot.layers ?? [])
+        .filter((layer) => layer.id === 'L0' || layer.id === 'L1' || layer.id === 'L3')
+        .sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
 
       useEffect(() => {
         setTemplateId(boot.settings?.prompt?.template ?? injection.template?.id ?? 'default')
@@ -379,7 +486,7 @@ window.__ModuleLoader__.load({
         setSaving(true)
         try {
           await api('templates.apply', { id: next })
-          notify(txt('模板已切换，下一轮对话立即生效', 'Template switched; takes effect on the next turn'))
+          notify(txt('模板已切换：L0/L1/L3 已替换，L2/L4-L7 共享记忆保持不变', 'Template switched: L0/L1/L3 replaced; shared L2/L4-L7 memories are unchanged'))
           await onChanged()
         } catch (error) {
           setTemplateId(boot.settings?.prompt?.template ?? 'default')
@@ -389,6 +496,22 @@ window.__ModuleLoader__.load({
         }
       }
 
+      function makeLayerDraft(source) {
+        const out = {}
+        for (const layer of editableLayers) {
+          const rows = Array.isArray(source?.[layer.id]) ? source[layer.id] : []
+          out[layer.id] = rows.length > 0
+            ? rows.map((entry) => ({ title: entry.title ?? '', content: entry.content ?? '' }))
+            : [{ title: '', content: '' }]
+        }
+        return out
+      }
+
+      function layerCounts(entry) {
+        const counts = entry?.layers ?? {}
+        return `L0 ${counts.L0?.length ?? 0} · L1 ${counts.L1?.length ?? 0} · L3 ${counts.L3?.length ?? 0}`
+      }
+
       function openCreateTemplate() {
         setManaging(true)
         setDraft({
@@ -396,6 +519,7 @@ window.__ModuleLoader__.load({
           header: txt('## 我的长期记忆\n下面是与当前对话相关的历史记忆，只在确实相关时使用。', '## My long-term memory\nRelevant memories from earlier sessions; use only when actually relevant.'),
           topN: 8,
           maxChars: 1400,
+          layers: makeLayerDraft(null),
         })
       }
 
@@ -407,6 +531,7 @@ window.__ModuleLoader__.load({
           header: entry.header,
           topN: entry.topN,
           maxChars: entry.maxChars,
+          layers: makeLayerDraft(entry.layers),
         })
       }
 
@@ -415,7 +540,7 @@ window.__ModuleLoader__.load({
         setSaving(true)
         try {
           await api('templates.save', draft)
-          notify(txt('模板已保存并切换，下一轮对话立即生效', 'Template saved and applied from the next turn'))
+          notify(txt('模板已保存并切换：不可变层已替换，可改写层继续共享', 'Template saved and applied: immutable layers replaced; mutable layers stay shared'))
           setDraft(null)
           await onChanged()
         } catch (error) {
@@ -498,7 +623,7 @@ window.__ModuleLoader__.load({
               : customTemplates.map((entry) => h('div', { key: entry.id, className: 'mp-template-row' },
                 h('div', null,
                   h('div', { style: { fontWeight: 600 } }, labelOf(entry.name)),
-                  h('div', { className: 'mp-hint' }, `${entry.id} · topN ${entry.topN} · ${entry.maxChars} chars`)),
+                  h('div', { className: 'mp-hint' }, `${entry.id} · ${layerCounts(entry)} · topN ${entry.topN} · ${entry.maxChars} chars`)),
                 h('div', { className: 'mp-toolbar' },
                   draft?.id === entry.id ? null : h('button', {
                     type: 'button',
@@ -546,11 +671,18 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'mp-label' }, txt('头部说明（Markdown）', 'Header (Markdown)')),
                   h('textarea', {
                     className: 'mp-textarea',
-                    rows: 5,
+                    rows: 4,
                     maxLength: 4000,
                     value: draft.header,
                     onChange: (event) => setDraft({ ...draft, header: event.target.value }),
                   })),
+                h(TemplateLayerEditor, {
+                  draft,
+                  setDraft,
+                  saving,
+                  editableLayers,
+                  lang,
+                }),
                 h('div', { className: 'mp-toolbar' },
                   h('button', {
                     type: 'button',
@@ -2052,7 +2184,7 @@ window.__ModuleLoader__.load({
       __internals: {
         MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
         MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
-        InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel,
+        InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel,
       },
     }
   },

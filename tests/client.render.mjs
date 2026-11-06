@@ -119,7 +119,13 @@ const boot = {
     topN: 6,
     maxChars: 1200,
     truncated: false,
-    template: { id: 'default', name: { zh: '通用', en: 'General' } },
+    template: {
+      id: 'default',
+      name: { zh: '通用', en: 'General' },
+      layers: { L0: 1, L1: 1, L3: 1 },
+    },
+    templateItemCount: 3,
+    sharedItemCount: 2,
     itemCount: 2,
     headerTokens: 30,
     layers: [
@@ -127,7 +133,25 @@ const boot = {
       { id: 'L4', name: { zh: '学习行为', en: 'Learned' }, tokens: 10, percent: 8, count: 1 },
     ],
   },
-  templates: { active: 'default', list: [{ id: 'default', name: { zh: '通用', en: 'General' } }] },
+  templates: {
+    active: 'default',
+    list: [
+      { id: 'default', name: { zh: '通用', en: 'General' }, layers: { L0: [], L1: [], L3: [] } },
+      {
+        id: 'tpl_demo',
+        name: { zh: '分层模板', en: 'Layered template' },
+        custom: true,
+        header: '## 分层模板',
+        topN: 8,
+        maxChars: 1400,
+        layers: {
+          L0: [{ title: '身份', content: '不可变身份' }],
+          L1: [{ title: '原则', content: '先验证再承诺' }],
+          L3: [{ title: '反射', content: '风险先停下' }],
+        },
+      },
+    ],
+  },
   consolidation: { candidates: [] },
   usage: { calls: 1, queryTokens: 4, resultTokens: 30, totalTokens: 34 },
   stats: { total: 3, memory: 2, note: 1, active: 3, archived: 0, expired: 0, conflicted: 0, pinned: 1, byLayer: { L5: 2, L4: 1 }, byNotebook: { memory: 2, daily: 1, asset: 0, pitfall: 0 }, lastWriteAt: '2026-11-05T10:00:00.000Z' },
@@ -150,7 +174,7 @@ function render(title, element) {
 const shell = render('MemorySettingsPage 加载态', React.createElement(settingsReg.Component))
 assert.ok(shell.includes('mp-root'), '应包含根容器样式类名')
 
-const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel } = mod.__internals
+const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel } = mod.__internals
 render('MemorySettingsPage（直接调用）', React.createElement(MemorySettingsPage))
 
 // 侧边栏入口：整页容器必须自己滚动（main 槽位是 overflow:hidden 的列）。
@@ -172,6 +196,28 @@ assert.ok(layerBadge.includes('目标记忆'), '中文环境应显示层名')
 render('InjectionCard 注入统计', React.createElement(InjectionCard, {
   api, lang: 'zh', boot, notify: noop, onChanged: noop,
 }))
+
+const templateDraft = {
+  name: '分层模板',
+  header: '## 分层模板',
+  topN: 8,
+  maxChars: 1400,
+  layers: {
+    L0: [{ title: '身份', content: '不可变身份' }],
+    L1: [{ title: '原则', content: '先验证再承诺' }],
+    L3: [{ title: '反射', content: '风险先停下' }],
+  },
+}
+const layerEditor = render('TemplateLayerEditor 分层模板编辑', React.createElement(TemplateLayerEditor, {
+  draft: templateDraft,
+  setDraft: noop,
+  saving: false,
+  editableLayers: LAYERS.filter((layer) => ['L0', 'L1', 'L3'].includes(layer.id)),
+  lang: 'zh',
+}))
+for (const label of ['不可变层', '灵魂层', '思想核心', '本能行为', 'L2 思想流动', '共享复用']) {
+  assert.ok(layerEditor.includes(label), `分层模板编辑器应包含“${label}”`)
+}
 
 render('UsagePanel 用量', React.createElement(UsagePanel, { api, lang: 'zh', boot, notify: noop }))
 render('PitfallPanel 踩坑笔记', React.createElement(PitfallPanel, {

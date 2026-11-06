@@ -87,11 +87,53 @@ export const NOTEBOOKS = [
 export const NOTEBOOK_IDS = NOTEBOOKS.map((notebook) => notebook.id)
 
 /**
- * 记忆模板：一套可直接热切换的「注入策略」。
+ * 记忆模板：一套可直接热切换的「不可变层 + 注入策略」。
  *
- * 模板只影响提示词注入（头部说明、条数、字符预算），不改动既有数据；
- * 切换后下一次 promptDigest 立即使用新模板，不需要重启插件。
+ * L0 灵魂层 / L1 思想核心 / L3 本能行为属于模板，随模板切换；
+ * L2 思想流动与 L4-L7 可改写层存在共享数据库里，不随模板复制或删除。
  */
+export const TEMPLATE_LAYER_IDS = ['L0', 'L1', 'L3']
+export const TEMPLATE_LAYER_META = TEMPLATE_LAYER_IDS.map((id) => LAYERS.find((layer) => layer.id === id))
+const TEMPLATE_LAYER_MAX_ENTRIES = 20
+const TEMPLATE_LAYER_TITLE_MAX = 80
+const TEMPLATE_LAYER_CONTENT_MAX = 2000
+const TEMPLATE_LAYER_CHARS_MAX = 12000
+
+/** 不可变层条目：每条都必须能独立看出“属于哪一层、说什么”。 */
+export function sanitizeTemplateLayers(raw) {
+  const source = raw !== null && typeof raw === 'object' ? raw : {}
+  const layers = { L0: [], L1: [], L3: [] }
+  let totalChars = 0
+  for (const id of TEMPLATE_LAYER_IDS) {
+    const entries = Array.isArray(source[id]) ? source[id] : []
+    for (const entry of entries) {
+      if (layers[id].length >= TEMPLATE_LAYER_MAX_ENTRIES) break
+      const record = typeof entry === 'string' ? { content: entry } : (entry ?? {})
+      let title = String(record.title ?? '').trim().slice(0, TEMPLATE_LAYER_TITLE_MAX)
+      const content = String(record.content ?? '').trim().slice(0, TEMPLATE_LAYER_CONTENT_MAX)
+      if (content === '') continue
+      if (title === '') title = content.split('\n')[0].slice(0, 24)
+      const remaining = TEMPLATE_LAYER_CHARS_MAX - totalChars
+      if (remaining <= 0) break
+      const clipped = content.slice(0, remaining)
+      if (clipped === '') break
+      layers[id].push({ title, content: clipped })
+      totalChars += clipped.length
+    }
+  }
+  return layers
+}
+
+/** 模板不可变层是否真的有内容。 */
+export function hasTemplateLayers(template) {
+  return TEMPLATE_LAYER_IDS.some((id) => (template?.layers?.[id]?.length ?? 0) > 0)
+}
+
+/** 内置模板的空层结构，保证 API/UI 拿到的形状一致。 */
+function emptyTemplateLayers() {
+  return { L0: [], L1: [], L3: [] }
+}
+
 export const MEMORY_TEMPLATES = [
   {
     id: 'default',
@@ -104,6 +146,7 @@ export const MEMORY_TEMPLATES = [
     ].join('\n'),
     topN: 6,
     maxChars: 1200,
+    layers: emptyTemplateLayers(),
   },
   {
     id: 'dev',
@@ -116,6 +159,7 @@ export const MEMORY_TEMPLATES = [
     ].join('\n'),
     topN: 10,
     maxChars: 1800,
+    layers: emptyTemplateLayers(),
   },
   {
     id: 'qqbot',
@@ -128,6 +172,7 @@ export const MEMORY_TEMPLATES = [
     ].join('\n'),
     topN: 8,
     maxChars: 900,
+    layers: emptyTemplateLayers(),
   },
 ]
 
@@ -137,8 +182,8 @@ const MAX_CUSTOM_TEMPLATES = 50
 /**
  * 校验并收敛一条用户自定义模板。
  *
- * 内置模板只读；自定义模板只影响注入头部与预算，不参与写入/固化，
- * 因此这里不引入任何层级或 TTL 语义，避免 UI 承诺不存在的功能。
+ * 模板承载不可变层（L0/L1/L3）与注入预算；它不复制、不改写共享的
+ * L2/L4-L7 数据。每条层内条目都保留标题，避免 UI 只剩一个大输入框。
  */
 export function sanitizeCustomTemplate(raw) {
   if (raw === null || typeof raw !== 'object') return undefined
@@ -161,6 +206,7 @@ export function sanitizeCustomTemplate(raw) {
     header,
     topN,
     maxChars,
+    layers: sanitizeTemplateLayers(raw.layers),
     custom: true,
   }
 }

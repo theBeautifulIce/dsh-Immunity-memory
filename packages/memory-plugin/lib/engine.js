@@ -18,11 +18,14 @@ import {
   LAYERS,
   LAYER_IDS,
   NOTEBOOK_IDS,
+  TEMPLATE_LAYER_IDS,
+  TEMPLATE_LAYER_META,
   activeTemplate,
   allTemplates,
   clone,
   consolidationTargetFor,
   getPath,
+  hasTemplateLayers,
   layerEnabled,
   layerInfo,
   normalizeCustomTemplates,
@@ -1569,8 +1572,17 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     return { imported: imported.length, skipped, ttlFilled, mode }
   }
 
+  /** 模板不可变层的条目数量（用于 API/UI 展示，不包含共享记忆）。 */
+  function templateLayerCounts(template) {
+    const counts = { L0: 0, L1: 0, L3: 0 }
+    for (const id of TEMPLATE_LAYER_IDS) counts[id] = template?.layers?.[id]?.length ?? 0
+    return counts
+  }
+
   /**
-   * 构造提示词注入：模板头 + 排序后的记忆行。
+   * 构造提示词注入：模板头 + 模板不可变层 + 共享可改写记忆。
+   * 模板自带 L0/L1/L3 时，数据库中同层条目不再重复注入；没有模板层的旧配置
+   * 仍按老行为注入数据库里的不可变层，保持向前兼容。
    * promptDigest 只要文本；injectionStats 还要每层 token 明细，两者共用这一份结果，
    * 避免 UI 看到的预算与实际注入的不是同一套算法。
    */
@@ -1589,8 +1601,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       topN: budget.topN,
       maxChars: budget.maxChars,
       truncated: false,
-      template: { id: template.id, name: template.name, desc: template.desc },
+      template: {
+        id: template.id,
+        name: template.name,
+        desc: template.desc,
+        layers: templateLayerCounts(template),
+      },
       itemCount: 0,
+      templateItemCount: 0,
+      sharedItemCount: 0,
       headerTokens: 0,
       headerChars: 0,
       headerPercent: 0,
@@ -1606,23 +1625,51 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       })),
     }
     if (!enabled) return empty
+    const configuredImmutable = hasTemplateLayers(template)
+    const templateEntries = []
+    if (configuredImmutable) {
+      for (const id of TEMPLATE_LAYER_IDS) {
+        if (!layerEnabled(active, id)) continue
+        const meta = TEMPLATE_LAYER_META.find((layer) => layer.id === id)
+        for (const entry of template.layers?.[id] ?? []) {
+          templateEntries.push({
+            id: `template:${id}:${templateEntries.length}`,
+            layer: id,
+            layerName: meta?.name,
+            title: entry.title,
+            content: entry.content,
+          })
+        }
+      }
+    }
     const candidates = current.items.filter((item) => {
       if (item.status !== 'active' && item.status !== 'conflicted') return false
       if (isExpiredItem(item, now)) return false
       if (!layerEnabled(active, item.layer)) return false
       if (item.type !== 'memory') return false
+      // 模板已经提供不可变层时，以模板为准，避免数据库里的旧同层条目重复注入。
+      if (configuredImmutable && layerInfo(item.layer).immutable) return false
       return true
     })
     const scored = candidates.map((item) => ({ item, score: scoreItem(item, new Set(), active, now) }))
     scored.sort((left, right) => right.score - left.score)
     const chosen = scored.slice(0, budget.topN)
-    if (chosen.length === 0) return empty
-    const lines = chosen.map(({ item }) => {
+    if (chosen.length === 0 && templateEntries.length === 0) return empty
+    const lines = []
+    const lineMeta = []
+    for (const entry of templateEntries) {
+      const layerLabel = entry.layerName?.zh ?? entry.layer
+      const body = truncate(String(entry.content).replace(/\s+/g, ' ').trim(), 800)
+      lines.push(`- [${entry.layer} ${layerLabel}·模板] ${entry.title}：${body}`)
+      lineMeta.push({ ...entry, source: 'template', importance: null })
+    }
+    for (const { item } of chosen) {
       const body = truncate(item.content.replace(/\s+/g, ' ').trim(), 220)
-      return `- [${item.layer}·重要度${item.importance}] ${item.title}：${body}`
-    })
+      lines.push(`- [${item.layer}·重要度${item.importance}] ${item.title}：${body}`)
+      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory' })
+    }
     const header = template.header
-    let text = `${header}\n${lines.join('\n')}`
+    let text = [header, ...lines].filter((part) => part !== '').join('\n')
     let truncated = false
     if (budget.maxChars > 0 && text.length > budget.maxChars) {
       text = `${text.slice(0, Math.max(0, budget.maxChars - 1))}…`
@@ -1649,17 +1696,20 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       percent: 0,
     }]))
     const lineStats = []
-    chosen.forEach(({ item }, index) => {
+    lineMeta.forEach((entry, index) => {
       const tokens = Math.max(0, Math.round(lineTokens[index] * scale))
-      const bucket = byLayer.get(item.layer)
-      bucket.count += 1
-      bucket.tokens += tokens
-      bucket.chars += lines[index].length
+      const bucket = byLayer.get(entry.layer)
+      if (bucket !== undefined) {
+        bucket.count += 1
+        bucket.tokens += tokens
+        bucket.chars += lines[index].length
+      }
       lineStats.push({
-        id: item.id,
-        title: item.title,
-        layer: item.layer,
-        importance: item.importance,
+        id: entry.id,
+        title: entry.title,
+        layer: entry.layer,
+        importance: entry.importance,
+        source: entry.source,
         tokens,
         chars: lines[index].length,
       })
@@ -1677,8 +1727,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       topN: budget.topN,
       maxChars: budget.maxChars,
       truncated,
-      template: { id: template.id, name: template.name, desc: template.desc },
-      itemCount: chosen.length,
+      template: {
+        id: template.id,
+        name: template.name,
+        desc: template.desc,
+        layers: templateLayerCounts(template),
+      },
+      itemCount: lineStats.length,
+      templateItemCount: templateEntries.length,
+      sharedItemCount: chosen.length,
       headerTokens,
       headerChars: header.length,
       headerPercent,
@@ -1706,9 +1763,13 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   async function saveTemplate(input = {}, actor = 'user') {
     const current = await ensureLoaded()
     const next = normalizeSettings(current.settings)
-    const sanitized = sanitizeCustomTemplate(input)
+    // 编辑时允许只提交部分字段：未提交的名称/头/预算/层沿用旧值，避免一次局部保存把层清空。
+    const previous = input.id === undefined
+      ? undefined
+      : (next.prompt.customTemplates ?? []).find((template) => template.id === input.id)
+    const sanitized = sanitizeCustomTemplate(previous === undefined ? input : { ...previous, ...input })
     if (sanitized === undefined) {
-      throw createError('INVALID_TEMPLATE', '模板需要 1-40 字名称、1-4000 字头部，条数 1-30，字符预算 100-8000')
+      throw createError('INVALID_TEMPLATE', '模板需要 1-40 字名称、1-4000 字头部，条数 1-30，字符预算 100-8000；不可变层条目需包含内容')
     }
     if (input.id !== undefined && sanitized.id === undefined) {
       throw createError('INVALID_TEMPLATE_ID', '模板 id 只能使用小写字母、数字、下划线和短横线，且不能与内置模板重名')

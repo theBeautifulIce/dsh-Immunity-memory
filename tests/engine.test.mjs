@@ -306,6 +306,9 @@ await test('自定义模板可新增、切换、删除', async () => {
     header: '## 我的长期记忆\n只使用与当前任务直接相关的条目。',
     topN: 4,
     maxChars: 640,
+    layers: {
+      L0: [{ title: '身份锚点', content: '这是我的不可变灵魂层身份。' }],
+    },
   }, 'user')
   assert.equal(saved.active.startsWith('tpl_'), true)
   assert.ok(saved.list.some((entry) => entry.id === saved.active && entry.custom === true))
@@ -313,6 +316,8 @@ await test('自定义模板可新增、切换、删除', async () => {
   assert.equal(stats.template.id, saved.active)
   assert.equal(stats.topN, 4)
   assert.ok(stats.text.includes('我的长期记忆'))
+  assert.ok(stats.text.includes('身份锚点'))
+  assert.equal(stats.template.layers.L0, 1)
   const edited = await engine.saveTemplate({
     id: saved.active,
     name: '我的模板（改）',
@@ -322,6 +327,7 @@ await test('自定义模板可新增、切换、删除', async () => {
   }, 'user')
   assert.equal(edited.list.find((entry) => entry.id === saved.active).name, '我的模板（改）')
   assert.equal(engine.injectionStats().topN, 5)
+  assert.equal(engine.injectionStats().template.layers.L0, 1, '只改名称/预算时应保留原有不可变层')
   await engine.reload()
   assert.equal(engine.injectionStats().template.id, saved.active)
   await engine.applyTemplate('default', 'user')
@@ -332,6 +338,59 @@ await test('自定义模板可新增、切换、删除', async () => {
     () => engine.deleteTemplate('default', 'user'),
     (error) => error.code === 'BUILTIN_TEMPLATE',
   )
+})
+
+await test('模板不可变层随模板切换，可改写记忆跨模板复用', async () => {
+  const shared = await engine.createItem({
+    layer: 'L5',
+    title: '共享可改写记忆',
+    content: '这条目标记忆属于共享层，切换模板后仍然存在并被注入。',
+    importance: 10,
+    pinned: true,
+    ttlDays: 30,
+  }, 'user')
+  const first = await engine.saveTemplate({
+    name: '分层模板 A',
+    header: '## 分层模板 A',
+    topN: 10,
+    maxChars: 3000,
+    layers: {
+      L0: [{ title: 'A 灵魂身份', content: 'A-灵魂：我是不可变的身份锚点。' }],
+      L1: [{ title: 'A 核心原则', content: 'A-原则：先验证，再承诺。' }],
+      L3: [{ title: 'A 行为反射', content: 'A-本能：遇到风险先停下来确认。' }],
+    },
+  }, 'user')
+  const firstStats = engine.injectionStats()
+  assert.equal(firstStats.template.layers.L0, 1)
+  assert.equal(firstStats.template.layers.L1, 1)
+  assert.equal(firstStats.template.layers.L3, 1)
+  assert.equal(firstStats.templateItemCount, 3)
+  assert.ok(firstStats.text.includes('A-灵魂'))
+  assert.ok(firstStats.text.includes('A-原则'))
+  assert.ok(firstStats.text.includes('A-本能'))
+  assert.ok(firstStats.text.includes('共享可改写记忆'), '共享可改写记忆应出现在 A 模板注入里')
+  assert.ok(firstStats.layers.find((layer) => layer.id === 'L0').count >= 1)
+
+  const second = await engine.saveTemplate({
+    name: '分层模板 B',
+    header: '## 分层模板 B',
+    topN: 10,
+    maxChars: 3000,
+    layers: {
+      L0: [{ title: 'B 灵魂身份', content: 'B-灵魂：另一个不可变身份。' }],
+    },
+  }, 'user')
+  const secondStats = engine.injectionStats()
+  assert.equal(secondStats.template.id, second.active)
+  assert.ok(secondStats.text.includes('B-灵魂'))
+  assert.equal(secondStats.text.includes('A-灵魂'), false, '切换后旧模板不可变层应消失')
+  assert.ok(secondStats.text.includes('共享可改写记忆'), '切换模板后共享可改写记忆仍在')
+  assert.equal(engine.getItem(shared.id)?.status, 'active')
+
+  await engine.applyTemplate('default', 'user')
+  await engine.deleteTemplate(first.active, 'user')
+  await engine.deleteTemplate(second.active, 'user')
+  await engine.deleteItems([shared.id], 'user')
 })
 
 await test('智能体检索会记录用量账本', async () => {
