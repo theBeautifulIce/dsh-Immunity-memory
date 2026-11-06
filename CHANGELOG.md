@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Keep the long-term-memory prompt header visible when the store is empty, so a
+  brand-new session still learns that `memory_write`/`memory_search` exist
+  instead of seeing only the tool schemas.
 - Refresh the package metadata description so it matches the shipped
   eight-layer memory, four notebooks, hybrid retrieval, templates, and UI.
 - Resolve the repository root and the DSH web profile from the current

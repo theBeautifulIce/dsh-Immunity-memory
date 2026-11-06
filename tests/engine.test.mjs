@@ -64,6 +64,15 @@ await test('保存设置后能从存档读回', async () => {
   await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { ui: { pageSize: 20 } }))
 })
 
+await test('空库也注入长期记忆使用说明', async () => {
+  const stats = engine.injectionStats()
+  assert.equal(stats.itemCount, 0)
+  assert.ok(stats.tokens > 0)
+  assert.ok(stats.text.includes('长期记忆（dsh-memory-plugin）'))
+  assert.ok(stats.text.includes('memory_write'))
+  assert.ok(stats.text.includes('当前没有已保存的相关条目'))
+})
+
 await test('旧数据缺少保鲜期时加载会补全', async () => {
   let saved = null
   const created = new Date(Date.now() - 86400000).toISOString()

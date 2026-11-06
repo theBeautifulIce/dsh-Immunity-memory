@@ -1654,7 +1654,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const scored = candidates.map((item) => ({ item, score: scoreItem(item, new Set(), active, now) }))
     scored.sort((left, right) => right.score - left.score)
     const chosen = scored.slice(0, budget.topN)
-    if (chosen.length === 0 && templateEntries.length === 0) return empty
+    // 空库也要注入模板头部：否则新会话只剩工具描述，模型不知道有长期记忆可用。
+    const coldStart = chosen.length === 0 && templateEntries.length === 0
     const lines = []
     const lineMeta = []
     for (const entry of templateEntries) {
@@ -1668,7 +1669,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       lines.push(`- [${item.layer}·重要度${item.importance}] ${item.title}：${body}`)
       lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory' })
     }
-    const header = template.header
+    const header = coldStart
+      ? [
+          template.header,
+          '（当前没有已保存的相关条目。遇到值得跨会话保留的事实、偏好或决策时，请用 memory_write 保存，并填写保鲜期。）',
+        ].filter((part) => part !== '').join('\n')
+      : template.header
     let text = [header, ...lines].filter((part) => part !== '').join('\n')
     let truncated = false
     if (budget.maxChars > 0 && text.length > budget.maxChars) {
