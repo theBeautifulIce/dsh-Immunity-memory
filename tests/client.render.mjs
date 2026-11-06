@@ -265,6 +265,9 @@ for (const token of ['mp-diff-line is-remove', 'mp-diff-line is-add', '旧标题
 assert.ok(!diffView.includes('&quot;before&quot;'), 'DiffView 不应直接输出 JSON')
 
 render('DiffPanel 时间段变更', React.createElement(DiffPanel, { api, lang: 'zh', notify: noop }))
+const styleText = styles.join('\n')
+assert.ok(styleText.includes('.mp-change-card.is-update .mp-chip:first-child::before'), '变更卡应使用操作徽章圆点标识类型')
+assert.ok(!styleText.includes('border-left:3px solid #9a6700'), '变更卡不应再使用左侧粗色条')
 render('ConsolidationPanel 固化', React.createElement(ConsolidationPanel, {
   api, lang: 'zh', boot, notify: noop, onChanged: noop,
 }))

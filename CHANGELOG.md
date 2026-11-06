@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-06
+
+UI and documentation polish for automatic memory capture.
+
+### Changed
+
+- Change cards now mark the operation with a small colored dot inside the
+  operation badge instead of a thick colored left border.
+- Reworded the automatic-capture responsibility boundary: the plugin detects,
+  queues, and deduplicates; the agent decides fact, layer, and TTL. The audit gate
+  still covers the two explicit `memory_write` / `memory_update` entry points.
+
 ## [0.4.0] - 2026-11-06
 
 Automatic-memory capture release: signal detection, hourly/daily review queues,

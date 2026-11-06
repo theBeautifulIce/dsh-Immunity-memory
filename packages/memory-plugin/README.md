@@ -3,7 +3,7 @@
 > Part of **dsh-Immunity-memory**. [简体中文](../../README.md) · [English](../../README.en.md)
 
 DSH（DeepSeek Harness）长期记忆插件：八层记忆体系、四本记事本、混合检索（FTS5 + 向量 + 图谱）、
-自动反思维护、记忆固化、写入审计 Hook、踩坑笔记、变更 diff、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
+自动反思维护、自动记忆捕获、记忆固化、写入审计 Hook、踩坑笔记、变更 diff、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
 
 ## 安装
 
@@ -21,12 +21,14 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 
 | 文件 | 作用 |
 | --- | --- |
-| `index.js` | 宿主入口：注册 10 个工具、系统提示词段落、定时维护/自动备份、挂载 HTTP 接口、管理原生组件 |
+| `index.js` | 宿主入口：注册 11 个工具、系统提示词段落、定时维护/自动备份/自动记忆回顾、挂载 HTTP 接口、管理原生组件 |
 | `client.js` | 客户端界面：侧边栏 `memory` 整页 + `settings.section` 入口 |
 | `lib/go-store.js` | Go 服务客户端：spawn、握手、增量同步、检索、备份、关闭 |
 | `lib/storage.js` | 存储选择：Go 服务 → Node SQLite → JSON |
 | `lib/engine.js` | 记忆引擎：条目 CRUD、实体键更新、版本取代、检索路由、冲突检测、维护任务、导出导入（全 async） |
+| `lib/capture.js` | 自动记忆信号检测、回顾排队与记事本代码去重 |
 | `lib/audit.js` | 写入审计 Hook：抓取本轮用户原话与写入参数，交给独立子智能体裁决；失败放行并记录 token |
+| `lib/write-hooks.js` | 通用写入生命周期 Hook：before/after 可改写、拦截与失败放行 |
 | `lib/search.js` | Node 回退检索：倒排 BM25 + 余弦 + 图谱 + 融合 |
 | `lib/sqlite.js` | Node 回退存储：迁移、向量表、备份 |
 | `lib/native.js` | Rust 核心客户端（JSON lines over stdio，自动 JS 兜底） |

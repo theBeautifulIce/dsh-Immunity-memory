@@ -208,10 +208,24 @@ window.__ModuleLoader__.load({
       .mp-kpi b { display:block; font-size:18px; line-height:1.2 }
       .mp-consolidate-row { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px; padding:8px 10px;
         display:flex; flex-direction:column; gap:6px }
-      .mp-change-card.is-create { border-left:3px solid var(--dsw-alias-state-success-primary,#2da44e) }
-      .mp-change-card.is-delete { border-left:3px solid var(--dsw-alias-state-error-primary,#cf222e) }
-      .mp-change-card.is-update { border-left:3px solid var(--dsw-alias-state-warning-primary,#bf8700) }
-      .mp-change-card.is-bulk, .mp-change-card.is-consolidate { border-left:3px solid #8250df }
+      /* 变更类型改用操作徽章内的小圆点标识，避免卡片左侧出现粗色条。 */
+      .mp-change-card.is-create .mp-chip:first-child,
+      .mp-change-card.is-delete .mp-chip:first-child,
+      .mp-change-card.is-update .mp-chip:first-child,
+      .mp-change-card.is-bulk .mp-chip:first-child,
+      .mp-change-card.is-consolidate .mp-chip:first-child {
+        display:inline-flex; align-items:center; gap:5px; font-weight:600;
+      }
+      .mp-change-card.is-create .mp-chip:first-child::before,
+      .mp-change-card.is-delete .mp-chip:first-child::before,
+      .mp-change-card.is-update .mp-chip:first-child::before,
+      .mp-change-card.is-bulk .mp-chip:first-child::before,
+      .mp-change-card.is-consolidate .mp-chip:first-child::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor; flex:0 0 auto }
+      .mp-change-card.is-create .mp-chip:first-child { color:#1a7f37; background:rgba(46,160,67,.12) }
+      .mp-change-card.is-delete .mp-chip:first-child { color:#cf222e; background:rgba(207,34,46,.1) }
+      .mp-change-card.is-update .mp-chip:first-child { color:#9a6700; background:rgba(191,135,0,.14) }
+      .mp-change-card.is-bulk .mp-chip:first-child,
+      .mp-change-card.is-consolidate .mp-chip:first-child { color:#8250df; background:rgba(130,80,223,.12) }
       .mp-diff { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.14)); border-radius:8px;
         overflow:hidden; background:var(--dsw-alias-bg-layer-1,#fff);
         font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; line-height:1.6 }
