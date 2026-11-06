@@ -110,7 +110,7 @@ assert.equal(mod.__internals.PANEL_ID, 'memory')
 
 // ---------------------------------------------------------------- 假数据 ----
 const boot = {
-  pluginVersion: '0.1.0',
+  pluginVersion: '0.2.0',
   enabled: true,
   settings: DEFAULT_SETTINGS,
   schema: SETTINGS_SCHEMA,

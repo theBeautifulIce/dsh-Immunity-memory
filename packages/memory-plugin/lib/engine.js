@@ -14,6 +14,7 @@
  *   L6 轮转记忆 / L7 情境感知 —— 有保鲜期，过期自动清理。
  */
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import {
   LAYERS,
   LAYER_IDS,
@@ -42,6 +43,7 @@ export { jaccard, tokenize }
 
 export const ITEM_TYPES = ['memory', 'note']
 export const ITEM_STATUSES = ['active', 'archived', 'expired', 'conflicted']
+const PLUGIN_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const MAX_TITLE = 240
 const MAX_TAGS = 24
 const MAX_TAG_LENGTH = 48
@@ -1617,7 +1619,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const active = settings()
     return {
       version: STORE_VERSION,
-      pluginVersion: '0.1.0',
+      pluginVersion: PLUGIN_VERSION,
       enabled: active.enabled,
       storage: store.info(),
       stats: summarize(current, active),

@@ -46,6 +46,11 @@ await test('默认设置可读且包含全部关键路径', async () => {
   assert.equal(settings.maintenance.diffKeep, 3000)
 })
 
+await test('状态里的插件版本与 package.json 保持一致', async () => {
+  const pkg = JSON.parse(readFileSync(new URL('../packages/memory-plugin/package.json', import.meta.url), 'utf8'))
+  assert.equal(engine.status().pluginVersion, pkg.version)
+})
+
 await test('设置 patch 只接受声明过的路径，非法值被忽略', async () => {
   const next = applySettingsPatch(engine.getSettings(), {
     ui: { pageSize: 40 },
