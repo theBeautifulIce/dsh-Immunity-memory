@@ -5,14 +5,21 @@
  * 运行：node tests/client.render.mjs
  */
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const REPO = 'D:\\aboutAI\\记忆插件设计'
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_FILE = join(REPO, 'packages', 'memory-plugin', 'client.js')
 
-const reactRequire = createRequire('C:\\Users\\ASUS\\.dsh\\profiles\\web\\package.json')
+const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+const profilePkg = join(dshHome, 'profiles', 'web', 'package.json')
+if (!existsSync(profilePkg)) {
+  throw new Error(`React profile not found: ${profilePkg}. Run this test inside a DSH installation or set DSH_HOME.`)
+}
+const reactRequire = createRequire(profilePkg)
 const React = reactRequire('react')
 const { renderToString } = reactRequire('react-dom/server')
 
