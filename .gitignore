@@ -5,8 +5,17 @@ pnpm-lock.yaml.bak
 
 # 运行期数据：记忆库永远写在 DSH 的 storages 目录，不应进仓库
 *.tmp
+*.sqlite3
+*.sqlite3-*
+*.sqlite3.bak-*
+*.db
+*.db-*
 store.json
 store.json.bak-*
+backups/
+.env
+.env.*
+!.env.example
 
 # 测试与调试产物
 coverage/

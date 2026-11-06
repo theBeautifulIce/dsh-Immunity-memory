@@ -1,9 +1,17 @@
 {
   "name": "dsh-memory-plugin",
   "version": "0.1.0",
-  "description": "DSH long-term memory: an eight-layer memory system, notebooks, hybrid retrieval, agent tools and a visual settings page.",
+  "description": "dsh-Immunity-memory: cross-session long-term memory for DeepSeek Harness with eight layers, notebooks, hybrid retrieval, consolidation and a visual UI.",
   "type": "module",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theBeautifulIce/dsh-Immunity-memory.git"
+  },
+  "homepage": "https://github.com/theBeautifulIce/dsh-Immunity-memory#readme",
+  "bugs": {
+    "url": "https://github.com/theBeautifulIce/dsh-Immunity-memory/issues"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

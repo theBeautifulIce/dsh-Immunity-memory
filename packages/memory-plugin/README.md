@@ -1,5 +1,7 @@
 # dsh-memory-plugin
 
+> Part of **dsh-Immunity-memory**. [简体中文](../../README.md) · [English](../../README.en.md)
+
 DSH（DeepSeek Harness）长期记忆插件：八层记忆体系、四本记事本、混合检索（FTS5 + 向量 + 图谱）、
 自动反思维护、记忆固化、踩坑笔记、变更 diff、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
 

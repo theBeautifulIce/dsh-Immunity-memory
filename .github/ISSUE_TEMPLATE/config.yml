@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/theBeautifulIce/dsh-Immunity-memory#readme
+    about: Installation, architecture, tools, settings, and troubleshooting.
+  - name: Security report
+    url: https://github.com/theBeautifulIce/dsh-Immunity-memory/security/advisories/new
+    about: Report vulnerabilities privately; do not open a public issue.
