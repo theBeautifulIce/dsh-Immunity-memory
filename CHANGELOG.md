@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
+Write-audit hook with a pending-candidate queue, isolated-judge token accounting,
+entity keys / provenance / supersedes, and a hardened audit approval path.
+
 ### Added
 
 - Write-audit hook (`hook.*`, default off): an isolated subagent reviews every
@@ -88,5 +93,6 @@ First public release of **dsh-Immunity-memory** (technical plugin id:
 - The loopback Go service uses a random token per process.
 - Backups and memory databases are treated as sensitive local data.
 
-[Unreleased]: https://github.com/theBeautifulIce/dsh-Immunity-memory/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/theBeautifulIce/dsh-Immunity-memory/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.2.0
 [0.1.0]: https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.1.0

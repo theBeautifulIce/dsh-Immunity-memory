@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.0-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -21,6 +21,8 @@
 </p>
 
 > 技术插件 id 仍为 **`dsh-memory-plugin`**，仓库与项目名为 **`dsh-Immunity-memory`**。改名只影响项目品牌，不影响已有安装、配置路径或工具名。
+
+> **v0.2.0 新增**：写入审计 Hook、待确认候选队列、独立子智能体审计 token 账本，以及实体键 / 来源原话 / 版本取代。详见 [Release v0.2.0](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.2.0)。
 
 ---
 
@@ -56,7 +58,7 @@
 | **混合检索** | FTS5 bm25 全文 + 384 维哈希向量余弦 + 关系图谱 BFS；默认权重 0.4 / 0.4 / 0.2，自动归一化，可按设置调整 |
 | **写入保护** | 最小正文长度、Jaccard 去重、不可变层只读、L2 冲突检测；可修改层写入和修改必须显式填写 `ttlDays`，绝不默认永久 |
 | **记忆模板** | 每个模板按 L0/L1/L3 逐条配置不可变记忆，可新增多套并热切换；L2 与 L4-L7 始终共享，不会因切换模板被复制或删除 |
-| **写入审计** | 每次 `memory_write` / `memory_update` 前由独立子智能体对照用户原话审计，可开关、可影子运行；待确认候选在界面批准后才落库，审计 token 计入账本 |
+| **写入审计** | 每次 `memory_write` / `memory_update` 前由无工具权限的独立子智能体对照用户原话审计；可开关、可影子运行，失败/超时放行；待确认候选在界面批准后才落库，审计 token 计入账本 |
 | **固化机制** | 反复写入、更新或命中的记忆进入候选；经 `memory_consolidate` 审计或界面确认后永久固化到 L1/L3，全程写审计 |
 | **提示词注入** | 每轮把最相关的记忆拼进系统提示词；页面显示注入 token 总量，展开可看逐层消耗；可预览、可关闭 |
 | **用量账本** | 记录每次检索的查询 token、结果 token，按工具/类型拆分；记事本视图统计含记事本结果的查询 |
@@ -283,6 +285,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 │  ├─ client.js               # 侧边栏整页 + 设置页（React.createElement，无构建）
 │  ├─ lib/
 │  │  ├─ engine.js            # 记忆引擎：CRUD、检索路由、冲突、维护、导出
+│  │  ├─ audit.js             # 写入审计 Hook：抓取用户原话、子智能体裁决、候选队列、token 汇总
 │  │  ├─ go-store.js          # Go 服务客户端：spawn、握手、增量同步、检索、备份
 │  │  ├─ storage.js           # 存储选择：Go → Node SQLite → JSON
 │  │  ├─ search.js            # Node 回退检索：BM25 + 余弦 + 图谱 + 融合
@@ -294,7 +297,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 │  ├─ native/<platform>-<arch>/# 打包进插件的 Rust 核心
 │  └─ locale/                 # 中英文插件元数据
 ├─ scripts/                   # build / check / benchmark / inspect / probe
-├─ tests/                     # engine / engine-go / tools / search / sqlite / native / api / render
+├─ tests/                     # audit / engine / engine-go / tools / search / sqlite / native / api / render
 ├─ CHANGELOG.md
 ├─ ROADMAP.md
 ├─ CONTRIBUTING.md
@@ -304,7 +307,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 ## 开发与测试
 
 ```pwsh
-node scripts/check.mjs        # 全部测试：语法、引擎、工具、存储、检索、原生、Go、接口、渲染
+node scripts/check.mjs        # 全部测试：语法、审计、引擎、工具、存储、检索、原生、Go、接口、渲染
 node tests/engine.test.mjs    # 单独跑引擎
 node tests/go-service.test.mjs
 node scripts/benchmark.mjs --items 2000 --queries 100 --graph 50 --out docs/性能报告.md

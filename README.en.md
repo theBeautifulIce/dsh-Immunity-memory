@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.1.0-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -21,6 +21,8 @@
 </p>
 
 > The technical plugin id remains **`dsh-memory-plugin`**; the repository and project name is **`dsh-Immunity-memory`**. The rename only affects branding, not existing installs, config paths, or tool names.
+
+> **New in v0.2.0**: write-audit hook, pending-candidate queue, isolated judge token accounting, and entity keys / provenance / supersedes. See the [v0.2.0 release](https://github.com/theBeautifulIce/dsh-Immunity-memory/releases/tag/v0.2.0).
 
 ---
 
@@ -56,7 +58,7 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | **Hybrid retrieval** | FTS5 bm25 + 384-d hashed-vector cosine + graph BFS; default weights 0.4 / 0.4 / 0.2, auto-normalized and configurable |
 | **Write protection** | Minimum content length, Jaccard dedupe, immutable-layer protection, L2 conflict detection; every mutable write/update must provide explicit `ttlDays`, never a silent permanent default |
 | **Memory templates** | Each template configures immutable memories per L0/L1/L3, with multiple templates and hot switching; L2 and L4-L7 are shared and are never copied or deleted by a switch |
-| **Write audit** | Before every `memory_write` / `memory_update`, an isolated subagent audits it against the user's turn; optional enforce or shadow mode, with pending candidates approved in the UI and per-run token accounting |
+| **Write audit** | Before every `memory_write` / `memory_update`, a tool-less isolated subagent audits it against the user's turn; optional enforce or shadow mode, fail-open on errors/timeouts, with pending candidates approved in the UI and per-run token accounting |
 | **Consolidation** | Frequently written, updated, or recalled memories become candidates; after `memory_consolidate` review or UI approval they become permanent L1/L3 memories, fully audited |
 | **Prompt injection** | The most relevant memories are injected into the system prompt each turn; the page shows total injected tokens and a per-layer breakdown; preview and disable are supported |
 | **Usage ledger** | Records query tokens and result tokens per search, split by tool/type; the notebook view counts queries whose results include notebook entries |
@@ -283,6 +285,7 @@ Numbers vary with hardware, data distribution, and whether the native core is en
 │  ├─ client.js               # sidebar page + settings (React.createElement, no build)
 │  ├─ lib/
 │  │  ├─ engine.js            # memory engine: CRUD, retrieval routing, conflict, maintenance, export
+│  │  ├─ audit.js             # write-audit hook: user-turn capture, judge subagent, candidates, tokens
 │  │  ├─ go-store.js          # Go client: spawn, handshake, incremental sync, search, backup
 │  │  ├─ storage.js           # storage selection: Go → Node SQLite → JSON
 │  │  ├─ search.js            # Node fallback: BM25 + cosine + graph + fusion
@@ -294,7 +297,7 @@ Numbers vary with hardware, data distribution, and whether the native core is en
 │  ├─ native/<platform>-<arch>/# Rust core shipped with the plugin
 │  └─ locale/                 # Chinese/English plugin metadata
 ├─ scripts/                   # build / check / benchmark / inspect / probe
-├─ tests/                     # engine / engine-go / tools / search / sqlite / native / api / render
+├─ tests/                     # audit / engine / engine-go / tools / search / sqlite / native / api / render
 ├─ CHANGELOG.md
 ├─ ROADMAP.md
 ├─ CONTRIBUTING.md
@@ -304,7 +307,7 @@ Numbers vary with hardware, data distribution, and whether the native core is en
 ## Development and testing
 
 ```pwsh
-node scripts/check.mjs        # all tests: syntax, engine, tools, storage, retrieval, native, Go, API, render
+node scripts/check.mjs        # all tests: syntax, audit, engine, tools, storage, retrieval, native, Go, API, render
 node tests/engine.test.mjs    # engine only
 node tests/go-service.test.mjs
 node scripts/benchmark.mjs --items 2000 --queries 100 --graph 50 --out docs/性能报告.md
