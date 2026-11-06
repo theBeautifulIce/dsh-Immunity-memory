@@ -68,6 +68,11 @@ function itemSignature(item) {
     item.expiresAt ?? '',
     JSON.stringify(item.conflicts ?? []),
     JSON.stringify(item.source ?? null),
+    item.key ?? '',
+    JSON.stringify(item.supersedes ?? []),
+    item.supersededBy ?? '',
+    item.validFrom ?? '',
+    item.validTo ?? '',
     item.title ?? '',
     (item.content ?? '').length,
   ].join('|')

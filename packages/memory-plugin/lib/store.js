@@ -50,6 +50,7 @@ export function emptyState(settings) {
       writes: 0,
       searches: 0,
       lastError: null,
+      audit: { version: 1, runs: [] },
     },
   }
 }

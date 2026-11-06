@@ -815,6 +815,7 @@ window.__ModuleLoader__.load({
         { id: 'pitfall', label: txt('踩坑', 'Pitfalls'), count: stats.byNotebook?.pitfall ?? 0 },
         { id: 'diff', label: txt('变更', 'Changes') },
         { id: 'usage', label: txt('用量', 'Usage') },
+        { id: 'audit', label: txt('审计', 'Audit'), count: boot.hook?.stats?.pending ?? 0 },
         { id: 'consolidate', label: txt('固化', 'Consolidate'), count: boot.consolidation?.candidates?.length ?? 0 },
         { id: 'settings', label: txt('设置', 'Settings') },
         { id: 'maintenance', label: txt('维护', 'Maintenance') },
@@ -873,6 +874,9 @@ window.__ModuleLoader__.load({
           : null,
         tab === 'usage'
           ? h(UsagePanel, { api, lang, boot, notify })
+          : null,
+        tab === 'audit'
+          ? h(AuditPanel, { api, lang, boot, notify, onChanged: refreshBoot })
           : null,
         tab === 'consolidate'
           ? h(ConsolidationPanel, { api, lang, boot, notify, onChanged: refreshBoot })
@@ -1337,6 +1341,175 @@ window.__ModuleLoader__.load({
             ? null
             : h('button', { type: 'button', className: 'mp-btn is-danger', disabled: readOnly, onClick: onDelete },
               txt('删除', 'Delete'))))
+    }
+
+    // ------------------------------------------------------------ 审计页 ----
+
+    function AuditPanel({ api, lang, boot, notify, onChanged }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const [stats, setStats] = useState(boot.hook?.stats ?? null)
+      const [runs, setRuns] = useState(boot.hook?.runs ?? [])
+      const [loading, setLoading] = useState(false)
+      const [busy, setBusy] = useState('')
+      const hook = boot.settings?.hook ?? {}
+      const enabled = stats?.enabled ?? hook.enabled === true
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const [nextStats, nextRuns] = await Promise.all([
+            api('audit.stats', {}),
+            api('audit.runs', { limit: 500 }),
+          ])
+          setStats(nextStats)
+          setRuns(nextRuns.runs ?? [])
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setLoading(false)
+        }
+      }, [api, notify])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      async function toggle() {
+        setBusy('toggle')
+        try {
+          await api('settings.save', { patch: { hook: { enabled: !enabled } } })
+          await load()
+          await onChanged()
+          notify(!enabled ? txt('写入审计已启用', 'Write audit enabled') : txt('写入审计已关闭', 'Write audit disabled'))
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setBusy('')
+        }
+      }
+
+      async function decide(run, decision) {
+        let note = ''
+        if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+          note = window.prompt(txt(
+            `审计意见（${decision === 'approve' ? '批准写入' : '拒绝并归档'}，可留空）：`,
+            `Audit note (${decision === 'approve' ? 'approve write' : 'reject and archive'}, optional):`), '') ?? ''
+        }
+        setBusy(run.id)
+        try {
+          await api('audit.decide', { id: run.id, decision, note })
+          notify(decision === 'approve' ? txt('已批准候选写入', 'Candidate approved and written') : txt('已拒绝候选', 'Candidate rejected'))
+          await load()
+          await onChanged()
+        } catch (error) {
+          notify(error.message, 'error')
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const pendingRuns = runs.filter((run) => run.enforced === true
+        && !run.decision
+        && (run.status === 'needs_user' || run.status === 'rejected'))
+      const statusLabel = (status) => ({
+        running: txt('判断中', 'running'),
+        approved: txt('已通过', 'approved'),
+        rejected: txt('已拒绝', 'rejected'),
+        needs_user: txt('待确认', 'needs user'),
+        failed: txt('失败放行', 'failed'),
+      }[status] ?? status)
+      const statusClass = (status) => status === 'rejected' || status === 'failed'
+        ? 'is-bad'
+        : status === 'needs_user' || status === 'running' ? 'is-warn' : ''
+
+      return h('div', { className: 'mp-panel' },
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-inject-head' },
+            h('div', null,
+              h('div', { className: 'mp-card-title' }, txt('写入审计 Hook', 'Write audit hook')),
+              h('div', { className: 'mp-hint' }, txt(
+                '每次 memory_write / memory_update 前，由一个无工具权限的干净子智能体只依据用户原话判断；失败、超时或服务缺失一律放行。',
+                'Before every memory_write / memory_update, a clean tool-less subagent judges the write against the user’s own words. Failures, timeouts and missing services always allow the write.'))),
+            h('div', { className: 'mp-toolbar' },
+              h('button', {
+                type: 'button',
+                className: `mp-btn${enabled ? ' is-danger' : ' is-primary'}`,
+                disabled: busy !== '' || loading,
+                onClick: toggle,
+              }, enabled ? txt('关闭审计', 'Disable audit') : txt('启用审计', 'Enable audit')),
+              h('button', { type: 'button', className: 'mp-btn', disabled: loading, onClick: load },
+                loading ? txt('刷新中…', 'Refreshing…') : txt('刷新', 'Refresh')))),
+          h('div', { className: 'mp-usage-grid' },
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('累计审计', 'Audited writes')),
+              h('b', null, stats?.total ?? 0)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('待确认 / 已拦截', 'Pending / blocked')),
+              h('b', null, `${stats?.pending ?? 0} / ${stats?.blocked ?? 0}`)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('通过 / 拒绝', 'Approved / rejected')),
+              h('b', null, `${stats?.approved ?? 0} / ${stats?.rejected ?? 0}`)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('审计 token 合计', 'Audit tokens')),
+              h('b', null, stats?.tokens?.total ?? 0)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('输入 / 输出', 'Input / output')),
+              h('b', null, `${stats?.tokens?.input ?? 0} / ${stats?.tokens?.output ?? 0}`)),
+            h('div', { className: 'mp-kpi' },
+              h('span', { className: 'mp-hint' }, txt('缓存读 / 写', 'Cache read / write')),
+              h('b', null, `${stats?.tokens?.cacheRead ?? 0} / ${stats?.tokens?.cacheWrite ?? 0}`))),
+          h('div', { className: 'mp-hint' }, txt(
+            `阈值 ${Math.round((stats?.minConfidence ?? hook.minConfidence ?? 0.7) * 100)}%；强制模式${stats?.enforce === false ? '关闭（影子记录）' : '开启'}。待确认和已拦截的候选在批准后才会补写。`,
+            `Threshold ${Math.round((stats?.minConfidence ?? hook.minConfidence ?? 0.7) * 100)}%; enforcement ${stats?.enforce === false ? 'off (shadow)' : 'on'}. Pending and blocked candidates are written only after approval.`))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, `${txt('候选队列', 'Candidate queue')} ${pendingRuns.length}`),
+          pendingRuns.length === 0
+            ? h('div', { className: 'mp-empty' }, txt('没有待人工确认的候选。', 'No candidates waiting for review.'))
+            : h('div', { className: 'mp-list-plain' }, pendingRuns.map((run) => h('div', {
+              key: run.id,
+              className: 'mp-row',
+              style: { display: 'flex', flexDirection: 'column', gap: '6px' },
+            },
+              h('div', { className: 'mp-row-title' },
+                h('span', { className: `mp-chip ${statusClass(run.status)}` }, statusLabel(run.status)),
+                h('span', null, run.title || run.tool),
+                h('span', { className: 'mp-hint' }, `${Math.round((run.confidence ?? 0) * 100)}%`)),
+              h('div', { className: 'mp-row-meta' },
+                h('span', null, `${formatTime(run.at)} · ${run.tool}`),
+                h('span', null, `${txt('层级', 'layer')} ${run.layer ?? '?'}`),
+                run.usage?.totalTokens ? h('span', null, `${run.usage.totalTokens} token`) : null),
+              run.sourceQuote ? h('div', { className: 'mp-code' }, run.sourceQuote.slice(0, 600)) : null,
+              h('div', { className: 'mp-hint' }, run.reason || txt('审计员未给出理由', 'No reason supplied')),
+              run.error ? h('div', { className: 'mp-hint', style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)' } }, run.error) : null,
+              h('div', { className: 'mp-toolbar' },
+                h('button', {
+                  type: 'button',
+                  className: 'mp-btn is-primary',
+                  disabled: busy !== '',
+                  onClick: () => decide(run, 'approve'),
+                }, busy === run.id ? txt('处理中…', 'Working…') : txt('批准写入', 'Approve and write')),
+                h('button', {
+                  type: 'button',
+                  className: 'mp-btn is-danger',
+                  disabled: busy !== '',
+                  onClick: () => decide(run, 'reject'),
+                }, txt('拒绝', 'Reject')))))),
+        h('div', { className: 'mp-card' },
+          h('div', { className: 'mp-card-title' }, txt('最近审计记录', 'Recent audit runs')),
+          runs.length === 0
+            ? h('div', { className: 'mp-empty' }, txt('还没有审计记录。', 'No audit runs yet.'))
+            : h('div', { className: 'mp-list-plain' }, runs.map((run) => h('div', {
+              key: run.id,
+              className: 'mp-audit',
+              style: { flexDirection: 'column', alignItems: 'stretch', gap: '3px' },
+            },
+              h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+                h('span', { className: `mp-chip ${statusClass(run.status)}` }, statusLabel(run.status)),
+                h('span', null, run.title || run.tool),
+                h('span', { className: 'mp-hint' }, `${formatTime(run.at)} · ${run.usage?.totalTokens ?? 0} token`)),
+              h('div', { className: 'mp-hint' }, `${run.tool} · ${run.verdict ?? '-'} · ${Math.round((run.confidence ?? 0) * 100)}%${run.decision ? ` · ${run.decision.actor}` : ''}`),
+              run.reason ? h('div', { className: 'mp-hint' }, run.reason) : null,
+              run.appliedItemId ? h('div', { className: 'mp-code' }, `${txt('写入条目', 'applied item')} ${run.appliedItemId}`) : null))))))
     }
 
     // ------------------------------------------------------------ 用量页 ----
@@ -2417,7 +2590,7 @@ window.__ModuleLoader__.load({
       __internals: {
         MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
         MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
-        InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView,
+        InjectionCard, TemplateLayerEditor, UsagePanel, AuditPanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView,
       },
     }
   },

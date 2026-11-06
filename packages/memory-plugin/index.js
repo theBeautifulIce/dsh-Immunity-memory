@@ -20,6 +20,7 @@ import { createEngine } from './lib/engine.js'
 import { createNativeCore } from './lib/native.js'
 import { API_PATH, LEGACY_API_PATH, mountApi, setTrustedHosts } from './lib/api.js'
 import { registerTools } from './lib/tools.js'
+import { createAuditHook } from './lib/audit.js'
 
 export const name = 'dsh-memory-plugin'
 export const inject = ['tools', 'systemPrompt']
@@ -116,6 +117,25 @@ export async function apply(ctx, config) {
   debug(`runtime: node=${process.versions.node} electron=${process.versions.electron ?? '-'} sqlite=${sqliteProbe()} storage=${storageKind}`)
 
   ctx.effect(() => registerTools(ctx, engine, log), 'memory-plugin:tools')
+
+  // 记忆写入审计：只在设置开启时拦截 memory_write / memory_update，
+  // 用一个没有工具权限的干净子智能体判断来源是否成立。任何失败都放行。
+  // subagents 是 agent 作用域服务：优先从本次调用携带的 agent.ctx 取，
+  // 不硬注入，这样宿主没有该服务时插件仍能加载，审计按失败放行。
+  const auditHook = createAuditHook({
+    engine,
+    log,
+    getSubagents: (call) => {
+      try {
+        return call?.agent?.ctx?.get?.('subagents')
+      } catch {
+        return undefined
+      }
+    },
+  })
+  ctx.effect(() => ctx.on('tools/pre-execute', (exec, next) => auditHook.gate(exec, next)), 'memory-plugin:audit-hook')
+  log('info', `记忆写入审计：${engine.getSettings().hook?.enabled === true ? '已开启' : '关闭'}`)
+
   log('info', `记忆库已就绪（${storageKind}）：${store.path}`)
 
   // 提示词注入：让模型知道有长期记忆可用，并给出最相关的一小段摘要。

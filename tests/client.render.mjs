@@ -160,6 +160,19 @@ const boot = {
     ],
   },
   consolidation: { candidates: [] },
+  hook: {
+    stats: {
+      enabled: true, enforce: true, minConfidence: 0.7, total: 3, running: 0, approved: 1,
+      rejected: 1, needs_user: 1, failed: 0, blocked: 1, needsUser: 1, pending: 1,
+      tokens: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, total: 125 },
+    },
+    runs: [{
+      id: 'audit_demo0001', at: '2026-11-06T03:00:00.000Z', tool: 'memory_write',
+      title: '示例候选', layer: 'L4', status: 'needs_user', verdict: 'needs_user',
+      confidence: 0.4, reason: '证据不足', enforced: true, sourceQuote: '用户原话',
+      usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 0, totalTokens: 125 },
+    }],
+  },
   usage: { calls: 1, queryTokens: 4, resultTokens: 30, totalTokens: 34 },
   stats: { total: 3, memory: 2, note: 1, active: 3, archived: 0, expired: 0, conflicted: 0, pinned: 1, byLayer: { L5: 2, L4: 1 }, byNotebook: { memory: 2, daily: 1, asset: 0, pitfall: 0 }, lastWriteAt: '2026-11-05T10:00:00.000Z' },
   storage: { path: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin\\store.json', dir: 'C:\\Users\\ASUS\\.dsh\\storages\\dsh-memory-plugin', exists: true, bytes: 2048, modifiedAt: '2026-11-05T10:00:00.000Z' },
@@ -181,7 +194,7 @@ function render(title, element) {
 const shell = render('MemorySettingsPage 加载态', React.createElement(settingsReg.Component))
 assert.ok(shell.includes('mp-root'), '应包含根容器样式类名')
 
-const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView } = mod.__internals
+const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, AuditPanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView } = mod.__internals
 render('MemorySettingsPage（直接调用）', React.createElement(MemorySettingsPage))
 
 // 侧边栏入口：整页容器必须自己滚动（main 槽位是 overflow:hidden 的列）。
@@ -227,6 +240,11 @@ for (const label of ['不可变层', '灵魂层', '思想核心', '本能行为'
 }
 
 render('UsagePanel 用量', React.createElement(UsagePanel, { api, lang: 'zh', boot, notify: noop }))
+const auditPanel = render('AuditPanel 审计候选', React.createElement(AuditPanel, {
+  api, lang: 'zh', boot, notify: noop, onChanged: noop,
+}))
+assert.ok(auditPanel.includes('候选队列'), '审计页应显示候选队列')
+assert.ok(auditPanel.includes('125'), '审计页应显示累计 token')
 render('PitfallPanel 踩坑笔记', React.createElement(PitfallPanel, {
   api, lang: 'zh', notify: noop, onChanged: noop,
 }))

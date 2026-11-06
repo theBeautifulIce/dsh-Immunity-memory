@@ -229,6 +229,11 @@ export function createSearchEngine({ store, native, getSettings, log }) {
       if (options.status === 'usable') {
         if (item.status !== 'active' && item.status !== 'conflicted') return false
       } else if (options.status !== undefined && options.status !== 'all' && item.status !== options.status) return false
+      if ((options.status === 'usable' || options.status === 'active' || options.status === 'conflicted')
+        && (item.duplicateOf !== null && item.duplicateOf !== undefined
+          || item.supersededBy !== null && item.supersededBy !== undefined)) {
+        return false
+      }
       if (Array.isArray(options.tags) && options.tags.length > 0) {
         const wanted = options.tags.map((tag) => String(tag).toLowerCase())
         const have = (item.tags ?? []).map((tag) => String(tag).toLowerCase())

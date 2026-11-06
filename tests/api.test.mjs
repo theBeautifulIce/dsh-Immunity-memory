@@ -94,6 +94,8 @@ try {
     assert.equal(body.value.stats.total, 0)
     assert.ok(body.value.toolNames.includes('memory_search'))
     assert.ok(typeof body.value.storage.path === 'string')
+    assert.equal(body.value.hook.stats.enabled, false)
+    assert.ok(Array.isArray(body.value.hook.runs))
   })
 
   await test('mountApi 支持自定义路径（旧前缀兼容）', async () => {
@@ -224,6 +226,29 @@ try {
     const { body } = await call('audit.list', { limit: 10 })
     assert.ok(body.value.audit.length >= 1)
     assert.ok(body.value.audit.some((entry) => entry.kind === 'change'))
+  })
+
+  await test('audit.stats / runs / decide 暴露候选队列', async () => {
+    const run = await engine.recordAuditRun({
+      status: 'needs_user',
+      tool: 'memory_write',
+      action: 'create',
+      enforced: true,
+      verdict: 'needs_user',
+      confidence: 0.4,
+      reason: '接口测试候选',
+      sourceQuote: '用户原话',
+      proposed: { layer: 'L4', title: '接口候选', content: '从候选队列批准后写入的接口测试记忆。', ttlDays: 30 },
+    })
+    const stats = await call('audit.stats', {})
+    assert.equal(stats.body.value.pending, 1)
+    const runs = await call('audit.runs', { status: 'needs_user' })
+    assert.equal(runs.body.value.runs[0].id, run.id)
+    const decided = await call('audit.decide', { id: run.id, decision: 'approve', note: '接口测试' })
+    assert.equal(decided.body.value.status, 'approved')
+    assert.ok(decided.body.value.appliedItemId.startsWith('mem_'))
+    const item = await engine.getItem(decided.body.value.appliedItemId)
+    assert.equal(item.title, '接口候选')
   })
 
   await test('data.export / data.import 往返', async () => {

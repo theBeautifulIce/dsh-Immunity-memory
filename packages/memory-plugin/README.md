@@ -3,7 +3,7 @@
 > Part of **dsh-Immunity-memory**. [简体中文](../../README.md) · [English](../../README.en.md)
 
 DSH（DeepSeek Harness）长期记忆插件：八层记忆体系、四本记事本、混合检索（FTS5 + 向量 + 图谱）、
-自动反思维护、记忆固化、踩坑笔记、变更 diff、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
+自动反思维护、记忆固化、写入审计 Hook、踩坑笔记、变更 diff、注入 token 统计与用量账本，外加左侧栏「记忆」整页界面。
 
 ## 安装
 
@@ -25,7 +25,8 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 | `client.js` | 客户端界面：侧边栏 `memory` 整页 + `settings.section` 入口 |
 | `lib/go-store.js` | Go 服务客户端：spawn、握手、增量同步、检索、备份、关闭 |
 | `lib/storage.js` | 存储选择：Go 服务 → Node SQLite → JSON |
-| `lib/engine.js` | 记忆引擎：条目 CRUD、检索路由、冲突检测、维护任务、导出导入（全 async） |
+| `lib/engine.js` | 记忆引擎：条目 CRUD、实体键更新、版本取代、检索路由、冲突检测、维护任务、导出导入（全 async） |
+| `lib/audit.js` | 写入审计 Hook：抓取本轮用户原话与写入参数，交给独立子智能体裁决；失败放行并记录 token |
 | `lib/search.js` | Node 回退检索：倒排 BM25 + 余弦 + 图谱 + 融合 |
 | `lib/sqlite.js` | Node 回退存储：迁移、向量表、备份 |
 | `lib/native.js` | Rust 核心客户端（JSON lines over stdio，自动 JS 兜底） |
@@ -48,14 +49,14 @@ Go 服务二进制缺失或启动失败时，`auto` 会自动回退并在日志/
 
 ## 设置项
 
-设置页按「通用 / 存储 / 检索 / 写入 / 分层开关 / 提示词注入 / 维护 / 性能 / 隐私 / 模型工具」
-分组，可改完即存、可一键恢复默认。其中：
+设置页按「通用 / 存储 / 检索 / 写入 / 分层开关 / 提示词注入 / 维护 / 性能 / 隐私 / 模型工具 / 写入审计 Hook」分组，可改完即存、可一键恢复默认。其中：
 
 - `layers.*`：逐层开关，关掉后该层不再被读写
 - `retrieval.*`：语义/图谱开关、三路融合权重、图谱深度与种子数、缓存大小
 - `write.*`：正文字数、去重阈值、默认重要度、新建建议保鲜期；写入层由智能体按内容在可修改层中选择，不再有设置里的默认层；可修改层写入与修改必须显式给 `ttlDays`，这是硬约束
 - `prompt.*`：是否注入、内置/自定义模板、模板预算覆盖、条数与字数上限；每个模板按 L0/L1/L3 填写不可变记忆条目，切换模板只替换这些不可变层和预算，L2、L4-L7 共享复用
 - `consolidation.*`：固化开关、信号阈值、观察窗口、目标层（auto / L1 / L3）、最低重要度、单轮候选上限、是否自动应用；固化结果永久有效，不再设置固化后 TTL
+- `hook.*`：写入审计开关（默认关）、enforce（拒绝时阻止写入）、最低置信度、超时秒数、审计记录上限；needs_user 进入待确认队列，界面批准后补写
 - `maintenance.*`：自动维护间隔、保鲜期、归档天数、轮转阈值、资源上限、反思提升阈值、冲突阈值、普通审计与变更历史保留条数（`auditKeep` / `diffKeep`）
 - `storage.*`：引擎、目录、备份保留数、自动备份间隔
 - `performance.nativeCore`：是否启用 Rust 原生核心

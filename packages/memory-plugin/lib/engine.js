@@ -51,7 +51,12 @@ const DEDUPE_SCAN_LIMIT = 1200
 const MAX_CHANGE_CONTENT = 4000
 const MAX_CHANGE_TEXT = 8000
 const MAX_CHANGE_AUDIT = 12000
-const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt']
+const MAX_KEY = 160
+const MAX_SOURCE_QUOTE = 2000
+const MAX_SUPERSEDES = 20
+const AUDIT_RUN_STATUSES = ['running', 'approved', 'rejected', 'needs_user', 'failed']
+const AUDIT_VERDICTS = ['approve', 'reject', 'merge', 'needs_user']
+const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'key', 'supersedes', 'supersededBy']
 
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
 
@@ -60,6 +65,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   let state
   /** id → item 的索引，检索时避免每次重建 Map。 */
   let itemMap = new Map()
+  // 同一个候选的并发 approve/reject 只允许一个进入写库流程。
+  const auditDecisionsInFlight = new Set()
 
   // 设置归属：存档里有就以存档为准（用户在设置页改的），否则用行配置里的初始值。
   const fallbackSettings = () => normalizeSettings(initialSettings ?? getSettings?.() ?? {})
@@ -102,6 +109,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       audit: [],
       meta: { ...base.meta, ...(raw.meta !== null && typeof raw.meta === 'object' ? raw.meta : {}) },
     }
+    next.meta.audit = normalizeAuditStore(next.meta.audit)
     const items = Array.isArray(raw.items) ? raw.items : []
     const seen = new Set()
     for (const candidate of items) {
@@ -983,6 +991,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
     if (title === '' && content.trim() === '') throw createError('EMPTY', '标题和正文不能同时为空')
     const now = new Date().toISOString()
+    const key = normalizeKey(input.key)
+    const source = normalizeSource({
+      kind: actor === 'agent' ? 'agent' : actor === 'import' ? 'import' : 'user',
+      sessionId: input.sessionId,
+      workspace: input.workspace,
+      quote: input.quote ?? input.source?.quote,
+      turn: input.turn ?? input.source?.turn,
+      confidence: input.confidence ?? input.source?.confidence,
+    })
+    const supersedes = normalizeIdList(input.supersedes)
     const item = normalizeItem({
       id: newId(),
       type,
@@ -995,17 +1013,65 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       status: 'active',
       pinned: input.pinned === true,
       ttlDays: type === 'memory' ? normalizeTtl(input.ttlDays, active, layer) : null,
-      source: {
-        kind: actor === 'agent' ? 'agent' : actor === 'import' ? 'import' : 'user',
-        sessionId: typeof input.sessionId === 'string' ? input.sessionId : null,
-        workspace: typeof input.workspace === 'string' ? input.workspace : null,
-      },
+      key,
+      source,
+      supersedes,
+      validFrom: now,
       createdAt: now,
       updatedAt: now,
       lastAccessAt: now,
       accessCount: 0,
     })
     if (item === undefined) throw createError('INVALID', '无法创建条目')
+
+    // 实体键是"同一事实"的幂等键：同层同类型同键再次写入时更新原条目，
+    // 而不是堆一条新记忆。没有键时仍走内容相似度去重。
+    if (key !== null) {
+      const existing = current.items.find((candidate) => candidate.key === key
+        && candidate.type === type
+        && candidate.layer === layer
+        && candidate.notebook === notebook
+        && candidate.supersededBy === null
+        && (candidate.status === 'active' || candidate.status === 'conflicted'))
+      if (existing !== undefined) {
+        const unchanged = existing.title === title && existing.content === content
+          && JSON.stringify(existing.tags) === JSON.stringify(item.tags)
+          && existing.importance === item.importance
+        if (unchanged && supersedes.length === 0) {
+          existing.source = normalizeSource({
+            kind: source.kind,
+            sessionId: source.sessionId ?? existing.source?.sessionId,
+            workspace: source.workspace ?? existing.source?.workspace,
+            quote: source.quote ?? existing.source?.quote,
+            turn: source.turn ?? existing.source?.turn,
+            confidence: source.confidence ?? existing.source?.confidence,
+          })
+          // 同键同内容再写一次也是一次“续期”：必须刷新保鲜期，
+          // 不能让旧到期时间继续生效，更不能变成无限保鲜。
+          existing.ttlDays = item.ttlDays
+          existing.expiresAt = expiresAtFor(existing, active)
+          existing.updatedAt = now
+          existing.lastAccessAt = now
+          existing.accessCount = (existing.accessCount ?? 0) + 1
+          reinforce(existing, 'create')
+          indexItem(existing)
+          await persist()
+          return decorate(existing)
+        }
+        return updateItem(existing.id, {
+          title,
+          content,
+          tags: item.tags,
+          importance: item.importance,
+          ttlDays: type === 'memory' ? item.ttlDays : null,
+          key,
+          quote: source.quote,
+          turn: source.turn,
+          confidence: source.confidence,
+          supersedes,
+        }, actor)
+      }
+    }
 
     const duplicate = findSimilar(current.items, item, active.write.dedupeThreshold)
     if (duplicate !== undefined) {
@@ -1018,6 +1084,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     reinforce(item, 'create')
     current.items.push(item)
     indexItem(item)
+    if (supersedes.length > 0) applySupersedes(current, item, supersedes, actor, now)
     detectConflicts(current, item, active)
     audit('create', `${item.layer}/${item.type} ${item.title}`, actor)
     recordChange('create', null, item, actor)
@@ -1053,9 +1120,35 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       next.status = patch.status
     }
     if (patch.ttlDays !== undefined) next.ttlDays = normalizeTtl(patch.ttlDays, active, next.layer)
+    if (patch.key !== undefined) {
+      const nextKey = normalizeKey(patch.key)
+      if (nextKey !== null) {
+        const clash = current.items.find((candidate) => candidate.id !== id
+          && candidate.key === nextKey
+          && candidate.type === next.type
+          && candidate.layer === next.layer
+          && candidate.notebook === next.notebook
+          && candidate.status === 'active'
+          && candidate.supersededBy === null)
+        if (clash !== undefined) throw createError('KEY_CONFLICT', `实体键 ${nextKey} 已被 ${clash.id} 占用`)
+      }
+      next.key = nextKey
+    }
+    if (patch.quote !== undefined || patch.turn !== undefined || patch.confidence !== undefined || patch.source !== undefined) {
+      next.source = normalizeSource({
+        ...before.source,
+        ...(patch.source !== null && typeof patch.source === 'object' ? patch.source : {}),
+        quote: patch.quote ?? patch.source?.quote ?? before.source?.quote,
+        turn: patch.turn ?? patch.source?.turn ?? before.source?.turn,
+        confidence: patch.confidence ?? patch.source?.confidence ?? before.source?.confidence,
+      })
+    }
+    if (patch.supersedes !== undefined) next.supersedes = normalizeIdList(patch.supersedes)
     if (patch.title === undefined && patch.content === undefined && patch.tags === undefined
       && patch.importance === undefined && patch.layer === undefined && patch.pinned === undefined
-      && patch.status === undefined && patch.ttlDays === undefined && patch.notebook === undefined) {
+      && patch.status === undefined && patch.ttlDays === undefined && patch.notebook === undefined
+      && patch.key === undefined && patch.quote === undefined && patch.turn === undefined
+      && patch.confidence === undefined && patch.source === undefined && patch.supersedes === undefined) {
       return decorate(before)
     }
     // 修改可修改层的内容/重要度时必须续期：老数据没有 ttlDays 时要求这次补填。
@@ -1071,11 +1164,34 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     current.items[index] = normalizeItem(next) ?? before
     reinforce(current.items[index], 'update')
     indexItem(current.items[index])
+    if (Array.isArray(current.items[index].supersedes) && current.items[index].supersedes.length > 0) {
+      applySupersedes(current, current.items[index], current.items[index].supersedes, actor, next.updatedAt)
+    }
     detectConflicts(current, current.items[index], active)
     audit('update', `${current.items[index].layer}/${current.items[index].title}`, actor)
     recordChange('update', beforeChange, current.items[index], actor)
     await persist()
     return decorate(current.items[index])
+  }
+
+  /** 把被取代的旧条目归档，并写入双向链接；不可变层不参与自动归档。 */
+  function applySupersedes(current, item, ids, actor, at) {
+    const wanted = new Set(ids.filter((id) => typeof id === 'string' && id !== item.id))
+    if (wanted.size === 0) return
+    for (const target of current.items) {
+      if (!wanted.has(target.id)) continue
+      if (layerInfo(target.layer).immutable) continue
+      if (target.supersededBy === item.id) continue
+      const before = clone(target)
+      target.status = 'archived'
+      target.supersededBy = item.id
+      target.validTo = at
+      target.updatedAt = at
+      target.version = (target.version ?? 1) + 1
+      indexItem(target)
+      recordChange('supersede', before, target, actor, { reason: `被 ${item.id} 取代` })
+      audit('supersede', `${target.id} 被 ${item.id} 取代`, actor)
+    }
   }
 
   async function deleteItems(ids, actor = 'user') {
@@ -1644,6 +1760,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
     const candidates = current.items.filter((item) => {
       if (item.status !== 'active' && item.status !== 'conflicted') return false
+      if (item.duplicateOf !== null && item.duplicateOf !== undefined) return false
+      if (item.supersededBy !== null && item.supersededBy !== undefined) return false
       if (isExpiredItem(item, now)) return false
       if (!layerEnabled(active, item.layer)) return false
       if (item.type !== 'memory') return false
@@ -1834,6 +1952,176 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     return templates()
   }
 
+  // ------------------------------------------------------------ 审计 Hook ----
+
+  function auditStore() {
+    const current = currentState()
+    if (current.meta.audit === undefined) current.meta.audit = normalizeAuditStore(undefined)
+    current.meta.audit = normalizeAuditStore(current.meta.audit)
+    return current.meta.audit
+  }
+
+  function auditStats() {
+    const bucket = auditStore()
+    const active = settings()
+    const tokens = emptyUsage()
+    const counts = { running: 0, approved: 0, rejected: 0, needs_user: 0, failed: 0 }
+    for (const run of bucket.runs) {
+      counts[run.status] = (counts[run.status] ?? 0) + 1
+      addUsage(tokens, run.usage)
+    }
+    return {
+      enabled: active.hook?.enabled === true,
+      enforce: active.hook?.enforce !== false,
+      minConfidence: active.hook?.minConfidence ?? 0.7,
+      total: bucket.runs.length,
+      ...counts,
+      blocked: bucket.runs.filter((run) => (run.status === 'rejected' || run.status === 'needs_user') && run.enforced === true).length,
+      needsUser: counts.needs_user,
+      pending: bucket.runs.filter((run) => run.enforced === true && !run.decision && (run.status === 'needs_user' || run.status === 'rejected')).length,
+      tokens: {
+        input: tokens.inputTokens,
+        output: tokens.outputTokens,
+        cacheRead: tokens.cacheReadTokens,
+        cacheWrite: tokens.cacheWriteTokens,
+        total: tokens.totalTokens,
+      },
+      lastAt: bucket.runs.length > 0 ? bucket.runs[bucket.runs.length - 1].at : null,
+    }
+  }
+
+  function auditRuns(options = {}) {
+    const status = AUDIT_RUN_STATUSES.includes(options.status) ? options.status : undefined
+    const limit = clampInt(options.limit, 1, 500, 50)
+    return auditStore().runs
+      .filter((run) => status === undefined || run.status === status)
+      .slice(-limit)
+      .reverse()
+  }
+
+  async function recordAuditRun(input = {}) {
+    const current = await ensureLoaded()
+    const bucket = auditStore()
+    const run = normalizeAuditRun({ ...input, id: input.id ?? `audit_${randomUUID().slice(0, 12)}`, at: input.at ?? new Date().toISOString() })
+    bucket.runs.push(run)
+    const cap = Math.max(10, settings().hook?.maxRuns ?? 100)
+    if (bucket.runs.length > cap) bucket.runs = bucket.runs.slice(-cap)
+    current.meta.audit = bucket
+    await persist()
+    return clone(run)
+  }
+
+  async function finishAuditRun(id, patch = {}) {
+    const current = await ensureLoaded()
+    const bucket = auditStore()
+    const run = bucket.runs.find((candidate) => candidate.id === id)
+    if (run === undefined) throw createError('AUDIT_NOT_FOUND', `找不到审计记录 ${id}`)
+    const merged = normalizeAuditRun({
+      ...run,
+      ...patch,
+      usage: patch.usage !== undefined ? patch.usage : run.usage,
+      finishedAt: patch.finishedAt ?? new Date().toISOString(),
+      durationMs: patch.durationMs ?? Math.max(0, Date.now() - Date.parse(run.startedAt ?? run.at)),
+    })
+    Object.assign(run, merged)
+    current.meta.audit = bucket
+    await persist()
+    return clone(run)
+  }
+
+  async function decideAuditRun(id, decision, note = '', actor = 'user') {
+    if (auditDecisionsInFlight.has(id)) {
+      throw createError('AUDIT_BUSY', '该审计候选正在处理，请稍后再试')
+    }
+    auditDecisionsInFlight.add(id)
+    try {
+      const current = await ensureLoaded()
+    if (decision !== 'approve' && decision !== 'reject') throw createError('INVALID_DECISION', 'decision 必须是 approve 或 reject')
+    const bucket = auditStore()
+    const run = bucket.runs.find((candidate) => candidate.id === id)
+    if (run === undefined) throw createError('AUDIT_NOT_FOUND', `找不到审计记录 ${id}`)
+    const at = new Date().toISOString()
+    const pending = run.enforced === true && (run.status === 'needs_user' || run.status === 'rejected')
+
+    // 候选队列语义：被拦截的写入还没有落库。人工批准时用审计记录里的
+    // proposed 载荷补写，并记录 appliedItemId，避免重复点击生成多条记录。
+    if (decision === 'approve' && pending && run.appliedItemId === null) {
+      try {
+        let applied
+        const patch = {
+          ...(run.proposed ?? {}),
+          sessionId: run.sessionId ?? undefined,
+          quote: run.sourceQuote ?? undefined,
+          source: {
+            kind: 'agent',
+            sessionId: run.sessionId ?? undefined,
+            quote: run.sourceQuote ?? undefined,
+          },
+        }
+        if (run.action === 'update' && typeof run.targetId === 'string') {
+          const existing = current.items.find((candidate) => candidate.id === run.targetId)
+          if (existing !== undefined) {
+            applied = await updateItem(run.targetId, patch, actor)
+          }
+        }
+        if (applied === undefined) {
+          // 崩溃恢复：createItem 会先持久化条目，appliedItemId 要到最后才持久化；
+          // 没有 key 时用完整正文 + 层级 + 会话定位刚写入的那一条，避免重试再建一条。
+          const wantedType = patch.type === 'note' ? 'note' : 'memory'
+          const wantedContent = String(patch.content ?? '')
+          const adopted = wantedContent === '' ? undefined : current.items.find((candidate) => candidate.status === 'active'
+            && candidate.type === wantedType
+            && candidate.layer === patch.layer
+            && candidate.content === wantedContent
+            && (patch.key === undefined || patch.key === null || candidate.key === patch.key)
+            && (run.sessionId === null || candidate.source?.sessionId === run.sessionId))
+          if (adopted !== undefined) applied = adopted
+        }
+        if (applied === undefined) {
+          applied = await createItem(patch, 'agent')
+        }
+        run.appliedItemId = applied.id
+        if (run.targetId === null) run.targetId = applied.id
+      } catch (error) {
+        run.status = 'needs_user'
+        run.error = truncate(String(error?.message ?? error), 1000)
+        current.meta.audit = bucket
+        await persist()
+        throw createError('AUDIT_APPLY_FAILED', `候选写入失败：${error?.message ?? error}`)
+      }
+    }
+
+    run.status = decision === 'approve' ? 'approved' : 'rejected'
+    run.decision = {
+      at,
+      actor: truncate(String(actor), 40),
+      note: truncate(String(note ?? ''), 500),
+    }
+    run.finishedAt = run.finishedAt ?? at
+    // 只有真正应用过的 update 才归档原条目；create 的 targetId 可能指向已经写入的条目。
+    if (decision === 'reject' && typeof run.targetId === 'string'
+      && (run.action !== 'update' || typeof run.appliedItemId === 'string')) {
+      const item = current.items.find((candidate) => candidate.id === run.targetId)
+      if (item !== undefined && !layerInfo(item.layer).immutable) {
+        const before = clone(item)
+        item.status = 'archived'
+        item.validTo = at
+        item.updatedAt = at
+        item.version = (item.version ?? 1) + 1
+        reinforce(item, 'update')
+        indexItem(item)
+        recordChange('audit.reject', before, item, actor, '审计拒绝后归档')
+        audit('audit.reject', `${item.layer}/${item.title} 经审计拒绝并归档`, actor)
+      }
+    }
+    current.meta.audit = bucket
+    await persist()
+    return clone(run)
+    } finally {
+      auditDecisionsInFlight.delete(id)
+    }
+  }
+
   const api = {
     // 读取
     status,
@@ -1857,6 +2145,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     applyTemplate,
     consolidationCandidates,
     applyConsolidation,
+    // 写入审计 Hook
+    auditStats,
+    auditRuns,
+    recordAuditRun,
+    finishAuditRun,
+    decideAuditRun,
     // 检索/索引诊断
     searchStats: () => searchEngine.stats(),
     resetSearchStats: () => searchEngine.resetStats(),
@@ -1944,6 +2238,11 @@ function filterItems(items, options, active) {
       return false
     }
     if (item.importance < minImportance) return false
+    if ((status === 'usable' || status === 'active' || status === 'conflicted')
+      && (item.duplicateOf !== null && item.duplicateOf !== undefined
+        || item.supersededBy !== null && item.supersededBy !== undefined)) {
+      return false
+    }
     if (tag !== undefined && !item.tags.some((candidate) => candidate.toLowerCase() === tag)) return false
     if (query !== '' && !matchesQuery(item, query)) return false
     return true
@@ -2100,6 +2399,143 @@ function normalizeChangeSnapshot(raw) {
   return out
 }
 
+function normalizeAuditStore(raw) {
+  const source = raw !== null && typeof raw === 'object' ? raw : {}
+  const runs = Array.isArray(source.runs)
+    ? source.runs.map(normalizeAuditRun).filter((run) => run !== undefined).slice(-500)
+    : []
+  return { version: 1, runs }
+}
+
+function normalizeAuditRun(raw) {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const status = AUDIT_RUN_STATUSES.includes(raw.status) ? raw.status : 'failed'
+  const verdict = AUDIT_VERDICTS.includes(raw.verdict) ? raw.verdict : null
+  const at = isoOr(raw.at, new Date().toISOString())
+  const usage = normalizeUsage(raw.usage)
+  return {
+    id: typeof raw.id === 'string' && /^audit_[A-Za-z0-9_-]{4,80}$/.test(raw.id) ? raw.id : `audit_${randomUUID().slice(0, 12)}`,
+    at,
+    startedAt: isoOr(raw.startedAt, at),
+    finishedAt: raw.finishedAt === null || raw.finishedAt === undefined ? null : isoOr(raw.finishedAt, null),
+    durationMs: clampInt(raw.durationMs, 0, 86400000, 0),
+    tool: ['memory_write', 'memory_update'].includes(raw.tool) ? raw.tool : 'memory_write',
+    callId: typeof raw.callId === 'string' ? truncate(raw.callId, 120) : null,
+    sessionId: typeof raw.sessionId === 'string' ? truncate(raw.sessionId, 120) : null,
+    action: raw.action === 'update' ? 'update' : 'create',
+    status,
+    verdict,
+    enforced: raw.enforced === true,
+    confidence: clampNumber(raw.confidence, 0, 1, 0),
+    reason: truncate(String(raw.reason ?? ''), 1000),
+    targetId: typeof raw.targetId === 'string' ? truncate(raw.targetId, 64) : null,
+    sourceQuote: typeof raw.sourceQuote === 'string' ? truncate(raw.sourceQuote, MAX_SOURCE_QUOTE) : null,
+    proposed: sanitizeAuditPayload(raw.proposed),
+    appliedItemId: typeof raw.appliedItemId === 'string' ? truncate(raw.appliedItemId, 64) : null,
+    before: sanitizeAuditPayload(raw.before),
+    after: sanitizeAuditPayload(raw.after),
+    error: typeof raw.error === 'string' ? truncate(raw.error, 1000) : null,
+    decision: raw.decision !== null && typeof raw.decision === 'object'
+      ? {
+        at: isoOr(raw.decision.at, at),
+        actor: truncate(String(raw.decision.actor ?? 'user'), 40),
+        note: truncate(String(raw.decision.note ?? ''), 500),
+      }
+      : null,
+    usage,
+  }
+}
+
+function sanitizeAuditPayload(raw) {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null
+  const out = {}
+  if (raw.id !== undefined) out.id = truncate(String(raw.id), 64)
+  if (raw.type !== undefined) out.type = raw.type === 'note' ? 'note' : 'memory'
+  if (raw.layer !== undefined) out.layer = LAYER_IDS.includes(raw.layer) ? raw.layer : 'L4'
+  if (raw.title !== undefined) out.title = truncate(String(raw.title), MAX_TITLE)
+  if (raw.content !== undefined) out.content = truncate(String(raw.content), MAX_CONTENT)
+  if (raw.key !== undefined) out.key = safeNormalizeKey(raw.key)
+  if (raw.tags !== undefined) out.tags = normalizeTags(raw.tags)
+  if (raw.importance !== undefined) out.importance = clampInt(raw.importance, 1, 10, 5)
+  if (raw.notebook !== undefined) out.notebook = normalizeNotebook(raw.notebook)
+  if (raw.ttlDays !== undefined) out.ttlDays = clampInt(raw.ttlDays, 1, 3650, null)
+  if (raw.supersedes !== undefined) out.supersedes = normalizeIdList(raw.supersedes)
+  return out
+}
+
+function emptyUsage() {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 }
+}
+
+function normalizeUsage(raw) {
+  const out = emptyUsage()
+  if (raw === null || typeof raw !== 'object') return out
+  for (const field of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']) {
+    out[field] = clampInt(raw[field], 0, Number.MAX_SAFE_INTEGER, 0)
+  }
+  out.totalTokens = clampInt(
+    raw.totalTokens,
+    0,
+    Number.MAX_SAFE_INTEGER,
+    out.inputTokens + out.outputTokens + out.cacheReadTokens + out.cacheWriteTokens,
+  )
+  return out
+}
+
+function addUsage(target, usage) {
+  const normalized = normalizeUsage(usage)
+  target.inputTokens += normalized.inputTokens
+  target.outputTokens += normalized.outputTokens
+  target.cacheReadTokens += normalized.cacheReadTokens
+  target.cacheWriteTokens += normalized.cacheWriteTokens
+  target.totalTokens += normalized.totalTokens
+}
+
+function normalizeKey(value) {
+  if (value === null || value === undefined) return null
+  const key = String(value).trim()
+  if (key === '') return null
+  if (key.length > MAX_KEY) throw createError('KEY_TOO_LONG', `实体键最多 ${MAX_KEY} 个字符`)
+  if (!/^[^\s][\s\S]*$/.test(key)) throw createError('INVALID_KEY', '实体键不能为空或只包含空白')
+  return key
+}
+
+function safeNormalizeKey(value) {
+  try {
+    return normalizeKey(value)
+  } catch {
+    return null
+  }
+}
+
+function normalizeIdList(value) {
+  const list = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+  const out = []
+  for (const candidate of list) {
+    const id = truncate(String(candidate ?? '').trim(), 64)
+    if (id === '' || out.includes(id)) continue
+    out.push(id)
+    if (out.length >= MAX_SUPERSEDES) break
+  }
+  return out
+}
+
+function normalizeSource(raw) {
+  const source = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  return {
+    kind: ['user', 'agent', 'system', 'import'].includes(source.kind) ? source.kind : 'user',
+    sessionId: typeof source.sessionId === 'string' ? truncate(source.sessionId, 120) : null,
+    workspace: typeof source.workspace === 'string' ? truncate(source.workspace, 400) : null,
+    quote: typeof source.quote === 'string' && source.quote.trim() !== ''
+      ? truncate(source.quote, MAX_SOURCE_QUOTE)
+      : null,
+    turn: Number.isInteger(source.turn) && source.turn >= 0 ? source.turn : null,
+    confidence: source.confidence === null || source.confidence === undefined
+      ? null
+      : clampNumber(source.confidence, 0, 1, null),
+  }
+}
+
 function normalizeItem(raw) {
   if (raw === null || typeof raw !== 'object') return undefined
   const layer = LAYER_IDS.includes(raw.layer) ? raw.layer : 'L5'
@@ -2121,13 +2557,12 @@ function normalizeItem(raw) {
     pinned: raw.pinned === true,
     ttlDays: typeof raw.ttlDays === 'number' && Number.isFinite(raw.ttlDays) ? Math.max(1, Math.round(raw.ttlDays)) : null,
     expiresAt: typeof raw.expiresAt === 'string' && Number.isFinite(Date.parse(raw.expiresAt)) ? raw.expiresAt : null,
-    source: raw.source !== null && typeof raw.source === 'object' && !Array.isArray(raw.source)
-      ? {
-        kind: ['user', 'agent', 'system', 'import'].includes(raw.source.kind) ? raw.source.kind : 'user',
-        sessionId: typeof raw.source.sessionId === 'string' ? raw.source.sessionId : null,
-        workspace: typeof raw.source.workspace === 'string' ? raw.source.workspace : null,
-      }
-      : { kind: 'user', sessionId: null, workspace: null },
+    key: safeNormalizeKey(raw.key),
+    source: normalizeSource(raw.source),
+    supersedes: normalizeIdList(raw.supersedes),
+    supersededBy: typeof raw.supersededBy === 'string' ? truncate(raw.supersededBy, 64) : null,
+    validFrom: isoOr(raw.validFrom, createdAt),
+    validTo: typeof raw.validTo === 'string' && Number.isFinite(Date.parse(raw.validTo)) ? raw.validTo : null,
     createdAt,
     updatedAt: isoOr(raw.updatedAt, createdAt),
     lastAccessAt: isoOr(raw.lastAccessAt, createdAt),

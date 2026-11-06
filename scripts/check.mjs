@@ -57,6 +57,8 @@ if (failures.length === 0) console.log(`✔ ${files.length} 个模块语法正�
 console.log('\n== 引擎测试 ==')
 run('引擎测试', ['tests/engine.test.mjs'])
 
+run('审计测试', ['tests/audit.test.mjs'])
+
 run('工具测试', ['tests/tools.test.mjs'])
 
 run('检索测试', ['tests/search.test.mjs'])

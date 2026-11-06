@@ -6,11 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Planned
+### Added
 
-- Linux/macOS prebuilt binaries and a release pipeline.
-- Pluggable embedding providers and a retrieval evaluation set.
-- Per-project memory spaces and conflict-merge policies.
+- Write-audit hook (`hook.*`, default off): an isolated subagent reviews every
+  `memory_write` / `memory_update` against the user's turn, with enforce vs
+  shadow mode, confidence threshold, timeout fail-open, candidate queue, and
+  per-run input/output/cache token accounting.
+- Entity keys and versioning: `memory_write` with the same `key`, layer, type,
+  and notebook updates the active entry in place instead of appending a
+  duplicate; `supersedes` archives old versions and hides them from prompt
+  injection and default search.
+- Provenance on writes: `quote` captures the user's source text and `turn`
+  records where it came from; `memory_get` surfaces both.
+- Audit tab in the sidebar page with hook toggle, token KPIs, pending
+  candidates, approve/reject, and recent runs.
 
 ### Fixed
 
@@ -22,6 +31,15 @@ All notable changes to this project are documented here. The format follows
 - Resolve the repository root and the DSH web profile from the current
   checkout and `DSH_HOME` instead of hard-coded developer paths in the client
   render test.
+- Renew the freshness period when an idempotent same-key write repeats the same
+  content, and stop counting already-decided audit candidates as pending while
+  including both rejected and needs-user denials in the blocked KPI.
+- Keep the write-audit hook fail-open when settings or the audit ledger cannot be
+  read/written, and time out `startActivation` as well as the judge result.
+  Concurrent decisions are serialized, an already-persisted candidate is adopted
+  after a crash instead of being written twice, long candidate content is kept
+  in full through approval, and rejecting an update candidate no longer archives
+  a memory that the update never touched.
 
 ## [0.1.0] - 2026-11-06
 

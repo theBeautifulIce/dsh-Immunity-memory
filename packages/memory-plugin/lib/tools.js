@@ -27,6 +27,10 @@ const itemSchema = {
     status: { type: 'string' },
     pinned: { type: 'boolean' },
     expiresAt: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    key: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    source: { type: 'object', additionalProperties: true },
+    supersedes: { type: 'array', items: { type: 'string' } },
+    supersededBy: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     updatedAt: { type: 'string' },
     accessCount: { type: 'number' },
     score: { type: 'number' },
@@ -87,6 +91,9 @@ const getOutput = {
       `# ${item.title}`,
       `分层：${item.layer}（${item.layerName}）  类型：${item.type}  重要度：${item.importance}  状态：${item.status}`,
       `标签：${item.tags.length > 0 ? item.tags.join('、') : '（无）'}`,
+      item.key !== null && item.key !== undefined ? `实体键：${item.key}` : '',
+      item.source?.quote ? `来源原话：${clip(item.source.quote, 300)}` : '',
+      item.supersededBy ? `已被 ${item.supersededBy} 取代` : '',
       `创建：${item.createdAt}  更新：${item.updatedAt}  访问：${item.accessCount} 次`,
       item.expiresAt !== null ? `到期：${item.expiresAt}` : '',
       '',
@@ -316,6 +323,19 @@ export function registerTools(ctx, engine, log) {
           type: 'number',
           description: 'Freshness period in days. Required for every memory in a mutable layer (writes fail without it). Choose according to how long the fact stays true; notes ignore it.',
         },
+        key: {
+          type: 'string',
+          description: 'Stable entity key (for example "user/editor" or "project/build-command"). Writing the same key again updates the existing entry instead of creating a duplicate.',
+        },
+        quote: {
+          type: 'string',
+          description: 'Short verbatim quote from the user or source that justifies this memory.',
+        },
+        supersedes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'IDs of older entries this one replaces. They are archived and hidden from normal retrieval.',
+        },
       },
       required: ['content', 'layer'],
     },
@@ -324,6 +344,7 @@ export function registerTools(ctx, engine, log) {
       const item = await engine.createItem({
         ...args,
         sessionId: sessionIdOf(exec),
+        turn: typeof exec?.turn === 'number' ? exec.turn : undefined,
       }, 'agent')
       return { saved: true, item: toToolItem(item), duplicateOf: item.duplicateOf ?? null }
     },
@@ -384,12 +405,20 @@ export function registerTools(ctx, engine, log) {
           type: 'number',
           description: 'Freshness period in days. Required when changing title/content/tags/importance/layer of a mutable memory; the new expiry starts from now.',
         },
+        key: { type: 'string', description: 'Change the stable entity key; conflicts with another active entry in the same layer are rejected.' },
+        quote: { type: 'string', description: 'Short verbatim quote that justifies this update.' },
+        supersedes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'IDs of older entries this update replaces; they are archived and hidden.',
+        },
       },
       required: ['id'],
     },
     output: updateOutput,
-    async execute(args) {
+    async execute(args, exec) {
       const { id, ...patch } = args ?? {}
+      if (typeof exec?.turn === 'number') patch.turn = exec.turn
       const item = await engine.updateItem(String(id ?? ''), patch, 'agent')
       return { item: toToolItem(item) }
     },
@@ -589,7 +618,7 @@ function clip(value, max) {
 }
 
 function sessionIdOf(exec) {
-  const candidate = exec?.sessionId ?? exec?.session?.id ?? exec?.agent?.sessionId
+  const candidate = exec?.sessionId ?? exec?.session?.id ?? exec?.agent?.session?.id ?? exec?.agent?.sessionId
   return typeof candidate === 'string' ? candidate : null
 }
 

@@ -56,13 +56,14 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | **Hybrid retrieval** | FTS5 bm25 + 384-d hashed-vector cosine + graph BFS; default weights 0.4 / 0.4 / 0.2, auto-normalized and configurable |
 | **Write protection** | Minimum content length, Jaccard dedupe, immutable-layer protection, L2 conflict detection; every mutable write/update must provide explicit `ttlDays`, never a silent permanent default |
 | **Memory templates** | Each template configures immutable memories per L0/L1/L3, with multiple templates and hot switching; L2 and L4-L7 are shared and are never copied or deleted by a switch |
+| **Write audit** | Before every `memory_write` / `memory_update`, an isolated subagent audits it against the user's turn; optional enforce or shadow mode, with pending candidates approved in the UI and per-run token accounting |
 | **Consolidation** | Frequently written, updated, or recalled memories become candidates; after `memory_consolidate` review or UI approval they become permanent L1/L3 memories, fully audited |
 | **Prompt injection** | The most relevant memories are injected into the system prompt each turn; the page shows total injected tokens and a per-layer breakdown; preview and disable are supported |
 | **Usage ledger** | Records query tokens and result tokens per search, split by tool/type; the notebook view counts queries whose results include notebook entries |
 | **Change diff** | Create/update/delete/bulk/consolidate snapshots; the UI renders a git-style red/green diff with line-level LCS, while agents receive lossless JSON |
 | **Maintenance** | Resource caps, expiry cleanup, rotation archive, dedupe, reflection promotion, consolidation scan, audit/changelog compaction; scheduled or manual |
 | **Data safety** | WAL, versioned migrations, integrity checks, scheduled/manual backups, restore, export/import |
-| **Visual UI** | Sidebar "Memory" page: memories, notebooks, pitfalls, changes, usage, consolidation, settings, maintenance; Chinese/English UI switch |
+| **Visual UI** | Sidebar "Memory" page: memories, notebooks, pitfalls, changes, usage, consolidation, audit, settings, maintenance; Chinese/English UI switch |
 | **Local-first** | Zero runtime npm dependencies; local SQLite; missing Go/Rust binaries fall back with an explicit warning |
 
 ## Architecture
@@ -189,10 +190,10 @@ At startup the Go binary is copied to `<store-dir>\service\<platform>-<arch>\` b
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_write` | Write a memory or notebook entry; the agent must choose a mutable layer and provide `ttlDays` |
+| `memory_write` | Write a memory or notebook entry; the agent must choose a mutable layer and provide `ttlDays`; optional entity `key`, source `quote`, and `supersedes` |
 | `memory_search` | Hybrid retrieval; returns score breakdown, layer, tags, and match reasons |
-| `memory_get` | Read the full content and metadata by id |
-| `memory_update` | Change title, content, tags, importance, layer, TTL; increments version |
+| `memory_get` | Read full content, entity key, and source quote by id |
+| `memory_update` | Change title, content, tags, importance, layer, TTL; increments version; supports `key` and `supersedes` |
 | `memory_forget` | Delete an entry and clean up conflict references |
 | `memory_stats` | Entry counts, layer/type distribution, storage and health |
 | `memory_usage` | Query the token usage ledger, split by tool/type |
@@ -212,6 +213,7 @@ The sidebar "Memory" page includes:
 - **Changes**: git-style red/green diff with time/entity/layer/operation filters;
 - **Usage**: query and result token ledger;
 - **Consolidation**: candidates, review, approve/reject;
+- **Audit**: write-audit toggle, accumulated tokens, pending candidates, approve/reject, and recent runs;
 - **Settings**: general, storage, retrieval, write, layer toggles, prompt injection, maintenance, performance, privacy, tools;
 - **Maintenance**: resource caps, expiry cleanup, rotation, dedupe, reflection promotion, backup/restore;
 - **Language**: Chinese / English UI switch (`ui.language = auto | zh | en`).
@@ -231,6 +233,10 @@ Settings save immediately and can be reset to defaults. The most useful keys:
 | `prompt.inject` | `true` | Inject memories into the system prompt |
 | `prompt.topN` / `maxChars` | Template-defined | Injection count and character budget |
 | `consolidation.autoApply` | `false` | Off = candidates only; consolidation requires review |
+| `hook.enabled` | `false` | Write-audit hook; off by default |
+| `hook.enforce` | `true` | Block rejected writes; off records shadow audits only |
+| `hook.minConfidence` | `0.7` | Rejects below this confidence do not block; `needs_user` always queues |
+| `hook.timeoutSeconds` | `45` | Subagent audit timeout; timeouts fail open |
 | `maintenance.*` | See Settings | Maintenance interval, archive age, resource caps, audit retention |
 | `storage.backupKeep` | `3` | Rotating backups to keep |
 | `performance.nativeCore` | `true` | Enable the Rust native core |
@@ -242,7 +248,7 @@ The full schema lives in `packages/memory-plugin/lib/settings.js`; the UI render
 
 - **Local-first**: the memory store, backups, and audit are local; the plugin calls no cloud memory API and needs no extra key.
 - **Prompt boundary**: only retrieved/injected entries enter the model context. "Local storage" does not mean "the model cannot see it". Use layer toggles, `tools.enabled`, or privacy settings for sensitive content.
-- **Audit**: writes, updates, deletes, consolidation, and maintenance are recorded. `privacy.auditLog` can be disabled, but that also disables the change diff.
+- **Audit**: writes, updates, deletes, consolidation, and maintenance are recorded. With the write-audit hook enabled, the audit subagent's token usage is accumulated and shown too. `privacy.auditLog` can be disabled, but that also disables the change diff.
 - **Backups**: scheduled/manual backup, restore, export/import. Backup files contain sensitive data; protect them like the database.
 - **Deletion**: `memory_forget` deletes the entry and cleans up conflict references; deleted entries are not injected. If audit is enabled, the deletion action itself remains in change history.
 - **Fallback**: if the Go service is unavailable, the plugin falls back to Node SQLite (no FTS5) or JSON; Settings shows the actual engine so you are not misled about the performance path.

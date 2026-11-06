@@ -158,6 +158,75 @@ await test('重复内容会被标记 duplicateOf', async () => {
   assert.equal(duplicate.duplicateOf, firstId)
 })
 
+await test('相同实体键写入会更新原条目并保留来源', async () => {
+  const first = await engine.createItem({
+    layer: 'L4',
+    key: 'project.package-manager',
+    title: '包管理器约定',
+    content: '团队统一使用 pnpm 管理工作区，提交前运行完整自检。',
+    ttlDays: 30,
+    quote: '我们统一用 pnpm，别再用 npm 了。',
+    turn: 7,
+    confidence: 0.92,
+  }, 'agent')
+  const second = await engine.createItem({
+    layer: 'L4',
+    key: 'project.package-manager',
+    title: '包管理器约定（更新）',
+    content: '团队统一使用 pnpm 10 管理工作区，提交前运行 scripts/check.mjs。',
+    ttlDays: 30,
+    quote: '升级到 pnpm 10 了。',
+  }, 'agent')
+  assert.equal(second.id, first.id)
+  assert.equal(second.version, 2)
+  assert.equal(second.title, '包管理器约定（更新）')
+  assert.equal(second.source.quote, '升级到 pnpm 10 了。')
+  const sameKey = engine.listItems({ status: 'all' }).items.filter((item) => item.key === 'project.package-manager')
+  assert.equal(sameKey.length, 1)
+  assert.equal(engine.getItem(first.id).key, 'project.package-manager')
+
+  // 同键同内容再次写入时不应覆盖已有来源原话，但必须刷新保鲜期。
+  const beforeRenew = Date.parse(second.expiresAt)
+  const third = await engine.createItem({
+    layer: 'L4',
+    key: 'project.package-manager',
+    title: '包管理器约定（更新）',
+    content: '团队统一使用 pnpm 10 管理工作区，提交前运行 scripts/check.mjs。',
+    ttlDays: 90,
+  }, 'agent')
+  assert.equal(third.id, first.id)
+  assert.equal(third.source.quote, '升级到 pnpm 10 了。')
+  assert.equal(third.ttlDays, 90)
+  assert.ok(Date.parse(third.expiresAt) > beforeRenew, '同键续写应刷新到期时间')
+})
+
+await test('显式 supersedes 会归档旧条目并隐藏', async () => {
+  const oldItem = await engine.createItem({
+    layer: 'L5',
+    title: '发布分支使用 main',
+    content: '发布分支固定使用 main，发布后不再合并其他改动。',
+    ttlDays: 30,
+  }, 'agent')
+  const next = await engine.createItem({
+    layer: 'L5',
+    title: '发布分支改用 release',
+    content: '发布分支改为 release，main 只保留开发中的代码。',
+    ttlDays: 30,
+    supersedes: [oldItem.id],
+  }, 'agent')
+  assert.equal(next.supersedes.includes(oldItem.id), true)
+  assert.equal(engine.getItem(oldItem.id).status, 'archived')
+  assert.equal(engine.getItem(oldItem.id).supersededBy, next.id)
+  assert.equal(engine.listItems({ status: 'active' }).items.some((item) => item.id === oldItem.id), false)
+  assert.equal(engine.promptDigest().includes('发布分支固定使用 main'), false)
+})
+
+await test('重复与被取代条目不进入提示词注入', async () => {
+  const digest = engine.promptDigest()
+  assert.equal(digest.includes('项目使用 pnpm 工作区（副本）'), false)
+  assert.equal(digest.includes('发布分支固定使用 main'), false)
+})
+
 await test('智能体写入必须显式选择层级', async () => {
   await assert.rejects(
     () => engine.createItem({ title: '未指定层级', content: '智能体写入没有选择层级，应由引擎拒绝而非落到某个默认层。', ttlDays: 30 }, 'agent'),
@@ -592,10 +661,117 @@ await test('踩坑笔记可记录、检索并用于查重', async () => {
   assert.ok(checked.advice.includes('memory_pitfall record'))
 })
 
+await test('审计运行记录可持久化并聚合 token', async () => {
+  const run = await engine.recordAuditRun({
+    tool: 'memory_write',
+    callId: 'call-audit-1',
+    sessionId: 'session-audit',
+    action: 'create',
+    status: 'running',
+    proposed: { title: '审计候选', content: '这是一条用于验证审计账本的候选记忆。' },
+    usage: { inputTokens: 120, outputTokens: 30, cacheReadTokens: 10 },
+  })
+  assert.ok(run.id.startsWith('audit_'))
+  let stats = engine.auditStats()
+  assert.equal(stats.running, 1)
+  assert.equal(stats.tokens.input, 120)
+  assert.equal(stats.tokens.output, 30)
+  assert.equal(stats.tokens.total, 160)
+
+  await engine.finishAuditRun(run.id, {
+    status: 'approved',
+    confidence: 0.91,
+    reason: '来源明确，内容与用户原话一致',
+    usage: { inputTokens: 120, outputTokens: 30, cacheReadTokens: 10 },
+  })
+  stats = engine.auditStats()
+  assert.equal(stats.running, 0)
+  assert.equal(stats.approved, 1)
+  assert.equal(stats.tokens.total, 160)
+  assert.equal(engine.auditRuns({ status: 'approved' }).length, 1)
+})
+
+await test('审计拒绝可归档已经写入的条目', async () => {
+  const item = await engine.createItem({
+    layer: 'L4',
+    title: '待审计的临时记忆',
+    content: '这条记忆先写入，随后会被审计拒绝并归档。',
+    ttlDays: 30,
+  }, 'agent')
+  const run = await engine.recordAuditRun({
+    tool: 'memory_write',
+    callId: 'call-audit-2',
+    action: 'create',
+    status: 'needs_user',
+    enforced: true,
+    targetId: item.id,
+    usage: { inputTokens: 20, outputTokens: 5 },
+  })
+  assert.equal(engine.auditStats().pending, 1, '未处理的候选应计入待确认')
+  await engine.decideAuditRun(run.id, 'reject', '人工复核认为证据不足', 'user')
+  assert.equal(engine.getItem(item.id).status, 'archived')
+  assert.equal(engine.auditStats().rejected, 1)
+  assert.equal(engine.auditStats().blocked, 1, '被拦截的待确认也应计入已拦截')
+  assert.equal(engine.auditStats().pending, 0, '已处理的候选不应继续计入待确认')
+})
+
 await test('删除后条目消失且冲突引用被清理', async () => {
   const result = await engine.deleteItems([firstId], 'user')
   assert.equal(result.deleted, 1)
   assert.equal(engine.getItem(firstId), undefined)
+})
+
+await test('拒绝 update 候选不会归档原有有效记忆', async () => {
+  const target = await engine.createItem({
+    layer: 'L4',
+    title: '保留的原有记忆',
+    content: '这条记忆本身有效，拒绝一条修改建议不应把它归档。',
+    ttlDays: 30,
+  }, 'user')
+  const run = await engine.recordAuditRun({
+    tool: 'memory_update',
+    action: 'update',
+    status: 'needs_user',
+    enforced: true,
+    targetId: target.id,
+    proposed: { title: '未采纳的修改', content: '这条修改建议不会应用。', ttlDays: 30 },
+  })
+  await engine.decideAuditRun(run.id, 'reject', '不采纳这次修改', 'user')
+  const kept = engine.getItem(target.id)
+  assert.equal(kept.status, 'active')
+  assert.equal(kept.title, '保留的原有记忆')
+})
+
+await test('批准候选保留完整长正文', async () => {
+  const content = '长'.repeat(6000)
+  const run = await engine.recordAuditRun({
+    tool: 'memory_write',
+    action: 'create',
+    status: 'needs_user',
+    enforced: true,
+    proposed: { type: 'memory', layer: 'L4', title: '长正文候选', content, ttlDays: 30 },
+  })
+  assert.equal(run.proposed.content.length, 6000)
+  const decided = await engine.decideAuditRun(run.id, 'approve', '批准完整写入', 'user')
+  const applied = engine.getItem(decided.appliedItemId)
+  assert.equal(applied.content.length, 6000)
+})
+
+await test('并发批准同一候选只写入一次', async () => {
+  const run = await engine.recordAuditRun({
+    tool: 'memory_write',
+    action: 'create',
+    status: 'needs_user',
+    enforced: true,
+    proposed: { type: 'memory', layer: 'L4', title: '并发批准候选', content: '并发批准同一个候选只应产生一条记忆。', ttlDays: 30 },
+  })
+  const results = await Promise.allSettled([
+    engine.decideAuditRun(run.id, 'approve', '并发 A', 'user'),
+    engine.decideAuditRun(run.id, 'approve', '并发 B', 'user'),
+  ])
+  assert.ok(results.some((result) => result.status === 'fulfilled'))
+  const items = engine.listItems({ status: 'all' }).items.filter((item) => item.title === '并发批准候选')
+  assert.equal(items.length, 1)
 })
 
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

@@ -165,12 +165,39 @@ await test('注册了全部 10 个工具', () => {
 
 await test('memory_write 写入并渲染确认文本', async () => {
   const def = registered.get('memory_write')
-  const value = await def.execute({ content: '工具测试：记忆插件使用 JSON 文件存储。', layer: 'L4', tags: ['测试'], ttlDays: 30 }, {})
+  const value = await def.execute(
+    { content: '工具测试：记忆插件使用 JSON 文件存储。', layer: 'L4', tags: ['测试'], ttlDays: 30 },
+    { turn: 42, agent: { session: { id: 'sess-tools-1' } } },
+  )
   assert.equal(value.saved, true)
   assert.ok(value.item.id.startsWith('mem_'))
+  const stored = engine.getItem(value.item.id)
+  assert.equal(stored.source.sessionId, 'sess-tools-1')
+  assert.equal(stored.source.turn, 42)
   const blocks = def.output.render({}, value)
   assert.equal(blocks[0].type, 'text')
   assert.ok(blocks[0].text.includes('已保存'))
+})
+
+await test('memory_write 用实体键幂等更新并保留来源原话', async () => {
+  const def = registered.get('memory_write')
+  const first = await def.execute({
+    content: '工具测试：项目统一使用 pnpm 管理依赖。',
+    layer: 'L4',
+    key: 'tool-test-package-manager',
+    quote: '以后都用 pnpm。',
+    ttlDays: 30,
+  }, {})
+  const second = await def.execute({
+    content: '工具测试：项目统一使用 pnpm 10 管理依赖。',
+    layer: 'L4',
+    key: 'tool-test-package-manager',
+    quote: '以后都用 pnpm 10。',
+    ttlDays: 30,
+  }, {})
+  assert.equal(second.item.id, first.item.id)
+  assert.equal(second.item.content.includes('pnpm 10'), true)
+  assert.equal(engine.getItem(first.item.id).source.quote, '以后都用 pnpm 10。')
 })
 
 await test('memory_search 命中刚写入的记忆', async () => {

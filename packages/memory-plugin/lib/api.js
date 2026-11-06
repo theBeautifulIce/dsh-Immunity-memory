@@ -51,6 +51,9 @@ export const API_METHODS = [
   'templates.delete',
   'templates.apply',
   'audit.list',
+  'audit.stats',
+  'audit.runs',
+  'audit.decide',
   'diff',
   'pitfalls.list',
   'pitfalls.record',
@@ -102,6 +105,10 @@ function createMethods(engineOf, context = {}) {
         defaults: DEFAULT_SETTINGS,
         sortChoices: SORT_CHOICES,
         audit: engine().auditList(12),
+        hook: {
+          stats: engine().auditStats(),
+          runs: engine().auditRuns({ limit: 20 }),
+        },
         injection: engine().injectionStats(),
         usage: engine().usageStats({}),
         templates: engine().templates(),
@@ -197,6 +204,17 @@ function createMethods(engineOf, context = {}) {
     },
     'audit.list'(params) {
       return { audit: engine().auditList(params?.limit ?? 50) }
+    },
+    'audit.stats'() {
+      return engine().auditStats()
+    },
+    'audit.runs'(params) {
+      return { runs: engine().auditRuns(params ?? {}) }
+    },
+    async 'audit.decide'(params) {
+      const id = String(params?.id ?? '')
+      if (id === '') throw createError('INVALID_ARGUMENT', '缺少审计记录 id')
+      return engine().decideAuditRun(id, String(params?.decision ?? ''), String(params?.note ?? ''), String(params?.actor ?? 'user'))
     },
     async diff(params) {
       return engine().diff(params ?? {})

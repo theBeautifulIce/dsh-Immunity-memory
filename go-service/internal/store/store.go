@@ -30,9 +30,12 @@ import (
 
 // Source 是条目的来源信息。
 type Source struct {
-	Kind      string  `json:"kind"`
-	SessionID *string `json:"sessionId"`
-	Workspace *string `json:"workspace"`
+	Kind       string   `json:"kind"`
+	SessionID  *string  `json:"sessionId"`
+	Workspace  *string  `json:"workspace"`
+	Quote      *string  `json:"quote,omitempty"`
+	Turn       *int     `json:"turn,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
 }
 
 // Item 与 Node 侧的条目结构一一对应。
@@ -57,6 +60,11 @@ type Item struct {
 	Version      int      `json:"version"`
 	Conflicts    []string `json:"conflicts"`
 	DuplicateOf  *string  `json:"duplicateOf,omitempty"`
+	Key          *string  `json:"key,omitempty"`
+	Supersedes   []string `json:"supersedes,omitempty"`
+	SupersededBy *string  `json:"supersededBy,omitempty"`
+	ValidFrom    *string  `json:"validFrom,omitempty"`
+	ValidTo      *string  `json:"validTo,omitempty"`
 }
 
 // AuditEntry 是 changelog 的一行。
@@ -438,14 +446,19 @@ func (s *Store) loadMemories() ([]Item, error) {
 			item.TTLDays = &days
 		}
 		var meta struct {
-			Notebook    *string  `json:"notebook"`
-			Tags        []string `json:"tags"`
-			Pinned      bool     `json:"pinned"`
-			ExpiresAt   *string  `json:"expiresAt"`
-			Source      *Source  `json:"source"`
-			Version     int      `json:"version"`
-			Conflicts   []string `json:"conflicts"`
-			DuplicateOf *string  `json:"duplicateOf"`
+			Notebook     *string  `json:"notebook"`
+			Tags         []string `json:"tags"`
+			Pinned       bool     `json:"pinned"`
+			ExpiresAt    *string  `json:"expiresAt"`
+			Source       *Source  `json:"source"`
+			Version      int      `json:"version"`
+			Conflicts    []string `json:"conflicts"`
+			DuplicateOf  *string  `json:"duplicateOf"`
+			Key          *string  `json:"key"`
+			Supersedes   []string `json:"supersedes"`
+			SupersededBy *string  `json:"supersededBy"`
+			ValidFrom    *string  `json:"validFrom"`
+			ValidTo      *string  `json:"validTo"`
 		}
 		if err := json.Unmarshal([]byte(metadata), &meta); err == nil {
 			item.Notebook = meta.Notebook
@@ -464,6 +477,13 @@ func (s *Store) loadMemories() ([]Item, error) {
 				item.Conflicts = meta.Conflicts
 			}
 			item.DuplicateOf = meta.DuplicateOf
+			item.Key = meta.Key
+			if meta.Supersedes != nil {
+				item.Supersedes = meta.Supersedes
+			}
+			item.SupersededBy = meta.SupersededBy
+			item.ValidFrom = meta.ValidFrom
+			item.ValidTo = meta.ValidTo
 		}
 		out = append(out, item)
 	}
@@ -651,6 +671,8 @@ func (s *Store) upsertItem(tx *sql.Tx, item Item) error {
 			"notebook": item.Notebook, "tags": item.Tags, "pinned": item.Pinned,
 			"expiresAt": item.ExpiresAt, "source": item.Source, "version": item.Version,
 			"conflicts": item.Conflicts, "duplicateOf": item.DuplicateOf,
+			"key": item.Key, "supersedes": item.Supersedes, "supersededBy": item.SupersededBy,
+			"validFrom": item.ValidFrom, "validTo": item.ValidTo,
 		})
 		freshness := sql.NullInt64{}
 		if item.TTLDays != nil {
