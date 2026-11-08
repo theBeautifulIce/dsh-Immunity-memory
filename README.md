@@ -329,6 +329,8 @@ node scripts/bench-retrieval.mjs  # 公开题库的检索层评测（需先 BENC
 node scripts/recall-eval.mjs      # 自带的 20 题召回自检
 node scripts/questions-ab.mjs sample 50   # 按原文抽轮次写问法（不打印题面）
 node scripts/questions-ab.mjs eval        # 同一批题对比「有/无 questions」
+node scripts/backfill-questions.mjs map.json --dry    # 给库里已有条目补 questions（先干跑）
+node scripts/backfill-questions.mjs map.json --apply  # 真正写库，会先做一致性备份
 node scripts/inspect-db.mjs   # 只读查看当前记忆库
 ```
 
