@@ -1049,6 +1049,55 @@ await test('自动记忆定时器首次只记起点，之后入队小时回顾',
   assert.match(engine.capturePrompt(), /小时回顾/)
 })
 
+// 图谱相关的用例各自开一个干净沙箱：注入预算里候选太多会互相挤占，不隔离测不准。
+async function withFreshEngine(run) {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-graph-'))
+  try {
+    const localCtx = { get: () => (name) => join(dir, name) }
+    const localStore = createStore(localCtx, log, () => normalizeSettings({}))
+    const localEngine = await createEngine({
+      store: localStore,
+      initialSettings: normalizeSettings({}),
+      getSettings: () => normalizeSettings({}),
+      log,
+    })
+    await run(localEngine, localStore)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+await test('关系图谱：跟命中条目同主题、但自己没对上查询词的条目被带进候选', async () => {
+  await withFreshEngine(async (localEngine) => {
+    const anchor = await localEngine.createItem({
+      layer: 'L4',
+      title: '灯箱验收卡在物业电路确认',
+      content: '灯箱已换成暖白，验收卡在物业电路确认，验收单还没签，前台说等物业盖章。',
+      importance: 6,
+      ttlDays: 90,
+    }, 'agent')
+    const neighbour = await localEngine.createItem({
+      layer: 'L4',
+      title: '周四去物业前台取材料',
+      content: '验收单放在物业前台，周四取；暖白那批样品一起带回，别忘盖章。',
+      importance: 6,
+      ttlDays: 90,
+    }, 'agent')
+    const unrelated = await localEngine.createItem({
+      layer: 'L4',
+      title: '乌龙茶要冷泡',
+      content: '乌龙茶冷泡四个小时更香，别用开水冲。',
+      importance: 6,
+      ttlDays: 90,
+    }, 'agent')
+    const stats = localEngine.injectionStats(Date.now(), undefined, { query: '灯箱现在到哪一步了' })
+    const ids = stats.lines.filter((line) => line.source === 'memory').map((line) => line.id)
+    assert.ok(ids.includes(anchor.id), '命中条目本身应在注入里')
+    assert.ok(ids.includes(neighbour.id), '同主题邻居应被图谱带进来')
+    assert.ok(ids.indexOf(neighbour.id) < ids.indexOf(unrelated.id), '邻居应排在无关条目前面')
+  })
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)
 
 

@@ -145,10 +145,13 @@ await test('重建索引后仍能检索（向量表重建）', async () => {
 })
 
 await test('图谱邻接查询', async () => {
+  // 插入的那条 related_to 边要能读到；自动建边可能再补上 related 邻居，
+  // 所以只断言「目标边在其中」，不断言总数。
   const neighbors = engine.graphNeighbors(pnpmDoc.id)
-  assert.equal(neighbors.length, 1)
-  assert.equal(neighbors[0].id, graphDoc.id)
-  assert.equal(neighbors[0].edgeType, 'related_to')
+  const manual = neighbors.find((entry) => entry.id === graphDoc.id)
+  assert.ok(manual, '手插的 related_to 边应能被读到')
+  assert.equal(manual.edgeType, 'related_to')
+  assert.ok(neighbors.every((entry) => entry.id !== pnpmDoc.id), '不含自环')
 })
 
 store.close()

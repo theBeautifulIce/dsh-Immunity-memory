@@ -86,8 +86,36 @@ channel never fires (three weight variants scored identically to the baseline).
 Conclusion: lexical ranking is saturated at ~83.6% @3 and 94.1% in-list. The
 remaining 42 misses are paraphrases, pronoun references and answers that span
 several turns. Going further requires semantic similarity (an actual embedding
-model, not the 384-dim feature hash) or populated relationship edges — the live
-store currently has none.
+model, not the 384-dim feature hash) or relationship edges built from something
+other than word overlap.
+
+## Measured limits of the relationship graph
+
+v0.4.11 derives `related` edges from token cosine (see CHANGELOG) and gives injected
+neighbours a bonus. Same 714 questions, same 30-item budget, graph edges built per
+query:
+
+| graph bonus | @1 | @3 | @10 | in list | missed |
+| --- | --- | --- | --- | --- | --- |
+| off (v0.4.10) | 62.7% | 83.6% | 90.3% | 94.1% | 42 |
+| 0.30 | 61.9% | 84.7% | 90.3% | 94.2% | 41 |
+| 0.15 | 62.5% | 84.3% | 90.6% | 94.4% | 40 |
+| 0.12 | 62.5% | 83.6% | 90.6% | 94.1% | 42 |
+
+A word-overlap graph buys at most +8 questions at @3, and it buys them by taking
+them from @1: at 0.30, @1 drops by 6. At 0.12 the change is neutral-to-positive
+(@10 +2), which is why that is the default.
+
+The limit is structural, not a tuning problem. These edges connect items that were
+written with the same words. A question about the same event phrased in other words
+("where did the lightbox thing get stuck?") still has no path to the answer. What the
+graph *does* buy, beyond these six points: `memory_search` finally walks real edges
+for its 0.2-weighted graph channel, conflict/related structure is visible in the store,
+and duplicate clusters become discoverable without comparing every pair.
+
+Next step for recall is a real semantic channel. The injection path is synchronous
+(`buildDigest()` scores inline), so that work starts with making the channel async or
+precomputing vectors at write time, not with swapping a model in.
 
 ## Non-goals
 

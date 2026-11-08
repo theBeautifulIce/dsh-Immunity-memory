@@ -6,6 +6,47 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-11-08
+
+The relationship graph existed in code and in the settings, but it had no edges to walk:
+the store only ever wrote `conflict` edges, and the injection path never consulted the
+graph at all. Now every write also derives `related` edges between items whose tokens
+overlap by cosine ≥ `RELATED_EDGE_MIN` (top 3 neighbours each, rebuilt wholesale), the
+store ships with `graphMinWeight` 0.3 instead of 0.5 so those real cosines are not
+filtered out, and `buildDigest()` adds a small neighbour bonus: when one of the top
+seeds is highly relevant, the items connected to it get pulled up even if they share no
+query token with the question.
+
+Measured on the 714-question benchmark (30-item budget): the bonus is worth +8 on
+recall@3 at weight 0.3 (605 vs 597) but costs −6 on recall@1 (442 vs 448); at 0.12 it
+costs nothing and moves recall@10 645 → 647. It is a word-overlap graph, so it only
+recovers answers to questions that were discussed "with the same words but not the
+question's words"; the 42 remaining misses are paraphrases and cross-turn stitching,
+which no lexical edge can reach. Default is therefore 0.12, and injecting remains
+switchable via `retrieval.graph`.
+
+### Added
+
+- `engine.js`: `graphEdgeIndex()` / `applyGraphBonus()` — in-memory idf-weighted cosine
+  graph over the injection candidates, top 3 neighbours per item, seeds = top 8 by score,
+  bonus = `seed.score * edgeWeight * GRAPH_BONUS`.
+- `sqlite.js`: `syncRelatedEdges()` — writes `related` edges (`RELATED_EDGE_MIN` 0.28,
+  top 3 per item) on every save, capped at 800 items; clears stale edges when fewer than
+  two items remain.
+
+### Changed
+
+- `settings.js`: `retrieval.graphMinWeight` default 0.5 → 0.3 (migrates the old default
+  only; values a user typed are left alone).
+- `buildDigest()`: graph bonus runs between PRF expansion and hit-bar selection, gated by
+  `DSH_GRAPH` and `retrieval.graph`.
+
+### Known limitation
+
+- Edges are built from tokens, not meaning: paraphrase and anaphora still produce no edge.
+  `memory_search` and injection each build their own graph today (the former from the
+  stored table, the latter in memory per query).
+
 ## [0.4.10] - 2026-11-08
 
 A live store lost nine items' `questions` field after they had been backfilled straight

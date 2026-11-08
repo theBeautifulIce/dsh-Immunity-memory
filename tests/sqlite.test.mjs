@@ -146,6 +146,46 @@ test('更新条目只改那一行，读回生效', () => {
   assert.equal(back.version, 3)
 })
 
+test('自动建边：同主题条目之间会写上 related 边', () => {
+  const state = baseState()
+  state.items = [
+    {
+      ...state.items[0],
+      id: 'mem_g1',
+      layer: 'L4',
+      type: 'memory',
+      title: '海鸥桥检修排期',
+      content: '海鸥桥检修定在周三凌晨，桥面封半幅，值班表已发。',
+      conflicts: [],
+    },
+    {
+      ...state.items[0],
+      id: 'mem_g2',
+      layer: 'L4',
+      type: 'memory',
+      title: '周三凌晨桥面封半幅',
+      content: '海鸥桥检修周三凌晨封半幅，值班表贴在门卫室，记得带反光背心。',
+      conflicts: [],
+    },
+  ]
+  store.write(state)
+  const edges = store.raw().prepare("SELECT * FROM relationships WHERE edge_type = 'related'").all()
+  assert.ok(edges.length >= 2, '同主题两条之间应建出双向边')
+  for (const edge of edges) {
+    assert.ok(edge.weight > 0 && edge.weight <= 1, '边权是 idf 加权余弦，落在 0-1')
+    assert.notEqual(edge.source_id, edge.target_id, '不该有自环')
+    assert.ok(['mem_g1', 'mem_g2'].includes(edge.source_id))
+  }
+  // 删掉其中一条，重写后边要跟着消失，不能留下悬空的关系。
+  const trimmed = store.read()
+  trimmed.items = trimmed.items.filter((entry) => entry.id !== 'mem_g2')
+  store.write(trimmed)
+  const left = store.raw().prepare("SELECT * FROM relationships WHERE edge_type = 'related'").all()
+  assert.equal(left.length, 0, '条目删掉后 related 边应被清掉')
+  // 还原成基础状态，后面的用例仍按原始条目断言。
+  store.write(baseState())
+})
+
 test('旧副本写回不会抹平库里的「能回答什么问题」', () => {
   const state = store.read()
   const item = state.items.find((entry) => entry.id === 'mem_a1')
@@ -180,8 +220,11 @@ test('删除条目会同时清掉关系边', () => {
   store.write(state)
   const back = store.read()
   assert.equal(back.items.some((entry) => entry.id === 'mem_b2'), false)
+  // related 边由条目内容自动重建，这里只要求「被删条目不再出现在任何边上」，
+  // 冲突边仍应清空。
   const edges = store.raw().prepare('SELECT * FROM relationships').all()
-  assert.equal(edges.length, 0)
+  assert.equal(edges.filter((edge) => edge.edge_type === 'conflict').length, 0)
+  assert.equal(edges.some((edge) => edge.source_id === 'mem_b2' || edge.target_id === 'mem_b2'), false)
 })
 
 test('审计日志追加，截断后整表重写', () => {

@@ -84,6 +84,24 @@ const PRF_ENABLED = true
 const PRF_SEED_MIN = 0.25
 const PRF_WEIGHT = 0.45
 const PRF_TOKEN_LIMIT = 5
+// 关系图谱：把「用同一批罕见词讲同一件事」的条目连起来。
+// 词面检索救不了换说法，但如果答案那条和某条命中条目共享几个罕见词，
+// 从命中条目顺着边爬一步就能把它带进候选。DSH_GRAPH=0 可关掉（跑题库对照用）。
+const GRAPH_ENABLED = process.env.DSH_GRAPH !== '0'
+// 扫参用：不设环境变量就是下面的默认值。
+function envNumber(name, fallback) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+const GRAPH_EDGE_MIN = envNumber('DSH_GRAPH_EDGE_MIN', 0.2)
+const GRAPH_NEIGHBORS = 3
+const GRAPH_SEEDS = envNumber('DSH_GRAPH_SEEDS', 8)
+// 0.12 是题库上「@1 不降、@10 略升」的取值；再大就需要更强的边权来兜住，
+// 见 ROADMAP 里「关系图谱的实测边界」。
+const GRAPH_BONUS = envNumber('DSH_GRAPH_BONUS', 0.12)
+const GRAPH_POSTING_MAX = 40
 // 注入时的分层：命中条目给全文，靠前的给摘要，其余只留一行线索。
 // 三十条平铺六千字，模型真正看进去的只有前几条；把字符预算按相关度分配，
 // 同样的 token 数里能装下更多「有用的那一半」。
@@ -2118,6 +2136,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         }
       }
     }
+    // 关系图谱：词面没救的条目，如果跟最相关那几条讲的是同一件事，顺着边抬进来。
+    if (GRAPH_ENABLED && active.retrieval?.graph !== false) {
+      applyGraphBonus(scored, graphEdgeIndex(candidates, stats))
+    }
     // 命中门槛不能只看绝对值：一句无关的话也可能碰上一两个通用词，
     // 于是「每条都标命中」。用候选集自身的中位数当背景，只有明显高于背景的才算命中。
     const hitBar = relevanceBar(scored.map((entry) => entry.relevanceRaw ?? entry.relevance))
@@ -3059,6 +3081,104 @@ function matchedQueryTokens(item, queryTokens) {
   let matched = 0
   for (const token of queryTokens) if (haystack.has(token)) matched += 1
   return matched
+}
+
+/**
+ * 关系图谱（内存版）：按共享罕见词的余弦相似度连边。
+ *
+ * 只在候选集内建边、不落库：注入是同步链路，读库再爬图会把每次请求拖慢，
+ * 而候选集本身很小（几十到几百条）。每条只留最近几条边，权重不到
+ * GRAPH_EDGE_MIN 的不算——中文按二元组切词，不清洗的话整张图会连成一团。
+ */
+function graphEdgeIndex(candidates, stats) {
+  const adjacency = new Map()
+  if (stats === undefined || candidates.length < 2) return adjacency
+  const n = candidates.length
+  const ceiling = Math.max(2, Math.floor(n * QUERY_DF_RATIO))
+  const vectors = new Map()
+  for (const item of candidates) {
+    const weights = new Map()
+    for (const token of tokenize(searchableText(item))) {
+      const df = stats.df.get(token) ?? 0
+      if (df < 2 || df > ceiling) continue
+      weights.set(token, Math.log((n + 1) / (df + 1)) + 1)
+    }
+    if (weights.size === 0) continue
+    let square = 0
+    for (const value of weights.values()) square += value * value
+    vectors.set(item.id, { weights, norm: Math.sqrt(square) })
+  }
+  if (vectors.size < 2) return adjacency
+  const postings = new Map()
+  for (const [id, { weights }] of vectors) {
+    for (const token of weights.keys()) {
+      const bucket = postings.get(token)
+      if (bucket === undefined) postings.set(token, [id])
+      else bucket.push(id)
+    }
+  }
+  const dots = new Map()
+  for (const [token, bucket] of postings) {
+    if (bucket.length < 2 || bucket.length > GRAPH_POSTING_MAX) continue
+    for (let i = 0; i < bucket.length; i += 1) {
+      const leftId = bucket[i]
+      const leftWeight = vectors.get(leftId).weights.get(token)
+      for (let j = i + 1; j < bucket.length; j += 1) {
+        const rightId = bucket[j]
+        const key = leftId < rightId ? `${leftId}|${rightId}` : `${rightId}|${leftId}`
+        dots.set(key, (dots.get(key) ?? 0) + leftWeight * vectors.get(rightId).weights.get(token))
+      }
+    }
+  }
+  for (const [key, dot] of dots) {
+    const [leftId, rightId] = key.split('|')
+    const left = vectors.get(leftId)
+    const right = vectors.get(rightId)
+    if (left === undefined || right === undefined) continue
+    const weight = dot / (left.norm * right.norm)
+    if (!(weight >= GRAPH_EDGE_MIN)) continue
+    pushEdge(adjacency, leftId, rightId, weight)
+    pushEdge(adjacency, rightId, leftId, weight)
+  }
+  for (const list of adjacency.values()) {
+    list.sort((left, right) => right[1] - left[1])
+    if (list.length > GRAPH_NEIGHBORS) list.length = GRAPH_NEIGHBORS
+  }
+  return adjacency
+}
+
+function pushEdge(adjacency, from, to, weight) {
+  const list = adjacency.get(from)
+  if (list === undefined) adjacency.set(from, [[to, weight]])
+  else list.push([to, weight])
+}
+
+/**
+ * 把排在最前面的几条当作种子，沿边给邻居加分。
+ *
+ * 加的是「种子分 × 边权 × GRAPH_BONUS」，不是固定值：种子自己越确定，
+ * 它拉进来的邻居越可信；边权越强，越可能是同一件事的两种说法。
+ */
+function applyGraphBonus(scored, edges) {
+  if (edges.size === 0) return 0
+  const seeds = [...scored].sort((left, right) => right.score - left.score).slice(0, GRAPH_SEEDS)
+  const bonus = new Map()
+  for (const seed of seeds) {
+    if (!(seed.score > 0)) continue
+    for (const [id, weight] of edges.get(seed.item.id) ?? []) {
+      const value = seed.score * weight * GRAPH_BONUS
+      if (value > (bonus.get(id) ?? 0)) bonus.set(id, value)
+    }
+  }
+  let touched = 0
+  for (const entry of scored) {
+    const value = bonus.get(entry.item.id)
+    if (value === undefined) continue
+    entry.graph = Math.round(value * 1000) / 1000
+    entry.score += value
+    touched += 1
+  }
+  return touched
 }
 
 /**

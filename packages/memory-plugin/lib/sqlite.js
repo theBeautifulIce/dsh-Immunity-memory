@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import { embed, DEFAULT_DIM, vectorToBuffer, bufferToVector } from './embeddings.js'
-import { ftsText } from './text.js'
+import { ftsText, searchableText, tokenize } from './text.js'
 import { message } from './store.js'
 
 export const DB_FILE = 'memory.sqlite3'
@@ -848,6 +848,105 @@ function syncRelationships(database, items) {
       }
     }
   }
+  syncRelatedEdges(database, items)
+}
+
+// 自动建边的规模上限：超过就不重建（保留上一次的图），避免每次保存都做全量两两比较。
+const RELATED_ITEM_MAX = 800
+const RELATED_POSTING_MAX = 40
+const RELATED_NEIGHBORS = 3
+const RELATED_DF_RATIO = 0.35
+// 边权下限：低于它多半只是「用的词差不多」，连起来会白白挤占图扩张的名额。
+export const RELATED_EDGE_MIN = 0.28
+
+/**
+ * 自动建边：把「用同一批罕见词讲同一件事」的条目连成 related 边。
+ *
+ * 权重是 idf 加权余弦，只保留每条最近的三条边。图为检索服务：
+ * memory_search 的图谱融合、注入时的邻居加分、面板里的关联条目都读这张表。
+ * 词面越相近的边越强；换说法（同一个意思不同用词）这类边建不出来，
+ * 那是 embedding 的活，不在这一步的范围内。
+ */
+function syncRelatedEdges(database, items) {
+  const usable = items.filter((item) => (item.status === 'active' || item.status === 'conflicted'))
+  if (usable.length > RELATED_ITEM_MAX) return
+  if (usable.length < 2) {
+    // 条目被删到只剩一条时，旧的 related 边就成了指向空气的悬空关系。
+    database.prepare("DELETE FROM relationships WHERE edge_type = 'related'").run()
+    return
+  }
+  const n = usable.length
+  const ceiling = Math.max(2, Math.floor(n * RELATED_DF_RATIO))
+  const vectors = new Map()
+  const df = new Map()
+  const tokenized = new Map()
+  for (const item of usable) {
+    const tokens = tokenize(searchableText(item))
+    tokenized.set(item.id, tokens)
+    for (const token of tokens) df.set(token, (df.get(token) ?? 0) + 1)
+  }
+  for (const [id, tokens] of tokenized) {
+    const weights = new Map()
+    for (const token of tokens) {
+      const count = df.get(token) ?? 0
+      if (count < 2 || count > ceiling) continue
+      weights.set(token, Math.log((n + 1) / (count + 1)) + 1)
+    }
+    if (weights.size === 0) continue
+    let square = 0
+    for (const value of weights.values()) square += value * value
+    vectors.set(id, { weights, norm: Math.sqrt(square) })
+  }
+  const postings = new Map()
+  for (const [id, entry] of vectors) {
+    for (const token of entry.weights.keys()) {
+      const bucket = postings.get(token)
+      if (bucket === undefined) postings.set(token, [id])
+      else bucket.push(id)
+    }
+  }
+  const dots = new Map()
+  for (const [token, bucket] of postings) {
+    if (bucket.length < 2 || bucket.length > RELATED_POSTING_MAX) continue
+    for (let i = 0; i < bucket.length; i += 1) {
+      const leftId = bucket[i]
+      const leftWeight = vectors.get(leftId).weights.get(token)
+      for (let j = i + 1; j < bucket.length; j += 1) {
+        const rightId = bucket[j]
+        const key = leftId < rightId ? `${leftId}|${rightId}` : `${rightId}|${leftId}`
+        dots.set(key, (dots.get(key) ?? 0) + leftWeight * vectors.get(rightId).weights.get(token))
+      }
+    }
+  }
+  const adjacency = new Map()
+  for (const [key, dot] of dots) {
+    const [leftId, rightId] = key.split('|')
+    const left = vectors.get(leftId)
+    const right = vectors.get(rightId)
+    if (left === undefined || right === undefined) continue
+    const weight = dot / (left.norm * right.norm)
+    if (!(weight >= RELATED_EDGE_MIN)) continue
+    pushRelated(adjacency, leftId, rightId, weight)
+    pushRelated(adjacency, rightId, leftId, weight)
+  }
+  const now = new Date().toISOString()
+  const insert = database.prepare(
+    `INSERT INTO relationships (id, source_id, target_id, edge_type, weight, created_at, metadata)
+     VALUES (?, ?, ?, 'related', ?, ?, '{}')`,
+  )
+  database.prepare("DELETE FROM relationships WHERE edge_type = 'related'").run()
+  for (const [sourceId, list] of adjacency) {
+    list.sort((left, right) => right[1] - left[1])
+    for (const [targetId, weight] of list.slice(0, RELATED_NEIGHBORS)) {
+      insert.run(randomUUID(), sourceId, targetId, Math.round(weight * 1000) / 1000, now)
+    }
+  }
+}
+
+function pushRelated(adjacency, from, to, weight) {
+  const list = adjacency.get(from)
+  if (list === undefined) adjacency.set(from, [[to, weight]])
+  else list.push([to, weight])
 }
 
 function auditSignature(entry) {
