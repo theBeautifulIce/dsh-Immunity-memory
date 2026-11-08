@@ -11,11 +11,13 @@ All notable changes to this project are documented here. The format follows
 The relationship graph existed in code and in the settings, but it had no edges to walk:
 the store only ever wrote `conflict` edges, and the injection path never consulted the
 graph at all. Now every write also derives `related` edges between items whose tokens
-overlap by cosine ≥ `RELATED_EDGE_MIN` (top 3 neighbours each, rebuilt wholesale), the
-store ships with `graphMinWeight` 0.3 instead of 0.5 so those real cosines are not
-filtered out, and `buildDigest()` adds a small neighbour bonus: when one of the top
+overlap by cosine ≥ `RELATED_EDGE_MIN` (top 3 neighbours each, rebuilt wholesale);
+`graphMinWeight` defaults to 0.22 instead of 0.5 so those real cosines are not filtered
+out, and `buildDigest()` adds a small neighbour bonus: when one of the top
 seeds is highly relevant, the items connected to it get pulled up even if they share no
-query token with the question.
+query token with the question. On the live store (39 items) the threshold makes a real
+difference: 0.28 leaves 22 items isolated and the largest cluster at 3, 0.22 leaves 7
+isolated with a 6-item cluster, 0.18 connects almost everything into one blob.
 
 Measured on the 714-question benchmark (30-item budget): the bonus is worth +8 on
 recall@3 at weight 0.3 (605 vs 597) but costs −6 on recall@1 (442 vs 448); at 0.12 it
@@ -30,14 +32,14 @@ switchable via `retrieval.graph`.
 - `engine.js`: `graphEdgeIndex()` / `applyGraphBonus()` — in-memory idf-weighted cosine
   graph over the injection candidates, top 3 neighbours per item, seeds = top 8 by score,
   bonus = `seed.score * edgeWeight * GRAPH_BONUS`.
-- `sqlite.js`: `syncRelatedEdges()` — writes `related` edges (`RELATED_EDGE_MIN` 0.28,
+- `sqlite.js`: `syncRelatedEdges()` — writes `related` edges (`RELATED_EDGE_MIN` 0.22,
   top 3 per item) on every save, capped at 800 items; clears stale edges when fewer than
   two items remain.
 
 ### Changed
 
-- `settings.js`: `retrieval.graphMinWeight` default 0.5 → 0.3 (migrates the old default
-  only; values a user typed are left alone).
+- `settings.js`: `retrieval.graphMinWeight` default 0.5 → 0.22 (the old 0.5 default is
+  migrated; values a user typed are left alone).
 - `buildDigest()`: graph bonus runs between PRF expansion and hit-bar selection, gated by
   `DSH_GRAPH` and `retrieval.graph`.
 

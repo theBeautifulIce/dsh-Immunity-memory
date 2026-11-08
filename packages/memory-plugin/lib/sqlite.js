@@ -334,7 +334,10 @@ export function createSqliteStore(ctx, log, getSettings) {
     read() {
       const db = ensure()
       const state = readAll(db)
-      if (state !== undefined) return state
+      if (state !== undefined) {
+        ensureRelatedEdges(db, state.items, log)
+        return state
+      }
       const legacy = readLegacyJson(dirname(path))
       if (legacy === undefined) return undefined
       try {
@@ -857,7 +860,23 @@ const RELATED_POSTING_MAX = 40
 const RELATED_NEIGHBORS = 3
 const RELATED_DF_RATIO = 0.35
 // 边权下限：低于它多半只是「用的词差不多」，连起来会白白挤占图扩张的名额。
-export const RELATED_EDGE_MIN = 0.28
+// 0.22 是在真库（39 条）上量出来的：0.28 时有 22 条孤立、最大连通片只有 3 条，
+// 0.22 时孤立降到 7 条、最大片 6 条，再往下 0.18 就几乎全连成一片了。
+export const RELATED_EDGE_MIN = 0.22
+// 每次保存/读取都重建整张图太贵：条目集合和各自的 updatedAt 都没变时沿用上一次的边。
+const relatedSignatures = new WeakMap()
+
+/**
+ * 读取路径上的兜底：库里还没有 related 边（或者只被清过）时补建一次。
+ * 建边失败不该影响读记忆，所以吞掉异常并记一条 warn。
+ */
+function ensureRelatedEdges(database, items, log) {
+  try {
+    syncRelatedEdges(database, items)
+  } catch (error) {
+    log?.('warn', `自动建边失败：${message(error)}`)
+  }
+}
 
 /**
  * 自动建边：把「用同一批罕见词讲同一件事」的条目连成 related 边。
@@ -870,6 +889,10 @@ export const RELATED_EDGE_MIN = 0.28
 function syncRelatedEdges(database, items) {
   const usable = items.filter((item) => (item.status === 'active' || item.status === 'conflicted'))
   if (usable.length > RELATED_ITEM_MAX) return
+  // 条目或它们的更新时间没动过，就沿用上一次算出来的边（写路径会被高频调用）。
+  const signature = usable.map((item) => `${item.id}@${item.updatedAt ?? ''}`).sort().join('|')
+  if (relatedSignatures.get(database) === signature) return
+  relatedSignatures.set(database, signature)
   if (usable.length < 2) {
     // 条目被删到只剩一条时，旧的 related 边就成了指向空气的悬空关系。
     database.prepare("DELETE FROM relationships WHERE edge_type = 'related'").run()

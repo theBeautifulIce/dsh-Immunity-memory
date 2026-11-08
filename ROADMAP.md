@@ -117,6 +117,12 @@ Next step for recall is a real semantic channel. The injection path is synchrono
 (`buildDigest()` scores inline), so that work starts with making the channel async or
 precomputing vectors at write time, not with swapping a model in.
 
+How dense is the graph in practice? On the live store (39 memories) at edge threshold
+0.22: 44 directed edges, 19 components, largest cluster 6, 7 items with no neighbour.
+At 0.28 the same store leaves 22 items isolated; at 0.18 it collapses into one 39-item
+blob. That is why 0.22 is the default: below it every memory is "related" to every other,
+above it most memories stand alone.
+
 ## Non-goals
 
 - A hosted multi-tenant memory service.

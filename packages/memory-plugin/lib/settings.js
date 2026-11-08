@@ -298,7 +298,7 @@ export const DEFAULT_SETTINGS = {
     cacheSize: 256,
     graphDepth: 2,
     graphSeeds: 5,
-    graphMinWeight: 0.3,
+    graphMinWeight: 0.22,
   },
   write: {
     minContentLength: 8,
@@ -1229,12 +1229,12 @@ export function normalizeSettings(raw = {}) {
     const value = coerceField(field, candidate)
     if (value !== undefined) setPath(next, field.path, value)
   }
-  // 旧版本的默认下限是 0.5，而自动建出来的 related 边权重是真实余弦（0.28-0.9），
+  // 旧版本的默认下限是 0.5，而自动建出来的 related 边权重是真实余弦（0.22-0.9），
   // 留着 0.5 会把它们全部过滤掉。只有「正好等于旧默认值」时才跟着调整，
   // 用户自己填过的数值不动。
   if (getPath(next, 'retrieval.graphMinWeight') === 0.5
     && getPath(source, 'retrieval.graphMinWeight') === 0.5) {
-    setPath(next, 'retrieval.graphMinWeight', 0.3)
+    setPath(next, 'retrieval.graphMinWeight', 0.22)
   }
   // 模板不是 schema 里的静态下拉：自定义模板 + 当前模板 id 必须整体保留。
   next.prompt.customTemplates = normalizeCustomTemplates(source.prompt?.customTemplates)
