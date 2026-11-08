@@ -973,11 +973,22 @@ function syncRelatedEdges(database, items) {
      VALUES (?, ?, ?, 'related', ?, ?, '{}')`,
   )
   database.prepare("DELETE FROM relationships WHERE edge_type = 'related'").run()
+  // 每对只落一行：双向各存一条的话，反查时两端各命中一次，界面上同一条关联会出现两遍。
+  // 邻接表按节点各留前 N 条，这里取两侧并集，避免丢掉只出现在一端的关系。
+  const pairs = new Map()
   for (const [sourceId, list] of adjacency) {
     list.sort((left, right) => right[1] - left[1])
     for (const [targetId, weight] of list.slice(0, RELATED_NEIGHBORS)) {
-      insert.run(randomUUID(), sourceId, targetId, Math.round(weight * 1000) / 1000, now)
+      const leftId = sourceId < targetId ? sourceId : targetId
+      const rightId = sourceId < targetId ? targetId : sourceId
+      const key = `${leftId}|${rightId}`
+      const previous = pairs.get(key)
+      if (previous === undefined || weight > previous) pairs.set(key, weight)
     }
+  }
+  for (const [key, weight] of pairs) {
+    const [sourceId, targetId] = key.split('|')
+    insert.run(randomUUID(), sourceId, targetId, Math.round(weight * 1000) / 1000, now)
   }
 }
 

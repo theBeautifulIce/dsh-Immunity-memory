@@ -1130,7 +1130,11 @@ await test('人工关联：连上的条目没有共同词，也会被注入带�
       ttlDays: 90,
     }, 'agent')
     localStore.links = async (id) => (id === anchor.id || id === neighbour.id
-      ? [{ id: id === anchor.id ? neighbour.id : anchor.id, edgeType: 'manual', weight: 1 }]
+      // 同一对可能既被自动建了 related，又被人连了 manual：列表里只该出现一行。
+      ? [
+        { id: id === anchor.id ? neighbour.id : anchor.id, edgeType: 'manual', weight: 1 },
+        { id: id === anchor.id ? neighbour.id : anchor.id, edgeType: 'related', weight: 0.62 },
+      ]
       : [])
     localStore.linkItems = async ({ sourceId, targetId, weight }) => ({
       id: String(targetId),
@@ -1139,7 +1143,9 @@ await test('人工关联：连上的条目没有共同词，也会被注入带�
     })
     await localEngine.linkItems({ sourceId: anchor.id, targetId: neighbour.id }, 'agent')
     const listed = await localEngine.itemLinks(anchor.id)
-    assert.equal(listed.length, 1)
+    assert.equal(listed.length, 1, '同一对条目的 related 与 manual 要合成一行')
+    assert.equal(listed[0].edgeType, 'manual', '合成后以人工为准')
+    assert.equal(listed[0].weight, 1, '权重取两者较大的')
     assert.equal(listed[0].title, '周四去前台取材料', '关联列表要带上对端标题，不能只给 id')
     assert.equal(listed[0].layer, 'L4')
     const stats = localEngine.injectionStats(Date.now(), undefined, { query: '灯箱验收单签了吗' })

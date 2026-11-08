@@ -2960,15 +2960,33 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       const links = await store.links(String(id ?? ''), options ?? {})
       const state = await ensureLoaded()
       const byId = new Map((state.items ?? []).map((item) => [item.id, item]))
+      // 同一对条目可能既有自动 related、又有人工 manual：面板上只该出现一行，
+      // 以人工为准（那是人明确判断过的），权重取两者较大的。
+      const merged = new Map()
+      for (const link of Array.isArray(links) ? links : []) {
+        const other = String(link?.id ?? '')
+        const weight = Number(link?.weight ?? 1)
+        const previous = merged.get(other)
+        if (previous === undefined) {
+          merged.set(other, { ...link, id: other, weight })
+          continue
+        }
+        const manual = previous.edgeType === 'manual' || link.edgeType === 'manual'
+        merged.set(other, {
+          ...previous,
+          edgeType: manual ? 'manual' : previous.edgeType,
+          weight: Math.max(previous.weight, weight),
+        })
+      }
       // 面板里只给 id 的话人看不出连的是哪条，这里把对端标题一并带上。
-      return (Array.isArray(links) ? links : []).map((link) => {
-        const other = byId.get(link?.id)
+      return [...merged.values()].map((link) => {
+        const item = byId.get(link.id)
         return {
           ...link,
-          title: other?.title ?? '',
-          layer: other?.layer ?? '',
-          itemType: other?.type ?? 'memory',
-          notebook: other?.notebook ?? null,
+          title: item?.title ?? '',
+          layer: item?.layer ?? '',
+          itemType: item?.type ?? 'memory',
+          notebook: item?.notebook ?? null,
         }
       })
     },

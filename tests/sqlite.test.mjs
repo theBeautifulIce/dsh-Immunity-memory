@@ -170,12 +170,20 @@ test('自动建边：同主题条目之间会写上 related 边', () => {
   ]
   store.write(state)
   const edges = store.raw().prepare("SELECT * FROM relationships WHERE edge_type = 'related'").all()
-  assert.ok(edges.length >= 2, '同主题两条之间应建出双向边')
+  assert.ok(edges.length >= 1, '同主题两条之间应建出 related 边')
   for (const edge of edges) {
     assert.ok(edge.weight > 0 && edge.weight <= 1, '边权是 idf 加权余弦，落在 0-1')
     assert.notEqual(edge.source_id, edge.target_id, '不该有自环')
     assert.ok(['mem_g1', 'mem_g2'].includes(edge.source_id))
   }
+  // 每对只落一行：反向再存一条的话，界面上同一条关联会出现两遍。
+  const reversed = store.raw().prepare(
+    `SELECT a.id AS a FROM relationships a
+     JOIN relationships b
+       ON a.source_id = b.target_id AND a.target_id = b.source_id
+      AND a.edge_type = b.edge_type AND a.id < b.id`,
+  ).all()
+  assert.equal(reversed.length, 0, '同一对各存一条，不该出现反向重复')
   // 删掉其中一条，重写后边要跟着消失，不能留下悬空的关系。
   const trimmed = store.read()
   trimmed.items = trimmed.items.filter((entry) => entry.id !== 'mem_g2')

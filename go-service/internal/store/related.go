@@ -167,17 +167,32 @@ func (s *Store) syncRelatedEdgesLocked() error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// 每对只落一行：双向各存一条的话，反查时两端各命中一次，界面上同一条关联会出现两遍。
+	// 邻接表本身是按节点各留前 N 条，这里取两侧的并集，避免丢掉只出现在一端的关系。
+	pairs := make(map[[2]int]float64, len(dots))
 	for from, list := range adjacency {
 		for _, edge := range list {
-			sourceID := docs[from].id
-			targetID := docs[edge.to].id
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO relationships
-				(id, source_id, target_id, edge_type, weight, created_at, metadata)
-				VALUES (?, ?, ?, 'related', ?, ?, '{}')`,
-				sourceID+":"+targetID, sourceID, targetID, math.Round(edge.weight*1000)/1000, now); err != nil {
-				tx.Rollback()
-				return err
+			left, right := from, edge.to
+			if left > right {
+				left, right = right, left
 			}
+			if previous, ok := pairs[[2]int{left, right}]; !ok || edge.weight > previous {
+				pairs[[2]int{left, right}] = edge.weight
+			}
+		}
+	}
+	for pair, weight := range pairs {
+		sourceID := docs[pair[0]].id
+		targetID := docs[pair[1]].id
+		if sourceID > targetID {
+			sourceID, targetID = targetID, sourceID
+		}
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO relationships
+			(id, source_id, target_id, edge_type, weight, created_at, metadata)
+			VALUES (?, ?, ?, 'related', ?, ?, '{}')`,
+			sourceID+":"+targetID, sourceID, targetID, math.Round(weight*1000)/1000, now); err != nil {
+			tx.Rollback()
+			return err
 		}
 	}
 	return tx.Commit()

@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-11-08
+
+Related entries showed the same neighbour twice. Two separate causes, both from writing links
+from each side's point of view: the automatic builder inserted a row for `A→B` and another for
+`B→A`, and a pair that had been judged by hand kept its `related` row next to the `manual` one.
+On a 19-pair store that meant 38 rows, and the panel listed each neighbour twice.
+
+Automatic edges are now merged into one canonical row per pair (lower id first, weight = the
+larger of the two directions, so a relation seen from only one side is not dropped), in both the
+Go service and the SQLite store. The link list additionally folds `manual` and `related` rows for
+the same neighbour into one entry, preferring `manual` because that is a judgement and taking the
+higher weight. Graph lookups are unaffected: they already match on either column.
+
+### Fixed
+
+- Automatic related edges are stored once per pair instead of once per direction.
+- `links.list` / `memory_link` no longer lists a neighbour twice when a manual link and an
+  automatic relation describe the same pair.
+
 ## [0.4.18] - 2026-11-08
 
 Related entries in the panel showed memory ids instead of titles. The link list only ever
