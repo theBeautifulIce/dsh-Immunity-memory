@@ -80,6 +80,13 @@ const PRF_ENABLED = true
 const PRF_SEED_MIN = 0.25
 const PRF_WEIGHT = 0.45
 const PRF_TOKEN_LIMIT = 5
+// 注入时的分层：命中条目给全文，靠前的给摘要，其余只留一行线索。
+// 三十条平铺六千字，模型真正看进去的只有前几条；把字符预算按相关度分配，
+// 同样的 token 数里能装下更多「有用的那一半」。
+const HIT_BODY_CHARS = 400
+const TOP_BODY_CHARS = 260
+const BACKGROUND_BODY_CHARS = 90
+const TOP_RANK = 3
 
 /**
  * 查询词里的虚词黑名单：中文按字+二元组切词，不滤掉这些词的话，
@@ -100,6 +107,50 @@ const QUERY_STOP_TOKENS = new Set([
   'the', 'and', 'for', 'that', 'this', 'with', 'have', 'has', 'was', 'were', 'are', 'you', 'your',
   'what', 'when', 'where', 'how', 'who', 'why', 'did', 'does', 'not', 'but', 'about', 'from',
 ])
+
+/**
+ * 问法和记载说法不一样时的桥：他问「多大」，库里写的是出生年份；
+ * 问「全名」，条目里只有名字。这些词表不在索引里，只在查询时加一层同义扩展，
+ * 所以不会影响存进去的东西，也不承担「记得对不对」的责任。
+ * 只收真正高频、歧义少的对应，不当万能词典用。
+ */
+const QUERY_EXPANSIONS = new Map([
+  ['多大', ['年龄', '岁', '出生', '生日']],
+  ['几岁', ['年龄', '岁', '出生']],
+  ['年龄', ['岁', '出生', '生日']],
+  ['生日', ['出生', '岁', '日期']],
+  ['全名', ['名字', '姓名']],
+  ['姓名', ['名字', '全名']],
+  ['叫什么', ['名字', '姓名']],
+  ['哪年', ['年份', '出生', '日期']],
+  ['什么时候', ['时间', '日期', '哪天']],
+  ['哪天', ['时间', '日期']],
+  ['几点', ['时间', '时候']],
+  ['多久', ['时间', '时长', '天']],
+  ['在哪', ['地点', '地方', '地址']],
+  ['哪里', ['地点', '地方', '地址']],
+  ['哪儿', ['地点', '地方', '地址']],
+  ['地址', ['地点', '地方']],
+  ['多少钱', ['价格', '元', '块']],
+  ['价格', ['元', '块']],
+  ['干什么的', ['工作', '职业']],
+  ['做什么', ['工作', '职业']],
+  ['谁', ['名字', '姓名']],
+])
+
+/**
+ * 把查询里能拆开的词换成更可能被写下来的说法。
+ * 只加不改：原词全部保留，扩展词仅仅多一次被 df 过滤的机会。
+ */
+function expandQueryTokens(raw) {
+  const expanded = new Set(raw)
+  for (const token of raw) {
+    const extra = QUERY_EXPANSIONS.get(token)
+    if (extra === undefined) continue
+    for (const word of extra) expanded.add(word)
+  }
+  return expanded
+}
 
 /** 新建一条记忆/记事本条目。 */
 export async function createEngine({ store, getSettings, initialSettings, log, native }) {
@@ -2079,12 +2130,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       lines.push(`- [${entry.layer} ${layerLabel}·模板] ${entry.title}：${body}`)
       lineMeta.push({ ...entry, source: 'template', importance: null })
     }
+    let rank = -1
     for (const { item, relevance, relevanceRaw, matched } of chosen) {
-      const body = truncate(item.content.replace(/\s+/g, ' ').trim(), 220)
+      rank += 1
       // 命中标记：让模型一眼看出哪几条是「跟这一轮有关」，而不是又一份需要通读的背景资料。
       // 只沾上一个词不算——短查询里一个通用词就能拿到 0.5 的相对分，所以要求至少对上两个词。
-      const hit = (relevanceRaw ?? relevance) >= hitBar && matched >= MIN_HIT_TOKENS ? '·命中' : ''
-      lines.push(`- [${item.layer}·重要度${item.importance}${hit}] ${item.title}：${body}`)
+      const hit = (relevanceRaw ?? relevance) >= hitBar && matched >= MIN_HIT_TOKENS
+      const limit = hit ? HIT_BODY_CHARS : rank < TOP_RANK ? TOP_BODY_CHARS : BACKGROUND_BODY_CHARS
+      const body = truncate(item.content.replace(/\s+/g, ' ').trim(), limit)
+      const mark = hit ? '·命中' : ''
+      lines.push(`- [${item.layer}·重要度${item.importance}${mark}] ${item.title}：${body}`)
       lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance: relevanceRaw ?? relevance, matched })
     }
     const header = coldStart
@@ -2978,11 +3033,6 @@ function corpusStats(candidates) {
 }
 
 /**
- * 命中门槛：绝对下限与「候选集自身背景」的较大者。
- * 一句与记忆无关的话也可能靠一两个通用词拿到 0.2-0.5 的相对分；
- * 用中位数当背景，只有当这条明显高出其它条目时才标「·命中」。
- */
-/**
  * 查询词在条目里对上了几个（标题 + 正文 + 标签）。
  * 「·命中」需要的不只是相对分高，还要有足够的字面证据。
  */
@@ -3022,7 +3072,7 @@ function relevanceBar(relevances) {
  * 只留「至少一条、但不到一半」的词，再按稀有度取前 32 个：真正在聊的东西浮上来。
  */
 function selectQueryTokens(text, candidates) {
-  const raw = tokenize(text)
+  const raw = expandQueryTokens(tokenize(text))
   if (raw.size === 0 || candidates.length === 0) return new Set()
   // 超大库不在这里做全量 df：宁可退回重要度排序，也不把每次请求拖成几十毫秒。
   if (candidates.length > 4000) return new Set()

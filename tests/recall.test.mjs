@@ -154,4 +154,28 @@ await test('少见的词比到处都是的词更有分量', async () => {
   assert.ok((lines[0].relevance ?? 0) > (lines[1].relevance ?? 0))
 })
 
+await test('同义扩展：问「多大」也能找到写着出生年份的那条', async () => {
+  // 真实对话里问法和记载用词常常对不上。词表只加在查询侧，不改存进去的东西。
+  await engine.createItem({
+    layer: 'L2',
+    title: '出生年份',
+    content: '1995 年 3 月出生，属猪。',
+    ttlDays: 3650,
+    importance: 6,
+  }, 'user')
+  engine.noteTurnContext({ sessionId: 'session-g', kind: 'user', text: '我今年多大' })
+  const lines = memoryLines(engine.injectionStats())
+  assert.match(lines[0].title, /出生年份/, '扩展词应把只写了出生年份的条目拉上来')
+})
+
+await test('命中条目给全文，背景条目只留一行', async () => {
+  engine.noteTurnContext({ sessionId: 'session-h', kind: 'user', text: 'PTY shell exited during startup 怎么办' })
+  const stats = engine.injectionStats()
+  const lines = memoryLines(stats)
+  assert.match(stats.text, /·命中/, '这一轮应当标出命中')
+  assert.ok(lines[0].chars > lines[lines.length - 1].chars, '命中条的正文预算应高于背景条')
+  const background = lines[lines.length - 1]
+  assert.ok(background.chars < 150, '背景条只留一行，不占预算')
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

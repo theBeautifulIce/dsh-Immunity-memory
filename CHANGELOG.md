@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-08
+
+Smaller, sharper digest after 0.4.6's ranking work. This round is honest about what
+did *not* help: making injection cheaper and more readable moved the needle for the
+model reading it, while two further ranking ideas were measured and dropped because
+they landed inside the noise band on the 714-question benchmark (54.3% vs 54.5% @1
+is one question either way).
+
+### Added
+
+- Query-side synonym expansion (`QUERY_EXPANSIONS`, 21 entries, `expandQueryTokens()`):
+  asking 「多大」 now also looks for 「年龄」「岁」「出生」「生日」, 「在哪」 for
+  「地点」「地址」. Expansion only adds tokens to the query, never to stored items, so
+  it cannot corrupt what is remembered. Measured neutral on the synthetic benchmark
+  (whose dialogues reuse the same wording) and kept for real conversation.
+- Layered digest rendering: a hit entry gets up to 400 characters of body, the top
+  three get 260, everything else is cut to 90 (`HIT_BODY_CHARS` / `TOP_BODY_CHARS` /
+  `BACKGROUND_BODY_CHARS`). Same token budget, far more of it spent on the entries
+  that matter this turn.
+
+### Changed
+
+- `tests/recall.test.mjs` grew to 10 checks: synonym expansion reaching an item that
+  only says the birth year, and the hit entry getting a longer body than background
+  entries.
+
+### Not changed (measured, rejected)
+
+- Answer-shape matching (prefer items containing a date/number/name when the question
+  asks when/how much/who): recall@1 53.8% vs 54.3%, reverted.
+- Same-day neighbour boosting: recall@1 54.2%, recall@10 +0.1pt, reverted as noise.
+
 ## [0.4.6] - 2026-11-08
 
 Ranking quality, measured on a public 714-question benchmark: recall@1 went from
