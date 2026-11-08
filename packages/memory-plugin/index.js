@@ -21,6 +21,7 @@ import { createNativeCore } from './lib/native.js'
 import { API_PATH, LEGACY_API_PATH, mountApi, setTrustedHosts } from './lib/api.js'
 import { registerTools } from './lib/tools.js'
 import { createAuditHook } from './lib/audit.js'
+import { createFileLogger } from './lib/log-file.js'
 import { detectAssistantSignals, detectUserSignals, messageText } from './lib/capture.js'
 
 export const name = 'dsh-memory-plugin'
@@ -34,7 +35,9 @@ export async function apply(ctx, config) {
   // 把 warn/error 同时写进 boot.log，否则线上只看得到"最终用了 sqlite"，看不到为什么。
   const bootDir = join(process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '.', '.dsh'), 'storages', 'dsh-memory-plugin')
   const bootFile = join(bootDir, 'boot.log')
-  const log = (level, text) => {
+  // 结构化日志器要等 store 就绪才知道目录；在那之前 logFile 是 null。
+  let logFile = null
+  const log = (level, text, event = 'log') => {
     try {
       const write = logger?.[level]
       if (typeof write === 'function') write.call(logger, text)
@@ -42,6 +45,7 @@ export async function apply(ctx, config) {
     } catch {
       // 日志失败不影响主流程
     }
+    if (logFile !== null) logFile.write(level, event, { text })
     if (level === 'warn' || level === 'error') {
       try {
         mkdirSync(bootDir, { recursive: true })
@@ -64,6 +68,11 @@ export async function apply(ctx, config) {
     log('error', `初始化存储失败：${message(error)}`)
     return
   }
+  // 结构化日志从这一天起跟着 store 走：<storageDir>/logs/memory-YYYY-MM-DD.jsonl，
+  // 一行一个 JSON，写满 2MB 滚一份、最多留 8 份。写在 store 就绪之后，因为之前
+  // 还没有确定的数据目录（那一段靠 boot.log）。
+  logFile = createFileLogger({ dir: join(store.dir, 'logs') })
+
   // 插件卸载时关掉 SQLite 连接（JSON 存储没有 close）。
   ctx.effect(() => () => {
     try {
@@ -117,7 +126,7 @@ export async function apply(ctx, config) {
   }
 
   // 桌面端的宿主日志不落在插件能读的地方；关键路径同时写一份到数据目录，
-  // 出问题时可以直接看 <storageDir>/plugin.log。
+  // 出问题时可以直接看 <storageDir>/plugin.log；同一条还会写进 logs/ 的结构化 JSON 日志。
   const debug = createDebugLog(store, log)
   debug('apply: start')
   debug(`runtime: node=${process.versions.node} electron=${process.versions.electron ?? '-'} sqlite=${sqliteProbe()} storage=${storageKind}`)
@@ -393,7 +402,7 @@ function attachApi(ctx, engine, store, debug) {
   }
 }
 
-/** 把一行诊断写到 <storageDir>/plugin.log（截断到 64KB），同时走宿主 logger。 */
+/** 把一行诊断写到 <storageDir>/plugin.log（截断到 64KB），同时走宿主 logger 与结构化日志。 */
 function createDebugLog(store, log) {
   let file
   try {
@@ -403,7 +412,7 @@ function createDebugLog(store, log) {
   }
   return (line) => {
     try {
-      log('info', line)
+      log('info', line, 'step')
     } catch {
       /* 忽略 */
     }

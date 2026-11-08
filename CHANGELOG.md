@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.22] - 2026-11-08
+
+`plugin.log` was a text file: fine to read, useless to filter. When something goes wrong the first
+question is "which level, which event, how often", and text lines force you to scan them one by one.
+
+Every line the plugin logs now also lands in `logs/memory-YYYY-MM-DD.jsonl` as
+`{"ts","level","event","text"}`; debug steps use `event: "step"` so they can be told apart from the
+normal lifecycle lines. One file caps at 2 MB and rolls into `memory-YYYY-MM-DD.1.jsonl`; only the
+newest 8 files are kept. Logging never blocks the plugin: if the directory cannot be created or the
+disk is full, the write just fails quietly. `plugin.log` and `boot.log` stay as they were.
+
+The diagnostics bundle now reports the log directory, how many files it holds and the size of the
+newest one, so a bug report carries the answer to "where do I look".
+
+### Added
+
+- Structured JSON logs under `<storageDir>/logs`, one file per day, 2 MB rotation, newest 8 kept.
+- `diagnostics.bundle` includes a log summary (directory, file count, newest file size).
+
 ## [0.4.21] - 2026-11-08
 
 When something looks wrong, the useful question is "what state is the plugin actually in?" — and

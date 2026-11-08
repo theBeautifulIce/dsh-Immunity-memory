@@ -237,6 +237,10 @@ try {
     // JSON 存储没有 SQLite 备份列表：要明确说「0 份、没得校验」，而不是伪造通过。
     assert.equal(bundle.backups.total, 0)
     assert.equal(bundle.backups.latest, null)
+    // 日志概览必须交代清楚「目录、几份、最新一份」，哪怕还一份都没有。
+    assert.equal(typeof bundle.logs.dir, 'string')
+    assert.equal(typeof bundle.logs.total, 'number')
+    assert.ok(bundle.logs.dir.endsWith('logs'))
   })
 
   await test('audit.list 记录过前面的写操作', async () => {

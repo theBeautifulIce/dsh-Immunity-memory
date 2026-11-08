@@ -6,6 +6,9 @@
  *   DSH 的客户端模块只能拿到 `fetch`，市场里所有带界面的插件（terse-mode、mcp-connector、
  *   dshmarket）都走这条路；桌面壳对 GET 的转发不可靠，所以读操作也用 POST。
  */
+import { readdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+
 import {
   DEFAULT_SETTINGS,
   LAYERS,
@@ -154,6 +157,7 @@ function createMethods(engineOf, context = {}) {
         status: engine().status(),
         settings: redactSecrets(engine().getSettings()),
         backups: { total: backups.length, latest },
+        logs: logSummary(store),
         audit: engine().auditList(20),
         usage: engine().usageStats({}),
       }
@@ -527,6 +531,19 @@ export function sendJson(res, status, payload) {
   res.setHeader('content-length', Buffer.byteLength(text))
   res.setHeader('cache-control', 'no-store')
   res.end(text)
+}
+
+/** 日志文件概览：几份、最新一份是什么、多大。只看目录，不读内容。 */
+function logSummary(store) {
+  const dir = join(store?.dir ?? '', 'logs')
+  try {
+    const files = readdirSync(dir).filter((name) => /^memory-.*\.jsonl$/.test(name)).sort()
+    const latest = files.at(-1)
+    const bytes = latest === undefined ? 0 : statSync(join(dir, latest)).size
+    return { dir, total: files.length, latest: latest ?? null, latestBytes: bytes }
+  } catch {
+    return { dir, total: 0, latest: null, latestBytes: 0 }
+  }
 }
 
 /** 递归给凭据类字段打码：诊断包常被贴进聊天窗口，token 不能跟着走。 */

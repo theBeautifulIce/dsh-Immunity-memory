@@ -67,6 +67,8 @@ run('召回重排测试', ['tests/recall.test.mjs'])
 
 run('SQLite 存储测试', ['tests/sqlite.test.mjs'])
 
+run('日志测试', ['tests/log-file.test.mjs'])
+
 if (!FAST) {
   if (existsSync(NATIVE_BINARY)) {
     console.log('\n== 原生核心测试 ==')
