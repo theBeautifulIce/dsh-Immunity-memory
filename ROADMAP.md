@@ -123,6 +123,24 @@ At 0.28 the same store leaves 22 items isolated; at 0.18 it collapses into one 3
 blob. That is why 0.22 is the default: below it every memory is "related" to every other,
 above it most memories stand alone.
 
+## Measured limits of the injection budget
+
+For a while the note here said the 6000-character cap was what kept answers out. It was
+not; `prompt.topN` was clamped to 30, so the bench request for 45 lines was silently
+folded back to 30 and the two runs looked identical. One missed question measured directly:
+30 lines cost 3,323 characters, 45 cost 4,854 — both inside the cap — and the answer was
+there at line 45.
+
+| lines | @1 | @3 | @10 | in context | missed |
+| --- | --- | --- | --- | --- | --- |
+| 30 | 446 (62.5%) | 597 (83.6%) | 647 (90.6%) | 672 (94.1%) | 42 |
+| 45 | 446 (62.5%) | 597 (83.6%) | 647 (90.6%) | 690 (96.6%) | 24 |
+| 60 | 446 (62.5%) | 597 (83.6%) | 647 (90.6%) | 697 (97.6%) | 17 |
+
+Line count and top ranks are independent: extra lines only ever arrive below the answered
+ones, so @1/@3/@10 do not move. The cap is now 60 for anyone who overrides the template
+budget; defaults stay at 6-10 lines because a longer prompt is not free.
+
 ## Non-goals
 
 - A hosted multi-tenant memory service.

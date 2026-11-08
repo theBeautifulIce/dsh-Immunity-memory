@@ -35,7 +35,7 @@ const exams = readJsonl(join(DATASET, 'exam-inputs.jsonl'))
 const keyById = new Map(readJsonl(join(DATASET, 'review-only/answer-key.jsonl')).map((entry) => [entry.id, entry]))
 
 const knowledge = normalizeSettings({
-  prompt: { overrideBudget: true, topN: 30, maxChars: 6000 },
+  prompt: { overrideBudget: true, topN: Number(process.env.BENCH_TOPN ?? 30), maxChars: 6000 },
 })
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-memory-bench-'))
 process.on('exit', () => rmSync(sandbox, { recursive: true, force: true }))

@@ -384,6 +384,14 @@ await test('模板热切换立即改变注入预算', async () => {
   await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { template: 'default' } }))
 })
 
+await test('注入条数上限放宽到 60，45 条不会再被折回 30', async () => {
+  const normalized = normalizeSettings({ prompt: { overrideBudget: true, topN: 45, maxChars: 6000 } })
+  assert.equal(normalized.prompt.overrideBudget, true)
+  assert.equal(normalized.prompt.topN, 45)
+  const tooMany = normalizeSettings({ prompt: { overrideBudget: true, topN: 90 } })
+  assert.ok(tooMany.prompt.topN < 90)
+})
+
 await test('自定义模板可新增、切换、删除', async () => {
   const saved = await engine.saveTemplate({
     name: '我的模板',

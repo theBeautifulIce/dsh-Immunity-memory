@@ -694,7 +694,7 @@ window.__ModuleLoader__.load({
                       className: 'mp-input',
                       type: 'number',
                       min: 1,
-                      max: 30,
+                      max: 60,
                       value: draft.topN,
                       onChange: (event) => setDraft({ ...draft, topN: Number(event.target.value) }),
                     })),

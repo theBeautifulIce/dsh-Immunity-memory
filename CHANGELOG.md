@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.17] - 2026-11-08
+
+The injection line cap was quietly doing the damage. `prompt.topN` was clamped to 30 in
+settings, so asking the bench for 45 lines changed nothing and the earlier "the 6000-character
+budget is the limit" reading was wrong — it was a clamp, not a budget. Measuring a missed
+question directly settled it: 30 lines used 3,323 characters, 45 lines used 4,854, both well
+inside the character cap, and the answer that had been missing appeared at line 45.
+
+Raising the allowed cap to 60 lifts how many answers get into the injected context without
+touching the top ranks on the 714-question set:
+
+| lines | @1 | @3 | @10 | in context | missed |
+| --- | --- | --- | --- | --- | --- |
+| 30 | 446 (62.5%) | 597 (83.6%) | 647 (90.6%) | 672 (94.1%) | 42 |
+| 45 | 446 (62.5%) | 597 (83.6%) | 647 (90.6%) | 690 (96.6%) | 24 |
+| 60 | 446 (62.5%) | 597 (83.6%) | 647 (90.6%) | 697 (97.6%) | 17 |
+
+Defaults stay at the template budgets (6-10 lines); this only lifts the ceiling for people
+and runs that deliberately override it. The remaining 17 are the paraphrase cases lexical
+ranking cannot reach — 15 of them share no rare word with the question at all.
+
+### Changed
+
+- `prompt.topN` and custom-template `topN` accept up to 60 instead of 30, in settings and
+  in the template editor.
+
 ## [0.4.16] - 2026-11-08
 
 Manual links only existed in the panel and in `memory_link`: prompt injection still

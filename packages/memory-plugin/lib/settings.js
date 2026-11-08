@@ -193,7 +193,7 @@ export function sanitizeCustomTemplate(raw) {
   const topN = Math.round(Number(raw.topN))
   const maxChars = Math.round(Number(raw.maxChars))
   if (name === '' || header === '') return undefined
-  if (!Number.isFinite(topN) || topN < 1 || topN > 30) return undefined
+  if (!Number.isFinite(topN) || topN < 1 || topN > 60) return undefined
   if (!Number.isFinite(maxChars) || maxChars < 100 || maxChars > 8000) return undefined
   const id = typeof raw.id === 'string' && /^[a-z0-9][a-z0-9_-]{1,39}$/.test(raw.id)
     ? raw.id
@@ -743,7 +743,7 @@ export const SETTINGS_SCHEMA = [
         path: 'prompt.topN',
         type: 'number',
         min: 0,
-        max: 30,
+        max: 60,
         step: 1,
         unit: { zh: '条', en: 'entries' },
         label: { zh: '注入条数（覆盖）', en: 'Entries injected (override)' },
@@ -1304,5 +1304,3 @@ export const Config = {
     },
   },
 }
-
-
