@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-11-08
+
+Manual links only existed in the panel and in `memory_link`: prompt injection still
+walked a word-overlap graph built per request, so a link the user or the agent judged
+right had no effect on what the model actually saw. The engine now keeps a manual-link
+adjacency in memory — read once at load, updated as links are created or removed — and
+injection walks both kinds of edges with the same seed/bonus rule. The edge weight a
+person sets is the edge weight the ranker uses.
+
+Also measured, and deliberately not shipped: boosting entries that cover several rare
+query words. It looked like the obvious fix for the 27 questions whose evidence shares a
+rare word and still missed, but on the 714-question set it cost 7-8 answers at @1/@3 and
+pushed the unranked count from 42 to 56 at both 0.35 and 0.7 strength. The shared rare
+word is usually a coincidence (the same noun appears in several turns), so rewarding it
+further just crowds out the right answer.
+
+### Added
+
+- Prompt injection follows manual links: an entry linked to a hit is pulled in and ranked
+  by the link weight, even with no shared wording.
+- `scripts/bench-missing.mjs` attributes every unranked question to one of two reasons:
+  no rare shared word (paraphrase, out of reach for lexical ranking) or a rare shared
+  word that still ranked below the budget. On the current set: 15 paraphrase, 27 ranked
+  out.
+
 ## [0.4.15] - 2026-11-08
 
 A manual link was written to the audit log but stayed invisible in `memory_diff`: the

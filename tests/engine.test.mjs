@@ -1098,6 +1098,47 @@ await test('关系图谱：跟命中条目同主题、但自己没对上查询�
   })
 })
 
+await test('人工关联：连上的条目没有共同词，也会被注入带进来', async () => {
+  await withFreshEngine(async (localEngine, localStore) => {
+    const anchor = await localEngine.createItem({
+      layer: 'L4',
+      title: '灯箱验收单还没签',
+      content: '灯箱验收单还压在物业那儿，等盖章。',
+      importance: 6,
+      ttlDays: 90,
+    }, 'agent')
+    const neighbour = await localEngine.createItem({
+      layer: 'L4',
+      title: '周四去前台取材料',
+      content: '周四去前台取样品，顺路把回执带回来。',
+      importance: 6,
+      ttlDays: 90,
+    }, 'agent')
+    const unrelated = await localEngine.createItem({
+      layer: 'L4',
+      title: '乌龙茶要冷泡',
+      content: '乌龙茶冷泡四个小时更香，别用开水冲。',
+      importance: 6,
+      ttlDays: 90,
+    }, 'agent')
+    localStore.links = async (id) => (id === anchor.id || id === neighbour.id
+      ? [{ id: id === anchor.id ? neighbour.id : anchor.id, edgeType: 'manual', weight: 1 }]
+      : [])
+    localStore.linkItems = async ({ sourceId, targetId, weight }) => ({
+      id: String(targetId),
+      edgeType: 'manual',
+      weight: weight ?? 1,
+    })
+    await localEngine.linkItems({ sourceId: anchor.id, targetId: neighbour.id }, 'agent')
+    const stats = localEngine.injectionStats(Date.now(), undefined, { query: '灯箱验收单签了吗' })
+    const ids = stats.lines.filter((line) => line.source === 'memory').map((line) => line.id)
+    assert.ok(ids.includes(anchor.id), '命中条目本身应在注入里')
+    assert.ok(ids.includes(neighbour.id), '人工连上的条目应被带进来')
+    assert.ok(ids.indexOf(neighbour.id) < ids.indexOf(unrelated.id), '邻居应排在无关条目前面')
+  })
+})
+
+
 await test('人工关联写进差量历史，解除也能查到', async () => {
   await withFreshEngine(async (localEngine, localStore) => {
     const left = await localEngine.createItem({

@@ -102,6 +102,8 @@ const GRAPH_SEEDS = envNumber('DSH_GRAPH_SEEDS', 8)
 // 见 ROADMAP 里「关系图谱的实测边界」。
 const GRAPH_BONUS = envNumber('DSH_GRAPH_BONUS', 0.12)
 const GRAPH_POSTING_MAX = 40
+// 人工关联的读取上限：一条记忆被手工连到几十条已经算滥用，读太多只会拖慢启动。
+const MANUAL_EDGE_LIMIT = 20
 // 注入时的分层：命中条目给全文，靠前的给摘要，其余只留一行线索。
 // 三十条平铺六千字，模型真正看进去的只有前几条；把字符预算按相关度分配，
 // 同样的 token 数里能装下更多「有用的那一半」。
@@ -231,6 +233,53 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     health: () => ({ available: false, fallback: true, reason: 'native core not provided' }),
   }
   const searchEngine = createSearchEngine({ store, native: nativeCore, getSettings: settings, log })
+
+  // 库里的人工关联（面板连的、或智能体用 memory_link 连的）。
+  // 注入是同步链路，不能每次查询都去读库：加载时读一次做成邻接表，
+  // 之后建边/解边时增量维护。词面边连不上的两条，靠这张表也能被带进候选。
+  const manualEdges = new Map() // id → Map(对面 id → 权重)
+  function setManualEdge(left, right, weight) {
+    if (left === '' || right === '' || left === right) return
+    for (const [from, to] of [[left, right], [right, left]]) {
+      const bucket = manualEdges.get(from) ?? new Map()
+      if (weight > (bucket.get(to) ?? 0)) bucket.set(to, weight)
+      manualEdges.set(from, bucket)
+    }
+  }
+  function dropManualEdge(left, right) {
+    manualEdges.get(left)?.delete(right)
+    manualEdges.get(right)?.delete(left)
+  }
+  /** 只保留候选集内部的边：候选之外的点加不了分，留着白占遍历预算。 */
+  function manualEdgeIndex(ids) {
+    const index = new Map()
+    for (const id of ids) {
+      const bucket = manualEdges.get(id)
+      if (bucket === undefined || bucket.size === 0) continue
+      const edges = []
+      for (const [other, weight] of bucket) if (ids.has(other)) edges.push([other, weight])
+      if (edges.length > 0) index.set(id, edges)
+    }
+    return index
+  }
+  async function refreshManualEdges() {
+    manualEdges.clear()
+    if (typeof store.links !== 'function') return
+    for (const item of state?.items ?? []) {
+      if (item.status !== 'active' && item.status !== 'conflicted') continue
+      let links = []
+      try {
+        links = await store.links(item.id, { limit: MANUAL_EDGE_LIMIT })
+      } catch {
+        links = []
+      }
+      for (const link of Array.isArray(links) ? links : []) {
+        const weight = Number(link?.weight)
+        if (!Number.isFinite(weight) || weight <= 0) continue
+        setManualEdge(item.id, String(link?.id ?? ''), Math.min(1, weight))
+      }
+    }
+  }
   const reindexAll = () => {
     itemMap = new Map((state?.items ?? []).map((item) => [item.id, item]))
     searchEngine.rebuild(state?.items ?? [])
@@ -288,6 +337,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       state = hydrate(raw)
       const backfilled = backfillLegacyTtl(state, settings())
       reindexAll()
+      await refreshManualEdges()
       if (backfilled > 0) {
         audit('ttl.backfill', `${backfilled} 条可修改层记忆补全保鲜期`, 'system')
         await persist()
@@ -2170,8 +2220,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       }
     }
     // 关系图谱：词面没救的条目，如果跟最相关那几条讲的是同一件事，顺着边抬进来。
+    // 两条边来源：本轮候选内的词面余弦，以及库里的手工关联（人工判定，权重由人/模型给）。
     if (GRAPH_ENABLED && active.retrieval?.graph !== false) {
-      applyGraphBonus(scored, graphEdgeIndex(candidates, stats))
+      const manual = manualEdgeIndex(new Set(candidates.map((item) => item.id)))
+      applyGraphBonus(scored, graphEdgeIndex(candidates, stats), manual)
     }
     // 命中门槛不能只看绝对值：一句无关的话也可能碰上一两个通用词，
     // 于是「每条都标命中」。用候选集自身的中位数当背景，只有明显高于背景的才算命中。
@@ -2914,6 +2966,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (sourceId === targetId) throw relationError('不能把条目连到自己')
       if (typeof store.linkItems !== 'function') throw relationError('当前存储不支持人工关联')
       const link = await store.linkItems({ sourceId, targetId, weight: params.weight })
+      const weight = Number(link?.weight)
+      setManualEdge(sourceId, targetId, Number.isFinite(weight) && weight > 0 ? Math.min(1, weight) : 1)
       audit('link', `${sourceId} → ${targetId}`, actor)
       recordLinkChange('link', sourceId, targetId, actor)
       await persist()
@@ -2926,6 +2980,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (typeof store.unlinkItems !== 'function') throw relationError('当前存储不支持人工关联')
       const removed = await store.unlinkItems({ sourceId, targetId })
       if (removed > 0) {
+        dropManualEdge(sourceId, targetId)
         audit('unlink', `${sourceId} ↔ ${targetId}`, actor)
         recordLinkChange('unlink', sourceId, targetId, actor)
         await persist()
@@ -3223,13 +3278,18 @@ function pushEdge(adjacency, from, to, weight) {
  * 加的是「种子分 × 边权 × GRAPH_BONUS」，不是固定值：种子自己越确定，
  * 它拉进来的邻居越可信；边权越强，越可能是同一件事的两种说法。
  */
-function applyGraphBonus(scored, edges) {
-  if (edges.size === 0) return 0
+function applyGraphBonus(scored, edges, manual) {
+  if (edges.size === 0 && (manual === undefined || manual.size === 0)) return 0
   const seeds = [...scored].sort((left, right) => right.score - left.score).slice(0, GRAPH_SEEDS)
   const bonus = new Map()
   for (const seed of seeds) {
     if (!(seed.score > 0)) continue
-    for (const [id, weight] of edges.get(seed.item.id) ?? []) {
+    const neighbours = edges.get(seed.item.id) ?? []
+    for (const [id, weight] of neighbours) {
+      const value = seed.score * weight * GRAPH_BONUS
+      if (value > (bonus.get(id) ?? 0)) bonus.set(id, value)
+    }
+    for (const [id, weight] of manual?.get(seed.item.id) ?? []) {
       const value = seed.score * weight * GRAPH_BONUS
       if (value > (bonus.get(id) ?? 0)) bonus.set(id, value)
     }
@@ -3923,6 +3983,7 @@ function relationError(text) {
   error.code = 'INVALID_ARGUMENT'
   return error
 }
+
 
 
 
