@@ -14,6 +14,11 @@ const MAX_QUOTE = 4000
 // 只有送给裁判的提示词才做 4000 字截断，避免长文把审计 token 撑爆。
 const MAX_PAYLOAD_CONTENT = 200000
 const MAX_PROMPT_CONTENT = 4000
+// 审批弹窗只展示 deny 的 reason 一句文本，所以 reason 必须自带「要审批的正文」，
+// 否则用户只能看到裁判的评语，无法判断自己到底在批准什么。
+const MAX_DENY_REASON = 2000
+const MAX_DENY_CONTENT = 1200
+const MAX_DENY_QUOTE = 300
 
 /** 从子智能体的会话事件里累加 token。 */
 export function summarizeUsage(events = []) {
@@ -134,20 +139,25 @@ export function createAuditHook({
     if (!AUDIT_TOOLS.has(String(call?.name ?? ''))) return next()
 
     const started = now()
+    // 待确认内容单独留一份，不依赖 recordAuditRun 的返回值是否回显全部字段，
+    // deny 文案在任何存储故障下都能带上正文。
+    const pending = {
+      tool: call.name,
+      action: call.name === 'memory_update' ? 'update' : 'create',
+      targetId: typeof call?.arguments?.id === 'string' ? call.arguments.id : null,
+      layer: typeof call?.arguments?.layer === 'string' ? call.arguments.layer : null,
+      title: truncate(String(call?.arguments?.title ?? call?.arguments?.content ?? ''), 160),
+      proposed: sanitizePayload(call.arguments),
+    }
     let run
     try {
       run = await engine.recordAuditRun({
         id: `audit_${randomUUID().slice(0, 12)}`,
         status: 'running',
-        tool: call.name,
-        action: call.name === 'memory_update' ? 'update' : 'create',
+        ...pending,
         callId: String(call.callId ?? ''),
         sessionId: sourceSessionId(call.agent),
-        targetId: typeof call?.arguments?.id === 'string' ? call.arguments.id : null,
-        layer: typeof call?.arguments?.layer === 'string' ? call.arguments.layer : null,
-        title: truncate(String(call?.arguments?.title ?? call?.arguments?.content ?? ''), 160),
-        sourceQuote: sourceQuote(call.agent),
-        proposed: sanitizePayload(call.arguments),
+        sourceQuote: sourceQuote(call.agent, log),
         startedAt: new Date(started).toISOString(),
         enforced: config.enforce !== false,
       })
@@ -233,10 +243,10 @@ export function createAuditHook({
         }, started)
         if (status === 'failed') return next()
         if (verdict.verdict === 'reject' && enforce) {
-          return { kind: 'deny', reason: truncate(`记忆审计拒绝：${verdict.reason || '与用户原话不一致'}`, 400), auditRunId: finished.id }
+          return { kind: 'deny', reason: denyReasonText('记忆审计拒绝', verdict.reason || '与用户原话不一致', pending), auditRunId: finished.id }
         }
         if (verdict.verdict === 'needs_user' && enforce) {
-          return { kind: 'deny', reason: truncate(`记忆已进入待确认队列：${verdict.reason || '证据不足，等待人工确认'}`, 400), auditRunId: finished.id }
+          return { kind: 'deny', reason: denyReasonText('记忆已进入待确认队列', verdict.reason || '证据不足，等待人工确认', pending), auditRunId: finished.id }
         }
         return next()
       } finally {
@@ -296,19 +306,83 @@ function auditPrompt(run, settings) {
   ].join('\n')
 }
 
-function sourceQuote(agent) {
+/**
+ * 组装 deny 文案：裁判评语 + 待写入内容的可读预览。
+ * 审批界面只会渲染这一段文本，正文缺失会让审批变成「盲勾」。
+ */
+function denyReasonText(prefix, detail, run) {
+  const action = run?.action === 'update' ? '更新' : '创建'
+  const target = run?.action === 'update' && run?.targetId ? `｜目标 ${run.targetId}` : ''
+  const lines = [`${prefix}：${detail}`, '', '── 待确认内容 ──', `工具：${run?.tool ?? 'memory_write'}（${action}）${target}`]
+  const meta = []
+  if (run?.layer) meta.push(`层级 ${run.layer}`)
+  if (run?.proposed?.importance !== undefined) meta.push(`重要度 ${run.proposed.importance}`)
+  if (run?.proposed?.ttlDays !== undefined) meta.push(`有效期 ${run.proposed.ttlDays} 天`)
+  const tags = Array.isArray(run?.proposed?.tags) ? run.proposed.tags.filter((tag) => typeof tag === 'string') : []
+  if (tags.length > 0) meta.push(`标签 ${tags.join('、')}`)
+  if (meta.length > 0) lines.push(meta.join(' ｜ '))
+  if (run?.title) lines.push(`标题：${run.title}`)
+  const body = String(run?.proposed?.content ?? '').trim()
+  if (body !== '') {
+    lines.push(`正文：${truncate(body, MAX_DENY_CONTENT)}`)
+    if (body.length > MAX_DENY_CONTENT) lines.push(`（正文共 ${body.length} 字，以上为前 ${MAX_DENY_CONTENT} 字）`)
+  }
+  const quote = String(run?.proposed?.quote ?? '').trim()
+  if (quote !== '') lines.push(`引用：${truncate(quote, MAX_DENY_QUOTE)}`)
+  return truncate(lines.join('\n'), MAX_DENY_REASON)
+}
+
+/**
+ * 判断一种 user/message 的 source.kind 是否代表「用户本人说的话」。
+ * 实测形状：桌面输入框是 kind:"user"，QQ 通道是 kind:"plugin:dsh-onebot"；
+ * schedule、subagent-settled、runtime-context、chess-context、user-approval
+ * 都是自动注入或系统事件，绝不能当作用户授权。
+ */
+function isHumanSourceKind(kind) {
+  if (kind === 'user') return true
+  // 聊天通道插件（onebot / telegram / …）都用 plugin:<id> 投递真人消息，
+  // 定时器走的是独立的 schedule kind，不会误伤。
+  if (typeof kind === 'string' && kind.startsWith('plugin:')) return true
+  return false
+}
+
+/**
+ * 判断一条 user/message 是否真的来自用户本人。
+ * user/message 的载荷挂在 data 上（data 本身就是消息），所以 role 兜底必须
+ * 先看 data.message.role / data.role，event.message 只在旧形状里存在。
+ */
+function isHumanUserMessage(event) {
+  const source = event?.data?.source ?? event?.source
+  if (source !== undefined && source !== null && typeof source === 'object') {
+    const kind = typeof source.kind === 'string' ? source.kind : source.type
+    if (kind !== undefined) return isHumanSourceKind(kind)
+  }
+  const role = event?.data?.message?.role ?? event?.data?.role ?? event?.message?.role
+  return role === undefined || role === 'user'
+}
+
+function sourceQuote(agent, log) {
   try {
     const events = agent?.session?.snapshotEvents?.() ?? []
     const messages = events.filter((event) => event?.type === 'user/message')
-    const human = messages.filter((event) => {
-      const source = event?.data?.source
-      // 真正的用户输入 source.kind === 'user'；后台子智能体通知、cron、注入上下文
-      // 也会以 user/message 出现，绝不能拿来当用户授权。
-      return source === undefined ? event?.message?.role === 'user' : source?.kind === 'user'
-    })
+    const human = messages.filter(isHumanUserMessage)
     const last = human[human.length - 1]
-    return truncate(messageText(last?.data ?? last?.message), MAX_QUOTE)
-  } catch {
+    const text = truncate(messageText(last?.data ?? last?.message), MAX_QUOTE)
+    if (text === '' && typeof log === 'function') {
+      // 取不到用户原话是审计失效的头号原因，把 source 形状打出来便于定位，
+      // 不要只报一句「没有可用的用户原话」。
+      const samples = messages.slice(-5).map((event) => {
+        try {
+          return JSON.stringify(event?.data?.source ?? event?.source ?? null)
+        } catch {
+          return '"[unserializable]"'
+        }
+      })
+      log('warn', `审计未取到用户原话：user/message 共 ${messages.length} 条，source 样本 ${samples.join(' , ') || '（无消息）'}`)
+    }
+    return text
+  } catch (error) {
+    if (typeof log === 'function') log('warn', `读取用户原话失败：${error?.message ?? error}`)
     return ''
   }
 }
