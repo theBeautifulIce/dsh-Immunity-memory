@@ -156,10 +156,10 @@ async function test(title, run) {
 
 const dispose = registerTools(fakeCtx, engine, log)
 
-await test('注册了全部 11 个工具', () => {
+await test('注册了全部 12 个工具', () => {
   assert.deepEqual([...registered.keys()].sort(), [
-    'memory_capture', 'memory_consolidate', 'memory_diff', 'memory_forget', 'memory_get', 'memory_pitfall',
-    'memory_search', 'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
+    'memory_capture', 'memory_consolidate', 'memory_diff', 'memory_forget', 'memory_get', 'memory_link',
+    'memory_pitfall', 'memory_search', 'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
   ])
 })
 
@@ -300,6 +300,18 @@ await test('memory_capture 写入事实与笔记并返回计数', async () => {
   assert.equal(value.pending, 0)
   const blocks = def.output.render({}, value)
   assert.match(blocks[0].text, /新建 2 条/)
+})
+
+await test('memory_link 在 JSON 存储上能列空关联，写入被明确拒绝', async () => {
+  const def = registered.get('memory_link')
+  const found = await registered.get('memory_search').execute({ query: 'JSON 文件存储' }, {})
+  const listed = await def.execute({ action: 'list', id: found.items[0].id }, {})
+  assert.equal(listed.count, 0)
+  assert.ok(def.output.render({ action: 'list' }, listed)[0].text.includes('还没有关联'))
+  await assert.rejects(
+    () => def.execute({ action: 'link', id: found.items[0].id, targetId: 'mem_missing' }, {}),
+    (error) => /不支持人工关联/.test(error.message),
+  )
 })
 
 await test('memory_forget 删除后检索不到', async () => {

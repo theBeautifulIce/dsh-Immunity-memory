@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-11-08
+
+0.4.13 let a person link two entries from the panel. The agent could read those links
+but not make them, so any link it noticed as obviously right had to wait for a human.
+`memory_link` closes that: `action=list` shows the links of one entry with the other
+side's title, `action=link` connects two entries the agent has judged to be the same
+thread, `action=unlink` drops a link it judged wrong. Writes go through the same engine
+calls as the panel (`linkItems` / `unlinkItems`), are recorded in the audit log with the
+agent as actor, and land on the `manual` edge type so the automatic rebuild never wipes
+them. On a store without link support the tool lists nothing and refuses writes with an
+explicit message instead of failing quietly.
+
+### Added
+
+- `memory_link` tool (list / link / unlink) for manual relationship edges.
+- README tool table updated to twelve tools.
+
 ## [0.4.13] - 2026-11-08
 
 Automatic links only know about literal overlap, so two entries that are clearly the

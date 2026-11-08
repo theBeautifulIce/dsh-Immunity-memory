@@ -252,6 +252,38 @@ const pitfallOutput = {
   },
 }
 
+const linkOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string' },
+      id: { type: 'string' },
+      count: { type: 'number' },
+      links: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      link: { oneOf: [{ type: 'object', additionalProperties: true }, { type: 'null' }] },
+      removed: { type: 'number' },
+    },
+    required: ['action'],
+  },
+  render(args, value) {
+    const action = String(value?.action ?? args?.action ?? 'list')
+    if (action === 'link') {
+      const link = value?.link
+      if (link === undefined || link === null) return text('关联未建立。')
+      return text(`已建立人工关联：${String(value?.id ?? '')} ↔ ${String(link.id ?? '')}`
+        + `（权重 ${Number(link.weight ?? 1).toFixed(2)}）`)
+    }
+    if (action === 'unlink') return text(`已解除关联 ${value?.removed ?? 0} 条。`)
+    const links = value?.links ?? []
+    if (links.length === 0) return text(`条目 ${String(value?.id ?? '')} 还没有关联条目。`)
+    return text(`条目 ${String(value?.id ?? '')} 有 ${links.length} 条关联：\n`
+      + links.map((link, index) => {
+        const title = typeof link.title === 'string' && link.title !== '' ? link.title : String(link.id ?? '')
+        return `${index + 1}. ${title}（${String(link.edgeType ?? 'manual')} · ${Number(link.weight ?? 1).toFixed(2)}）\n   id: ${String(link.id ?? '')}`
+      }).join('\n'))
+  },
+}
+
 const diffOutput = {
   schema: {
     type: 'object',
@@ -568,6 +600,57 @@ export function registerTools(ctx, engine, log) {
         return { action, ...result, items: result.items.map(toToolItem) }
       }
       throw new Error('action 只能是 record、search 或 check')
+    },
+  })
+
+  register({
+    name: 'memory_link',
+    description: 'Inspect and edit manual links between memories and notebook entries. Automatic links only follow literal overlap, so two entries that describe the same thing in different words stay apart, and a wrong automatic neighbour cannot be corrected. Use action=list to see the links of one entry, action=link to connect two entries you have judged to be the same thread, action=unlink to drop a link you judged wrong. Manual links survive automatic rebuilds and are written to the audit log.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'link', 'unlink'],
+          description: 'list = show the links of `id`; link / unlink = edit the link between `id` and `targetId`.',
+        },
+        id: { type: 'string', description: 'Entry id returned by memory_search or memory_write.' },
+        targetId: { type: 'string', description: 'The other entry id, required for link and unlink.' },
+        weight: { type: 'number', description: 'Optional 0-1 strength for link; default 1.' },
+        limit: { type: 'number', description: 'How many links to list, 1-30, default 10.' },
+      },
+      required: ['action', 'id'],
+    },
+    output: linkOutput,
+    async execute(args, exec) {
+      const action = String(args?.action ?? 'list')
+      const id = String(args?.id ?? '')
+      if (id === '') throw new Error('需要 id：先用 memory_search 找到条目')
+      if (action === 'list') {
+        const raw = await engine.itemLinks(id, { limit: Number(args?.limit) || 10 })
+        const links = raw.map((link) => {
+          const other = engine.getItem(String(link.id ?? ''), workspaceOf(exec))
+          return {
+            id: String(link.id ?? ''),
+            edgeType: String(link.edgeType ?? 'manual'),
+            weight: Number(link.weight ?? 1),
+            title: other?.title ?? '',
+            layer: other?.layer ?? null,
+          }
+        })
+        return { action, id, count: links.length, links }
+      }
+      const targetId = String(args?.targetId ?? '')
+      if (targetId === '') throw new Error('需要 targetId：要连到哪一条')
+      if (action === 'link') {
+        const link = await engine.linkItems({ sourceId: id, targetId, weight: args?.weight }, 'agent')
+        return { action, id, targetId, link: { id: String(link?.id ?? targetId), weight: Number(link?.weight ?? 1) } }
+      }
+      if (action === 'unlink') {
+        const result = await engine.unlinkItems({ sourceId: id, targetId }, 'agent')
+        return { action, id, targetId, removed: Number(result?.removed ?? 0) }
+      }
+      throw new Error('action 只能是 list、link 或 unlink')
     },
   })
 

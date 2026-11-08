@@ -194,7 +194,7 @@ node scripts/check.mjs
 
 Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\` 再运行，避免安装目录（尤其是 `link:` 开发安装）被宿主沙箱或只读策略限制。
 
-## 给智能体的 11 个工具
+## 给智能体的 12 个工具
 
 | 工具 | 作用 |
 | --- | --- |
@@ -208,6 +208,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 | `memory_usage` | 查询 token 用量账本，按工具/类型拆分 |
 | `memory_consolidate` | 列出固化候选、审计并固化到 L1/L3 |
 | `memory_pitfall` | 踩坑记录 / 检索 / 查重（record / search / check） |
+| `memory_link` | 人工关联：查看某条目的关联（list）、连接两条按字面建不出来的同一条线（link）、解除判错的关联（unlink）；人工边不会被自动重建冲掉，写入进审计 |
 | `memory_diff` | 按时间、实体、层、条目、操作筛选结构化变更历史 |
 
 所有工具返回**无损 JSON**；面向人的格式化只发生在界面层。

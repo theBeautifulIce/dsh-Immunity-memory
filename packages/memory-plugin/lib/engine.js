@@ -3866,6 +3866,7 @@ export const TOOL_NAMES = [
   'memory_usage',
   'memory_consolidate',
   'memory_pitfall',
+  'memory_link',
   'memory_diff',
   'memory_capture',
 ]
