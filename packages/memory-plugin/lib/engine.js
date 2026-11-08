@@ -433,6 +433,39 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     trimAudit(current)
   }
 
+  /**
+   * 记录一条人工关联变更。关联不在条目表里，借同一条 change 通道让 memory_diff
+   * 也能查到；itemId 记发起端，另一端的 id 放在 reason 里，标题把两边都写出来。
+   */
+  function recordLinkChange(operation, sourceId, targetId, actor = 'system') {
+    const current = currentState()
+    const active = settings()
+    if (active.privacy.auditLog === false || clampInt(active.maintenance.diffKeep, 0, 10000, 3000) <= 0) return
+    const source = current.items.find((item) => item.id === sourceId)
+    const target = current.items.find((item) => item.id === targetId)
+    const title = `${source?.title ?? sourceId} ↔ ${target?.title ?? targetId}`
+    current.audit.push({
+      at: new Date().toISOString(),
+      action: 'change',
+      kind: 'change',
+      detail: truncate(`[${operation}] ${title}`, 400),
+      actor,
+      change: {
+        operation,
+        entity: source?.type === 'note' ? 'note' : 'memory',
+        itemId: sourceId,
+        title: truncate(title, 240),
+        layer: source?.layer ?? '',
+        notebook: source?.notebook ?? null,
+        changed: [],
+        before: null,
+        after: null,
+        reason: targetId,
+      },
+    })
+    trimAudit(current)
+  }
+
   /** 记录一条可 diff 的条目变更；before/after 只保存发生变化的字段。 */
   function recordChange(operation, before, after, actor = 'system', options = {}) {
     const current = currentState()
@@ -2882,6 +2915,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (typeof store.linkItems !== 'function') throw relationError('当前存储不支持人工关联')
       const link = await store.linkItems({ sourceId, targetId, weight: params.weight })
       audit('link', `${sourceId} → ${targetId}`, actor)
+      recordLinkChange('link', sourceId, targetId, actor)
       await persist()
       return link
     },
@@ -2893,6 +2927,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       const removed = await store.unlinkItems({ sourceId, targetId })
       if (removed > 0) {
         audit('unlink', `${sourceId} ↔ ${targetId}`, actor)
+        recordLinkChange('unlink', sourceId, targetId, actor)
         await persist()
       }
       return { removed }
@@ -3426,6 +3461,9 @@ function parseTimeOption(value, fallback) {
 }
 
 function changeSummary(change) {
+  if (change.operation === 'link' || change.operation === 'unlink') {
+    return `${change.operation === 'link' ? '建立关联' : '解除关联'}「${change.title}」`
+  }
   const labels = change.changed.length === 0
     ? '无字段变化'
     : change.changed.map((field) => (field === 'content' ? '正文' : field)).join('/')

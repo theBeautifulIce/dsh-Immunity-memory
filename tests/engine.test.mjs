@@ -1098,6 +1098,44 @@ await test('关系图谱：跟命中条目同主题、但自己没对上查询�
   })
 })
 
+await test('人工关联写进差量历史，解除也能查到', async () => {
+  await withFreshEngine(async (localEngine, localStore) => {
+    const left = await localEngine.createItem({
+      layer: 'L4',
+      title: '北门门禁二十一点落锁',
+      content: '北门门禁二十一点落锁，之后只能走南门。',
+      importance: 5,
+      ttlDays: 60,
+    }, 'agent')
+    const right = await localEngine.createItem({
+      layer: 'L4',
+      title: '晚上九点后进不去北门',
+      content: '过了晚上九点北门就进不去，得绕到南门刷卡。',
+      importance: 5,
+      ttlDays: 60,
+    }, 'agent')
+    localStore.links = async () => []
+    localStore.linkItems = async ({ sourceId, targetId, weight }) => ({
+      id: String(targetId),
+      edgeType: 'manual',
+      weight: weight ?? 1,
+    })
+    localStore.unlinkItems = async () => 1
+    await localEngine.linkItems({ sourceId: left.id, targetId: right.id }, 'agent')
+    const since = new Date(Date.now() - 60000).toISOString()
+    const diff = await localEngine.diff({ since, entity: 'all', limit: 50 })
+    const linked = diff.changes.find((change) => change.operation === 'link')
+    assert.ok(linked, '建立关联应出现在差量历史里')
+    assert.equal(linked.itemId, left.id)
+    assert.equal(linked.reason, right.id)
+    assert.equal(linked.actor, 'agent')
+    assert.match(linked.summary, /建立关联/)
+    await localEngine.unlinkItems({ sourceId: left.id, targetId: right.id }, 'agent')
+    const after = await localEngine.diff({ since, entity: 'all', limit: 50 })
+    assert.ok(after.changes.some((change) => change.operation === 'unlink'), '解除关联也应留下记录')
+  })
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)
 
 

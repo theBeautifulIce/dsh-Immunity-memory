@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-11-08
+
+A manual link was written to the audit log but stayed invisible in `memory_diff`: the
+entry carried no change snapshot, so the diff filter dropped it. Links can now be audited
+from the same place as every other change — `memory_diff` returns them as `link` /
+`unlink` operations, with the initiating entry as the item id, the other end in `reason`,
+and both titles in the summary. The plain audit action stays as well, so the log view
+keeps its human-readable line.
+
+### Fixed
+
+- Manual link and unlink events now appear in `memory_diff` with an actor and both ends.
+
 ## [0.4.14] - 2026-11-08
 
 0.4.13 let a person link two entries from the panel. The agent could read those links
