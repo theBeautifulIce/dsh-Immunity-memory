@@ -53,6 +53,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/audit/replace", s.authorized(s.handleAuditReplace))
 	mux.HandleFunc("/search", s.authorized(s.handleSearch))
 	mux.HandleFunc("/graph/bfs", s.authorized(s.handleBFS))
+	mux.HandleFunc("/links/list", s.authorized(s.handleLinksList))
+	mux.HandleFunc("/links/upsert", s.authorized(s.handleLinksUpsert))
+	mux.HandleFunc("/links/delete", s.authorized(s.handleLinksDelete))
 	mux.HandleFunc("/stats", s.authorized(s.handleStats))
 	mux.HandleFunc("/verify", s.authorized(s.handleVerify))
 	mux.HandleFunc("/backup", s.authorized(s.handleBackup))
@@ -229,6 +232,74 @@ func (s *Server) handleBFS(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nodes": nodes, "edges": edges})
 }
 
+// handleLinksList 返回一条目直接相连的边，面板详情页用。
+func (s *Server) handleLinksList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method", "POST only")
+		return
+	}
+	var payload struct {
+		ID        string  `json:"id"`
+		MinWeight float64 `json:"minWeight"`
+		Limit     int     `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
+		return
+	}
+	links, err := s.store.ListLinks(payload.ID, payload.MinWeight, payload.Limit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "links_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "links": links})
+}
+
+// handleLinksUpsert 建立一条人工关联边（edge_type='manual'）。
+func (s *Server) handleLinksUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method", "POST only")
+		return
+	}
+	var payload struct {
+		SourceID string  `json:"sourceId"`
+		TargetID string  `json:"targetId"`
+		Weight   float64 `json:"weight"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
+		return
+	}
+	link, err := s.store.UpsertLink(payload.SourceID, payload.TargetID, payload.Weight)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "link_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "link": link})
+}
+
+// handleLinksDelete 删除一对条目之间的人工关联边。
+func (s *Server) handleLinksDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method", "POST only")
+		return
+	}
+	var payload struct {
+		SourceID string `json:"sourceId"`
+		TargetID string `json:"targetId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
+		return
+	}
+	removed, err := s.store.DeleteLink(payload.SourceID, payload.TargetID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "link_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.store.Stats()
 	if err != nil {
@@ -318,5 +389,3 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 		"ok": false, "error": map[string]string{"code": code, "message": message},
 	})
 }
-
-

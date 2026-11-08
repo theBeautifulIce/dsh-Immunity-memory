@@ -202,7 +202,7 @@ function render(title, element) {
 const shell = render('MemorySettingsPage 加载态', React.createElement(settingsReg.Component))
 assert.ok(shell.includes('mp-root'), '应包含根容器样式类名')
 
-const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, AuditPanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView } = mod.__internals
+const { MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, ItemRelations, SettingsPanel, MaintenancePanel, InjectionCard, TemplateLayerEditor, UsagePanel, AuditPanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView } = mod.__internals
 render('MemorySettingsPage（直接调用）', React.createElement(MemorySettingsPage))
 
 // 侧边栏入口：整页容器必须自己滚动（main 槽位是 overflow:hidden 的列）。
@@ -293,13 +293,19 @@ assert.ok(noteBrowser.length > 0)
 const editor = render('ItemEditor 编辑记忆', React.createElement(ItemEditor, {
   lang: 'zh',
   draft: {
-    title: '示例记忆', content: '示例正文，用于渲染冒烟测试。', tags: '示例, 测试',
+    id: 'mem_demo', title: '示例记忆', content: '示例正文，用于渲染冒烟测试。', tags: '示例, 测试',
     layer: 'L5', importance: 6, notebook: 'memory', ttlDays: 30, status: 'active', pinned: false,
   },
   setDraft: noop, creating: false, saving: false, isNote: false,
-  settings: DEFAULT_SETTINGS, onSave: noop, onDelete: noop, onBulk: noop, onClose: noop,
+  settings: DEFAULT_SETTINGS, api, items: [], notify: noop,
+  onSave: noop, onDelete: noop, onBulk: noop, onClose: noop,
 }))
 assert.ok(editor.includes('示例记忆'), '编辑器应显示标题')
+assert.ok(editor.includes('关联条目'), '编辑已有条目时应显示关联条目入口')
+
+render('ItemRelations 关联条目', React.createElement(ItemRelations, {
+  api, lang: 'zh', itemId: 'mem_demo', items: [{ id: 'mem_demo', title: '示例记忆' }], notify: noop,
+}))
 
 render('ItemEditor 编辑记事本（只读层）', React.createElement(ItemEditor, {
   lang: 'en',

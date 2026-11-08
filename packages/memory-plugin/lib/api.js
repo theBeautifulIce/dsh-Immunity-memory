@@ -72,6 +72,9 @@ export const API_METHODS = [
   'backups.create',
   'backups.restore',
   'graph.neighbors',
+  'links.list',
+  'links.create',
+  'links.delete',
 ]
 
 /**
@@ -335,6 +338,30 @@ function createMethods(engineOf, context = {}) {
         if (frontier.length === 0) break
       }
       return { id, neighbors: out }
+    },
+    // 关联条目：列表走存储层（Go/SQLite 都支持），写入只在 manual 边上动。
+    async 'links.list'(params) {
+      const id = String(params?.id ?? '')
+      if (id === '') throw createError('INVALID_ARGUMENT', '缺少条目 id')
+      const links = await engine().itemLinks(id, {
+        minWeight: params?.minWeight,
+        limit: params?.limit,
+      })
+      return { id, links }
+    },
+    async 'links.create'(params) {
+      const link = await engine().linkItems({
+        sourceId: String(params?.sourceId ?? ''),
+        targetId: String(params?.targetId ?? ''),
+        weight: params?.weight,
+      }, 'user')
+      return { link }
+    },
+    async 'links.delete'(params) {
+      return engine().unlinkItems({
+        sourceId: String(params?.sourceId ?? ''),
+        targetId: String(params?.targetId ?? ''),
+      }, 'user')
     },
     async 'data.import'(params) {
       const result = await engine().importData(params?.data ?? params ?? {}, params?.mode === 'replace' ? 'replace' : 'merge')

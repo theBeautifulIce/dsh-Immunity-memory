@@ -2868,6 +2868,35 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (typeof store.rebuildIndexes === 'function') return store.rebuildIndexes(current.items)
       return { fts: false, vectors: false, items: current.items.length }
     },
+    // 人工关联：自动建边只认词面余弦，判错了、或者两条明明相关却没词面交集时，
+    // 只能靠人工补一条。人工边存成 edge_type='manual'，重建自动边时不会被清掉。
+    itemLinks: async (id, options = {}) => {
+      if (typeof store.links !== 'function') return []
+      return store.links(String(id ?? ''), options ?? {})
+    },
+    linkItems: async (params = {}, actor = 'user') => {
+      const sourceId = String(params.sourceId ?? '')
+      const targetId = String(params.targetId ?? '')
+      if (sourceId === '' || targetId === '') throw relationError('需要 sourceId 与 targetId')
+      if (sourceId === targetId) throw relationError('不能把条目连到自己')
+      if (typeof store.linkItems !== 'function') throw relationError('当前存储不支持人工关联')
+      const link = await store.linkItems({ sourceId, targetId, weight: params.weight })
+      audit('link', `${sourceId} → ${targetId}`, actor)
+      await persist()
+      return link
+    },
+    unlinkItems: async (params = {}, actor = 'user') => {
+      const sourceId = String(params.sourceId ?? '')
+      const targetId = String(params.targetId ?? '')
+      if (sourceId === '' || targetId === '') throw relationError('需要 sourceId 与 targetId')
+      if (typeof store.unlinkItems !== 'function') throw relationError('当前存储不支持人工关联')
+      const removed = await store.unlinkItems({ sourceId, targetId })
+      if (removed > 0) {
+        audit('unlink', `${sourceId} ↔ ${targetId}`, actor)
+        await persist()
+      }
+      return { removed }
+    },
     // 写入
     createItem,
     updateItem,
@@ -3846,6 +3875,15 @@ import { NOTEBOOKS } from './settings.js'
 NOTEBOOK_LIST.push(...NOTEBOOKS)
 
 export { message, getPath }
+
+/**
+ * 人工关联操作失败时的错误：带上 code，接口层据此返回 400 而不是 500。
+ */
+function relationError(text) {
+  const error = new Error(text)
+  error.code = 'INVALID_ARGUMENT'
+  return error
+}
 
 
 

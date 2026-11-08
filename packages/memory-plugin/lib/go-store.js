@@ -352,6 +352,37 @@ export function createGoStore(ctx, log, getSettings) {
         total: result.total ?? (result.hits ?? []).length,
       }
     },
+    /** 与某条目直接相连的边（自动 related + 人工 manual）。 */
+    async links(id, options = {}) {
+      await ensure()
+      const text = String(id ?? '')
+      if (text === '') return []
+      const result = await request('/links/list', {
+        id: text,
+        minWeight: options.minWeight ?? 0,
+        limit: options.limit ?? 200,
+      })
+      return Array.isArray(result.links) ? result.links : []
+    },
+    /** 写一条人工关联边（edge_type='manual'）。 */
+    async linkItems(params = {}) {
+      await ensure()
+      const result = await request('/links/upsert', {
+        sourceId: String(params.sourceId ?? ''),
+        targetId: String(params.targetId ?? ''),
+        weight: params.weight ?? 1,
+      })
+      return result.link
+    },
+    /** 删除一对条目之间的人工关联边，返回删掉的行数。 */
+    async unlinkItems(params = {}) {
+      await ensure()
+      const result = await request('/links/delete', {
+        sourceId: String(params.sourceId ?? ''),
+        targetId: String(params.targetId ?? ''),
+      })
+      return Number(result.removed ?? 0)
+    },
     async graphBfs(seeds, options = {}) {
       await ensure()
       const result = await request('/graph/bfs', {

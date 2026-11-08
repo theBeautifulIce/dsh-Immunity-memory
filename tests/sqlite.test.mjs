@@ -186,6 +186,37 @@ test('自动建边：同主题条目之间会写上 related 边', () => {
   store.write(baseState())
 })
 
+test('人工关联：写一条 manual 边，重建自动边后仍在，删掉后消失', () => {
+  const state = baseState()
+  state.items = [
+    { ...state.items[0], id: 'mem_l1', title: '阳台绿萝浇水', content: '绿萝三天浇一次水，别晒正午的太阳。' },
+    { ...state.items[0], id: 'mem_l2', title: '地下室除湿机', content: '除湿机每周倒一次水箱，滤网每月洗。' },
+  ]
+  store.write(state)
+  store.linkItems({ sourceId: 'mem_l2', targetId: 'mem_l1' })
+  const manual = store.links('mem_l1').filter((entry) => entry.edgeType === 'manual')
+  assert.equal(manual.length, 1, '人工边应出现在关联列表里')
+  assert.equal(manual[0].id, 'mem_l2')
+  assert.ok(manual[0].weight > 0 && manual[0].weight <= 1)
+  // 反着再连一次：方向归一，只留一条边
+  store.linkItems({ sourceId: 'mem_l1', targetId: 'mem_l2', weight: 0.6 })
+  const rows = store.raw().prepare("SELECT * FROM relationships WHERE edge_type = 'manual'").all()
+  assert.equal(rows.length, 1, '同一对条目不该有两条人工边')
+  assert.equal(rows[0].weight, 0.6)
+  // 写一次库触发自动建边整批重建，人工边不能跟着没
+  store.write(store.read())
+  assert.equal(
+    store.raw().prepare("SELECT COUNT(*) AS n FROM relationships WHERE edge_type = 'manual'").get().n,
+    1,
+    '重建 related 边不该动 manual 边',
+  )
+  assert.equal(store.unlinkItems({ sourceId: 'mem_l1', targetId: 'mem_l2' }), 1)
+  assert.equal(store.links('mem_l1').filter((entry) => entry.edgeType === 'manual').length, 0)
+  // 连不存在的条目要报错，不能建出悬空边
+  assert.throws(() => store.linkItems({ sourceId: 'mem_l1', targetId: 'mem_missing' }), /不存在/)
+  store.write(baseState())
+})
+
 test('旧副本写回不会抹平库里的「能回答什么问题」', () => {
   const state = store.read()
   const item = state.items.find((entry) => entry.id === 'mem_a1')

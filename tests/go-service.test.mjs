@@ -171,6 +171,44 @@ try {
     assert.deepEqual(stored.questions, ask, '不带问法的重写不应清空已有问法')
   })
 
+  await test('人工关联边：能写、能列、重建自动边后还在、能删', async () => {
+    await api('/items/upsert', {
+      items: [
+        memory('l1', '阳台绿萝浇水', '绿萝三天浇一次水，别晒正午的太阳。'),
+        memory('l2', '地下室除湿机', '除湿机每周倒一次水箱，滤网每月洗。'),
+      ],
+    })
+    const created = await api('/links/upsert', { sourceId: 'l2', targetId: 'l1' })
+    assert.equal(created.link.edgeType, 'manual', '人工边单独一个类型')
+    assert.equal(created.link.id, 'l1', '返回的是对面那一端')
+    assert.ok(created.link.weight > 0 && created.link.weight <= 1)
+    // 反着再连一次：方向归一，同一对条目只留一条边
+    await api('/links/upsert', { sourceId: 'l1', targetId: 'l2', weight: 0.6 })
+    const listed = await api('/links/list', { id: 'l1' })
+    const manual = listed.links.filter((entry) => entry.edgeType === 'manual')
+    assert.equal(manual.length, 1, '同一对条目不该出现两条人工边')
+    assert.equal(manual[0].id, 'l2')
+    assert.equal(manual[0].weight, 0.6)
+    // 再写一次条目会触发自动建边重建，人工边不能被清掉
+    await api('/items/upsert', {
+      items: [memory('l1', '阳台绿萝浇水', '绿萝三天浇一次水，别晒正午的太阳。', { version: 2 })],
+    })
+    const again = await api('/links/list', { id: 'l1' })
+    assert.equal(again.links.filter((entry) => entry.edgeType === 'manual').length, 1, '重建自动边不该动人工边')
+    const removed = await api('/links/delete', { sourceId: 'l1', targetId: 'l2' })
+    assert.equal(removed.removed, 1)
+    const after = await api('/links/list', { id: 'l1' })
+    assert.equal(after.links.filter((entry) => entry.edgeType === 'manual').length, 0)
+    // 连不存在的条目要明确报错，不能悄悄建出一条悬空边
+    const bad = await fetch(`${base}/links/upsert`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-memory-token': TOKEN },
+      body: JSON.stringify({ sourceId: 'l1', targetId: 'nope' }),
+    })
+    assert.equal((await bad.json()).ok, false)
+    await api('/items/delete', { ids: ['l1', 'l2'] })
+  })
+
   await test('过滤条件（分层 / 类型）', async () => {
     const onlyNotes = await api('/search', {
       query: 'SQLite', limit: 5, semantic: false, graph: false,

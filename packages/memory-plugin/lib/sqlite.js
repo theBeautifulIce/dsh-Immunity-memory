@@ -320,6 +320,21 @@ export function createSqliteStore(ctx, log, getSettings) {
     raw() {
       return ensure()
     },
+    /**
+     * 与某条目直接相连的边：自动 related 与人工 manual 都在这里。
+     * 面板详情页与 memory_graph 之类的只读调用走这个口子。
+     */
+    links(id, options = {}) {
+      return readLinks(ensure(), String(id ?? ''), options.minWeight, options.limit)
+    },
+    /** 写一条人工关联边（edge_type='manual'），重建自动边时不受影响。 */
+    linkItems(params = {}) {
+      return writeManualLink(ensure(), params.sourceId, params.targetId, params.weight)
+    },
+    /** 删除一对条目之间的人工关联边。 */
+    unlinkItems(params = {}) {
+      return removeManualLink(ensure(), params.sourceId, params.targetId)
+    },
     stats() {
       const db = ensure()
       const pageSize = db.prepare('PRAGMA page_size').get()?.page_size ?? 4096
@@ -970,6 +985,73 @@ function pushRelated(adjacency, from, to, weight) {
   const list = adjacency.get(from)
   if (list === undefined) adjacency.set(from, [[to, weight]])
   else list.push([to, weight])
+}
+
+/**
+ * 读一条目直接相连的边（自动 related + 人工 manual）。
+ *
+ * 排序与 Go 侧 ListLinks 保持一致：权重降序、同级按建立时间降序。
+ * 表不存在或查询失败时返回空数组——关联只是辅助信息，不能把详情页带崩。
+ */
+function readLinks(database, id, minWeight, limit) {
+  if (id === '') return []
+  const floorWeight = Number.isFinite(minWeight) ? Number(minWeight) : 0
+  const cap = Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.floor(limit))) : 200
+  try {
+    const rows = database.prepare(
+      `SELECT source_id, target_id, edge_type, weight, created_at FROM relationships
+       WHERE (source_id = ? OR target_id = ?) AND weight >= ?
+       ORDER BY weight DESC, created_at DESC LIMIT ?`,
+    ).all(id, id, floorWeight, cap)
+    return rows.map((row) => ({
+      id: row.source_id === id ? row.target_id : row.source_id,
+      edgeType: row.edge_type,
+      weight: row.weight,
+      createdAt: row.created_at ?? '',
+    }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 写一条人工关联边（edge_type='manual'）。
+ *
+ * 与自动 related 边分开存：syncRelatedEdges 只整批重建 related，人工作出的判断
+ * 不会因为条目改写而被覆盖。方向按字典序归一，同一对条目只留一条边。
+ */
+function writeManualLink(database, sourceId, targetId, weight) {
+  const source = String(sourceId ?? '')
+  const target = String(targetId ?? '')
+  if (source === '' || target === '') throw new Error('需要 sourceId 与 targetId')
+  if (source === target) throw new Error('不能把条目连到自己')
+  for (const id of [source, target]) {
+    const found = database.prepare('SELECT 1 AS ok FROM memories WHERE id = ?').get(id)
+    if (found === undefined) throw new Error(`条目不存在：${id}`)
+  }
+  const left = source < target ? source : target
+  const right = source < target ? target : source
+  const raw = Number(weight)
+  const clamped = Number.isFinite(raw) && raw > 0 ? Math.min(1, raw) : 1
+  const rounded = Math.round(clamped * 1000) / 1000
+  const at = new Date().toISOString()
+  database.prepare(
+    `INSERT OR REPLACE INTO relationships (id, source_id, target_id, edge_type, weight, created_at, metadata)
+     VALUES (?, ?, ?, 'manual', ?, ?, '{}')`,
+  ).run(`${left}:${right}:manual`, left, right, rounded, at)
+  return { id: left === source ? right : left, edgeType: 'manual', weight: rounded, createdAt: at }
+}
+
+/** 删除一对条目之间的人工关联边（两个方向都删），返回删掉的行数。 */
+function removeManualLink(database, sourceId, targetId) {
+  const source = String(sourceId ?? '')
+  const target = String(targetId ?? '')
+  if (source === '' || target === '') throw new Error('需要 sourceId 与 targetId')
+  const result = database.prepare(
+    `DELETE FROM relationships WHERE edge_type = 'manual'
+     AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))`,
+  ).run(source, target, target, source)
+  return Number(result?.changes ?? 0)
 }
 
 function auditSignature(entry) {

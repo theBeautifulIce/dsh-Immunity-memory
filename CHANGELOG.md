@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-11-08
+
+Automatic links only know about literal overlap, so two entries that are clearly the
+same thread in different words stay unconnected, and a wrong automatic edge had no
+place to be corrected. Manual links close that gap: they live under their own
+`manual` edge type, so the automatic rebuild (`DELETE ... WHERE edge_type='related'`)
+never wipes them, and both storage backends expose the same three calls — `links.list`,
+`links.upsert`, `links.delete` in the Go service, and `links`/`linkItems`/`unlinkItems`
+on the Node SQLite store. The entry editor now has a “关联条目 / Related entries” block
+that lists the current links with their weight, searches other entries by title or
+question, and lets the user link or unlink them; it is hidden while creating a new
+entry. Manual links are written to the audit log and survive automatic rebuilds.
+
+### Added
+
+- Manual relationship edges (`manual`) with list/create/delete on both the Go service
+  (`/links/list`, `/links/upsert`, `/links/delete`) and the Node SQLite store.
+- “关联条目 / Related entries” block in the entry editor: list links, search entries,
+  link, unlink.
+
+### Changed
+
+- `ItemEditor` receives `api`, `items` and `notify` so the relations block can resolve
+  the other end's title within the current page of results.
+
+### Notes
+
+- Edges are stored once, with ids normalised in lexicographic order; a repeated link in
+  the opposite direction updates the existing row instead of creating a second one.
+- Existing installations must be restarted (plugin reload) for the new API methods to
+  be registered.
+
 ## [0.4.12] - 2026-11-08
 
 0.4.11 shipped the relationship graph in the Node SQLite layer, but the running

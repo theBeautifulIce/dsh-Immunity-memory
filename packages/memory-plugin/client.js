@@ -1189,6 +1189,9 @@ window.__ModuleLoader__.load({
               saving,
               isNote,
               settings,
+              api,
+              items: result.items,
+              notify,
               onSave: save,
               onDelete: remove,
               onResolveConflict: resolveConflict,
@@ -1240,7 +1243,125 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    function ItemEditor({ lang, draft, setDraft, creating, saving, isNote, settings, onSave, onDelete, onResolveConflict, onBulk, onClose }) {
+    /**
+     * 关联条目：列出人工关联（manual 边），并提供按标题/问法搜索后建立关联的入口。
+     * 自动建边只按字面余弦算，判错的、字面不通但确实相关的，得有人来补。
+     */
+    function ItemRelations({ api, lang, itemId, items, notify }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const [links, setLinks] = useState([])
+      const [error, setError] = useState('')
+      const [query, setQuery] = useState('')
+      const [hits, setHits] = useState([])
+      const [busy, setBusy] = useState(false)
+
+      const titleOf = useCallback((id) => {
+        const found = (items ?? []).find((entry) => entry.id === id)
+        return found === undefined ? id : found.title
+      }, [items])
+
+      const reload = useCallback(async () => {
+        try {
+          const value = await api('links.list', { id: itemId })
+          setLinks(Array.isArray(value?.links) ? value.links : [])
+          setError('')
+        } catch (cause) {
+          setError(cause.message)
+        }
+      }, [api, itemId])
+
+      useEffect(() => {
+        reload()
+      }, [reload])
+
+      async function search(text) {
+        setQuery(text)
+        if (String(text).trim() === '') {
+          setHits([])
+          return
+        }
+        try {
+          const value = await api('items.search', { query: String(text).trim(), limit: 8 })
+          setHits((value?.items ?? []).filter((entry) => entry.id !== itemId))
+        } catch (cause) {
+          setError(cause.message)
+        }
+      }
+
+      async function connect(targetId) {
+        setBusy(true)
+        try {
+          await api('links.create', { sourceId: itemId, targetId })
+          setQuery('')
+          setHits([])
+          await reload()
+          notify(txt('已建立关联', 'Linked'))
+        } catch (cause) {
+          notify(cause.message, 'error')
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      async function disconnect(targetId) {
+        setBusy(true)
+        try {
+          await api('links.delete', { sourceId: itemId, targetId })
+          await reload()
+        } catch (cause) {
+          notify(cause.message, 'error')
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', { className: 'mp-field' },
+        h('span', { className: 'mp-label' }, txt('关联条目', 'Related entries')),
+        h('span', { className: 'mp-hint' }, txt(
+          '自动关联只看字面相似。语义上相关、字面不通的两条，在这里手动连上；人工关联不会被自动重建冲掉。',
+          'Automatic links follow literal similarity only. Connect the ones that matter here; manual links survive rebuilds.')),
+        links.length === 0
+          ? h('div', { className: 'mp-hint' }, txt('还没有关联。', 'No links yet.'))
+          : links.map((link) => h('div', {
+            key: link.id,
+            style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', padding: '4px 0' },
+          },
+            h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+              h('span', null, titleOf(link.id)),
+              h('span', { className: 'mp-hint' }, `${link.edgeType ?? 'manual'} · ${Number(link.weight ?? 1).toFixed(2)}`)),
+            h('button', {
+              type: 'button',
+              className: 'mp-btn is-ghost',
+              disabled: busy,
+              onClick: () => disconnect(link.id),
+            }, txt('解除', 'Unlink')))),
+        h('input', {
+          className: 'mp-input',
+          value: query,
+          placeholder: txt('按标题或问法搜索条目', 'Search a title or question'),
+          onChange: (event) => search(event.target.value),
+          onKeyDown: (event) => {
+            if (event.key === 'Enter' && hits.length > 0) connect(hits[0].id)
+          },
+        }),
+        hits.length === 0
+          ? null
+          : h('div', { className: 'mp-card', style: { padding: '6px 8px', marginTop: '6px' } },
+            hits.map((entry) => h('div', {
+              key: entry.id,
+              style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '3px 0' },
+            },
+              h('span', null, entry.title),
+              h('button', {
+                type: 'button',
+                className: 'mp-btn',
+                disabled: busy,
+                onClick: () => connect(entry.id),
+              }, txt('关联', 'Link'))))),
+        error === '' ? null : h('span', { className: 'mp-hint' }, error))
+    }
+
+    function ItemEditor({ lang, draft, setDraft, creating, saving, isNote, settings, api, items, notify, onSave, onDelete, onResolveConflict, onBulk, onClose }) {
       const txt = (zh, en) => (lang === 'zh' ? zh : en)
       const update = (key, value) => setDraft({ ...draft, [key]: value })
       const immutable = ['L0', 'L1', 'L3'].includes(draft.layer)
@@ -1327,6 +1448,9 @@ window.__ModuleLoader__.load({
           h('span', { className: 'mp-hint' }, txt(
             '这句话按标题的权重参与召回，写具体问法比堆关键词有用。',
             'Indexed like a second title; a concrete question beats keyword stuffing.'))),
+        creating === false && api !== undefined && api !== null && draft.id !== undefined
+          ? h(ItemRelations, { api, lang, itemId: draft.id, items, notify })
+          : null,
         h('label', { className: 'mp-field' },
           h('span', { className: 'mp-label' }, txt('项目空间', 'Project space')),
           h('input', {
@@ -2780,7 +2904,7 @@ window.__ModuleLoader__.load({
       },
       // 只为测试/调试暴露，宿主运行时不会用到。
       __internals: {
-        MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, SettingsPanel,
+        MemorySettingsPage, MemoryPage, MemoryPanelIcon, ItemBrowser, ItemEditor, ItemRelations, SettingsPanel,
         MaintenancePanel, FieldControl, StatusChip, createApi, apiCandidates, PANEL_ID,
         InjectionCard, TemplateLayerEditor, UsagePanel, AuditPanel, ConsolidationPanel, LayerBadge, PitfallPanel, DiffPanel, DiffView,
       },
