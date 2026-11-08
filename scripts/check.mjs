@@ -63,6 +63,8 @@ run('工具测试', ['tests/tools.test.mjs'])
 
 run('检索测试', ['tests/search.test.mjs'])
 
+run('召回重排测试', ['tests/recall.test.mjs'])
+
 run('SQLite 存储测试', ['tests/sqlite.test.mjs'])
 
 if (!FAST) {

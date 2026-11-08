@@ -66,7 +66,7 @@
 | **记忆模板** | 每个模板按 L0/L1/L3 逐条配置不可变记忆，可新增多套并热切换；L2 与 L4-L7 始终共享，不会因切换模板被复制或删除 |
 | **写入审计** | 每次 `memory_write` / `memory_update` 前由无工具权限的独立子智能体对照用户原话审计；可开关、可影子运行，失败/超时放行；待确认候选在界面批准后才落库，审计 token 计入账本 |
 | **固化机制** | 反复写入、更新或命中的记忆进入候选；经 `memory_consolidate` 审计或界面确认后永久固化到 L1/L3，全程写审计 |
-| **提示词注入** | 每轮把最相关的记忆拼进系统提示词：排序用「当轮上下文」（最近几条用户消息 + 工具报错，只在内存、半小时过期）挑相关条目，而非永远重放重要度前几名；只有明显最相关的那一条（至少对上两个查询词、且高于第二名 1.5 倍）才带 `·命中` 标记，无关提问不会乱标；页面显示注入 token 总量，展开可看逐层消耗；可预览、可关闭 |
+| **提示词注入** | 每轮把最相关的记忆拼进系统提示词：排序用「当轮上下文」（最近几条用户消息 + 工具报错，只在内存、半小时过期），打分是 BM25（少见词权重更高、长条目打折）＋虚词过滤＋伪相关反馈，同分时新记的优先；只有明显最相关的那一条（至少对上两个查询词、且高于第二名 1.5 倍）才带 `·命中` 标记，无关提问不会乱标；页面显示注入 token 总量，展开可看逐层消耗；可预览、可关闭 |
 | **用量账本** | 记录每次检索的查询 token、结果 token，按工具/类型拆分；记事本视图统计含记事本结果的查询 |
 | **变更 diff** | 创建/更新/删除/批量/固化都有前后快照；界面用 git 风格红绿差异展示，正文按行 LCS，智能体拿到无损 JSON |
 | **自动维护** | 资源上限、过期清理、轮转归档、去重、反思提升、固化扫描、审计与变更历史压缩；支持定时与手动触发 |
@@ -310,7 +310,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 │  ├─ bin/<platform>-<arch>/  # 打包进插件的 Go 服务
 │  ├─ native/<platform>-<arch>/# 打包进插件的 Rust 核心
 │  └─ locale/                 # 中英文插件元数据
-├─ scripts/                   # build / check / benchmark / inspect / probe
+├─ scripts/                   # build / check / benchmark / bench-retrieval / inspect / probe
 ├─ tests/                     # audit / engine / engine-go / tools / search / sqlite / native / api / render
 ├─ CHANGELOG.md
 ├─ ROADMAP.md
@@ -325,6 +325,8 @@ node scripts/check.mjs        # 全部测试：语法、审计、引擎、工具
 node tests/engine.test.mjs    # 单独跑引擎
 node tests/go-service.test.mjs
 node scripts/benchmark.mjs --items 2000 --queries 100 --graph 50 --out docs/性能报告.md
+node scripts/bench-retrieval.mjs  # 公开题库的检索层评测（需先 BENCH_DIR 指向 chat-memory-benchmark 克隆）
+node scripts/recall-eval.mjs      # 自带的 20 题召回自检
 node scripts/inspect-db.mjs   # 只读查看当前记忆库
 ```
 

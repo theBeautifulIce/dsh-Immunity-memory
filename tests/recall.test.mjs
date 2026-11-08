@@ -130,4 +130,28 @@ await test('只有一个查询词时也不标命中', async () => {
   assert.equal(stats.text.includes('·命中'), false)
 })
 
+await test('少见的词比到处都是的词更有分量', async () => {
+  // 同一句问话里既有「用户」这种满库都有的词，也有「柠檬酸」这种只在一两条里出现的词，
+  // 排序应该按后者走——不然等于所有词一视同仁。
+  await engine.createItem({
+    layer: 'L4',
+    title: '称呼习惯',
+    content: '用户喜欢被叫啸春，平时直接叫名字。',
+    ttlDays: 30,
+    importance: 5,
+  }, 'user')
+  await engine.createItem({
+    layer: 'L4',
+    title: '水壶除垢',
+    content: '电水壶结垢用柠檬酸泡一晚，第二天冲干净就行。',
+    ttlDays: 30,
+    importance: 5,
+  }, 'user')
+  engine.noteTurnContext({ sessionId: 'session-f', kind: 'user', text: '用户的柠檬酸还剩多少' })
+  const stats = engine.injectionStats()
+  const lines = memoryLines(stats)
+  assert.match(lines[0].title, /水壶除垢/, '含罕见词的条目应排第一')
+  assert.ok((lines[0].relevance ?? 0) > (lines[1].relevance ?? 0))
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

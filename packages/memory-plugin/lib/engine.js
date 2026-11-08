@@ -73,6 +73,33 @@ const RELEVANCE_HIT = 0.12
 const MIN_HIT_TOKENS = 2
 // 一次最多拿多少个查询词参与打分：太多会把 relevance 摊薄，太少又不够区分。
 const QUERY_TOKEN_LIMIT = 32
+// 查询词里出现得太普遍（超过这个比例）的不算：它们不区分子集。
+const QUERY_DF_RATIO = 0.35
+// 伪相关反馈开关与参数（见 buildDigest 注释）。
+const PRF_ENABLED = true
+const PRF_SEED_MIN = 0.25
+const PRF_WEIGHT = 0.45
+const PRF_TOKEN_LIMIT = 5
+
+/**
+ * 查询词里的虚词黑名单：中文按字+二元组切词，不滤掉这些词的话，
+ * 「我」「的」「一下」「然后」会跟「灯塔」「叶楠」拿一样的 idf 分量，
+ * 把真正有区分度的词淹掉。只过滤查询侧，不影响索引和存储。
+ */
+const QUERY_STOP_TOKENS = new Set([
+  // 单字虚词
+  '的', '了', '是', '在', '我', '你', '他', '她', '它', '们', '这', '那', '就', '都', '也', '还',
+  '着', '过', '吧', '吗', '呢', '啊', '呀', '哦', '嗯', '和', '跟', '给', '把', '被', '有', '没',
+  '不', '会', '要', '想', '说', '去', '来', '个', '又', '再', '才', '很', '太', '好', '一', '上',
+  '下', '里', '大', '小', '多', '少', '谁', '哪', '啥', '么', '什', '怎', '为', '对', '从', '到',
+  // 二元组虚词
+  '我们', '你们', '他们', '她们', '这个', '那个', '这些', '那些', '什么', '怎么', '为什么', '一下',
+  '然后', '就是', '还是', '但是', '因为', '所以', '如果', '现在', '已经', '可以', '没有', '不是',
+  '知道', '觉得', '样子', '时候', '一个', '这里', '那里', '今天', '昨天', '明天',
+  // 英文虚词
+  'the', 'and', 'for', 'that', 'this', 'with', 'have', 'has', 'was', 'were', 'are', 'you', 'your',
+  'what', 'when', 'where', 'how', 'who', 'why', 'did', 'does', 'not', 'but', 'about', 'from',
+])
 
 /** 新建一条记忆/记事本条目。 */
 export async function createEngine({ store, getSettings, initialSettings, log, native }) {
@@ -2006,16 +2033,41 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       return true
     })
     const queryTokens = selectQueryTokens(queryText, candidates)
+    const stats = queryTokens.size > 0 ? corpusStats(candidates) : undefined
     const scored = candidates.map((item) => ({
       item,
-      relevance: queryRelevance(item, queryTokens),
+      relevance: queryRelevance(item, queryTokens, stats),
       matched: matchedQueryTokens(item, queryTokens),
-      score: scoreItem(item, queryTokens, active, now),
+      score: scoreItem(item, queryTokens, active, now, stats),
     }))
+    // 伪相关反馈：先用原查询排一遍，把最像的那条里的罕见词当作「用户其实想找的东西」
+    // 再加回查询里。同义、换说法造成的缺口，靠这一层能拉回一部分，不用上向量。
+    if (PRF_ENABLED && stats !== undefined && scored.length > 1) {
+      const seed = [...scored].sort((left, right) => right.relevance - left.relevance)[0]
+      if (seed !== undefined && seed.relevance >= PRF_SEED_MIN) {
+        const extra = feedbackTokens(seed.item, queryTokens, stats)
+        if (extra.size > 0) {
+          const expanded = new Set([...queryTokens, ...extra])
+          for (const entry of scored) {
+            // 排序用扩展后的分；「命中」标记仍然只看原查询，
+            // 不然反馈词会把一堆条目抬到同一档，标记就分不出高低了。
+            entry.relevanceRaw = entry.relevance
+            entry.relevance = queryRelevance(entry.item, expanded, stats)
+            entry.score = scoreItem(entry.item, expanded, active, now, stats)
+          }
+        }
+      }
+    }
     // 命中门槛不能只看绝对值：一句无关的话也可能碰上一两个通用词，
     // 于是「每条都标命中」。用候选集自身的中位数当背景，只有明显高于背景的才算命中。
-    const hitBar = relevanceBar(scored.map((entry) => entry.relevance))
-    scored.sort((left, right) => right.score - left.score)
+    const hitBar = relevanceBar(scored.map((entry) => entry.relevanceRaw ?? entry.relevance))
+    scored.sort((left, right) => {
+      if (Math.abs(right.score - left.score) > 1e-9) return right.score - left.score
+      // 分不出高下时，新记得的那条优先：同一个话题后说的通常才是现行版本。
+      const newer = Date.parse(right.item.updatedAt ?? '') - Date.parse(left.item.updatedAt ?? '')
+      if (Number.isFinite(newer) && newer !== 0) return newer
+      return 0
+    })
     const chosen = scored.slice(0, budget.topN)
     // 空库也要注入模板头部：否则新会话只剩工具描述，模型不知道有长期记忆可用。
     const coldStart = chosen.length === 0 && templateEntries.length === 0
@@ -2027,13 +2079,13 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       lines.push(`- [${entry.layer} ${layerLabel}·模板] ${entry.title}：${body}`)
       lineMeta.push({ ...entry, source: 'template', importance: null })
     }
-    for (const { item, relevance, matched } of chosen) {
+    for (const { item, relevance, relevanceRaw, matched } of chosen) {
       const body = truncate(item.content.replace(/\s+/g, ' ').trim(), 220)
       // 命中标记：让模型一眼看出哪几条是「跟这一轮有关」，而不是又一份需要通读的背景资料。
       // 只沾上一个词不算——短查询里一个通用词就能拿到 0.5 的相对分，所以要求至少对上两个词。
-      const hit = relevance >= hitBar && matched >= MIN_HIT_TOKENS ? '·命中' : ''
+      const hit = (relevanceRaw ?? relevance) >= hitBar && matched >= MIN_HIT_TOKENS ? '·命中' : ''
       lines.push(`- [${item.layer}·重要度${item.importance}${hit}] ${item.title}：${body}`)
-      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance, matched })
+      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance: relevanceRaw ?? relevance, matched })
     }
     const header = coldStart
       ? [
@@ -2848,8 +2900,8 @@ function sortItems(items, sort) {
 }
 
 /** 关键词加权打分。 */
-function scoreItem(item, queryTokens, active, now) {
-  const relevance = queryRelevance(item, queryTokens)
+function scoreItem(item, queryTokens, active, now, stats = undefined) {
+  const relevance = queryRelevance(item, queryTokens, stats)
   const recency = recencyScore(item.updatedAt, active.retrieval.recencyHalfLifeDays, now)
   const importance = clampNumber(item.importance / 10, 0, 1, 0.5)
   const access = clampNumber(Math.log1p(item.accessCount ?? 0) / Math.log(11), 0, 1, 0)
@@ -2860,23 +2912,69 @@ function scoreItem(item, queryTokens, active, now) {
 }
 
 /**
- * 词面相关度（0-1）：查询词在标题/正文/标签里的命中比例。
- * 标题权重最高，正文次之，标签再略重一点（标签是人手写的归类，比正文更准）。
+ * 词面相关度（0-1）：BM25 版的「查询词命中得分」。
+ *
+ * 早先是纯计数（标题×2 + 正文 + 标签×1.5，除以查询词数×2），所有词一视同仁，
+ * 于是「一下」「这段」这种到处都有的词，和「灯塔」这种全库只有一条提过的词，
+ * 分量一样重。改成 BM25：越少见的词权重越大（idf），长条目自动打折（长度归一），
+ * 同一个词重复出现收益递减（tf 饱和）。最后除以「查询词全部打满」的上限，
+ * 保持 0-1 的输出，好让 0.12 这个绝对阈值仍然有意义。
  */
-function queryRelevance(item, queryTokens) {
+function queryRelevance(item, queryTokens, stats = undefined) {
   if (queryTokens === undefined || queryTokens.size === 0) return 0
   const titleTokens = tokenize(item.title)
   const contentTokens = tokenize(item.content)
   const tagTokens = tokenize(item.tags.join(' '))
-  let titleHits = 0
-  let contentHits = 0
-  let tagHits = 0
-  for (const token of queryTokens) {
-    if (titleTokens.has(token)) titleHits += 1
-    if (contentTokens.has(token)) contentHits += 1
-    if (tagTokens.has(token)) tagHits += 1
+  if (stats === undefined) {
+    let titleHits = 0
+    let contentHits = 0
+    let tagHits = 0
+    for (const token of queryTokens) {
+      if (titleTokens.has(token)) titleHits += 1
+      if (contentTokens.has(token)) contentHits += 1
+      if (tagTokens.has(token)) tagHits += 1
+    }
+    return clampNumber((titleHits * 2 + contentHits + tagHits * 1.5) / (queryTokens.size * 2), 0, 1, 0)
   }
-  return clampNumber((titleHits * 2 + contentHits + tagHits * 1.5) / (queryTokens.size * 2), 0, 1, 0)
+  const k1 = 1.2
+  const b = 0.75
+  const docLen = stats.lengths.get(item.id) ?? contentTokens.size
+  const avgLen = stats.avgLen > 0 ? stats.avgLen : 1
+  const norm = k1 * (1 - b + (b * docLen) / avgLen)
+  let raw = 0
+  let ceiling = 0
+  for (const token of queryTokens) {
+    const df = stats.df.get(token) ?? 0
+    if (df === 0) continue
+    const idf = Math.log(1 + (stats.n - df + 0.5) / (df + 0.5))
+    const tf = (titleTokens.has(token) ? 2 : 0) + (contentTokens.has(token) ? 1 : 0) + (tagTokens.has(token) ? 1.5 : 0)
+    if (tf > 0) raw += idf * ((tf * (k1 + 1)) / (tf + norm))
+    ceiling += idf * (k1 + 1)
+  }
+  if (ceiling === 0) return 0
+  return clampNumber(raw / ceiling, 0, 1, 0)
+}
+
+/**
+ * 候选集的词频背景：条目数、平均长度、每个词出现在几条里。
+ * 只在一轮里算一次，供 BM25 打分复用。
+ */
+function corpusStats(candidates) {
+  const df = new Map()
+  const lengths = new Map()
+  let total = 0
+  for (const item of candidates) {
+    const tokens = tokenize(searchableText(item))
+    lengths.set(item.id, tokens.size)
+    total += tokens.size
+    for (const token of tokens) df.set(token, (df.get(token) ?? 0) + 1)
+  }
+  return {
+    n: candidates.length,
+    avgLen: candidates.length > 0 ? total / candidates.length : 0,
+    df,
+    lengths,
+  }
 }
 
 /**
@@ -2928,7 +3026,7 @@ function selectQueryTokens(text, candidates) {
   if (raw.size === 0 || candidates.length === 0) return new Set()
   // 超大库不在这里做全量 df：宁可退回重要度排序，也不把每次请求拖成几十毫秒。
   if (candidates.length > 4000) return new Set()
-  const ceiling = Math.max(2, Math.floor(candidates.length * 0.5))
+  const ceiling = Math.max(2, Math.floor(candidates.length * QUERY_DF_RATIO))
   const df = new Map()
   for (const item of candidates) {
     for (const token of tokenize(searchableText(item))) {
@@ -2938,11 +3036,33 @@ function selectQueryTokens(text, candidates) {
   const kept = []
   for (const [token, count] of df) {
     if (count === 0 || count > ceiling) continue
+    if (QUERY_STOP_TOKENS.has(token)) continue
     kept.push({ token, count })
   }
   if (kept.length === 0) return new Set()
   kept.sort((left, right) => left.count - right.count)
   return new Set(kept.slice(0, QUERY_TOKEN_LIMIT).map((entry) => entry.token))
+}
+
+/**
+ * 伪相关反馈的词：取最像的那条里「全库少见的词」，最多三条。
+ * 目的是把「同义、换说法」的缺口拉回一点——他问「灯塔故事」，
+ * 条目里写的是「那枚钥匙」，那就把「钥匙」也当查询词用一次。
+ */
+function feedbackTokens(item, queryTokens, stats) {
+  const ceiling = Math.max(2, Math.floor(stats.n * 0.1))
+  const candidates = []
+  for (const token of tokenize(searchableText(item))) {
+    if (queryTokens.has(token)) continue
+    if (QUERY_STOP_TOKENS.has(token)) continue
+    // 单字太泛（「碗」「灯」之外多半是虚词或噪声），只拿两字以上的词。
+    if (token.length < 2) continue
+    const df = stats.df.get(token) ?? 0
+    if (df === 0 || df > ceiling) continue
+    candidates.push({ token, df })
+  }
+  candidates.sort((left, right) => left.df - right.df)
+  return new Set(candidates.slice(0, PRF_TOKEN_LIMIT).map((entry) => entry.token))
 }
 
 function recencyScore(iso, halfLifeDays, now) {

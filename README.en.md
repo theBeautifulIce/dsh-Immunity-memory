@@ -66,7 +66,7 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | **Memory templates** | Each template configures immutable memories per L0/L1/L3, with multiple templates and hot switching; L2 and L4-L7 are shared and are never copied or deleted by a switch |
 | **Write audit** | Before every `memory_write` / `memory_update`, a tool-less isolated subagent audits it against the user's turn; optional enforce or shadow mode, fail-open on errors/timeouts, with pending candidates approved in the UI and per-run token accounting |
 | **Consolidation** | Frequently written, updated, or recalled memories become candidates; after `memory_consolidate` review or UI approval they become permanent L1/L3 memories, fully audited |
-| **Prompt injection** | The most relevant memories are injected into the system prompt each turn. Ranking uses per-turn context (recent user messages + failed tool results, memory only, 30-minute TTL) instead of replaying the same top-importance items; only the clearly best match of the turn is labelled `·命中` (it must cover at least two query tokens and beat the runner-up by 1.5×), so unrelated questions stay unmarked; the page shows total injected tokens and a per-layer breakdown; preview and disable are supported |
+| **Prompt injection** | The most relevant memories are injected into the system prompt each turn. Ranking uses per-turn context (recent user messages + failed tool results, memory only, 30-minute TTL) and scores with BM25 (rare terms weigh more, long items are penalised) plus stop-word filtering and pseudo-relevance feedback; ties go to the newer item. Only the clearly best match of the turn is labelled `·命中` (it must cover at least two query tokens and beat the runner-up by 1.5×), so unrelated questions stay unmarked; the page shows total injected tokens and a per-layer breakdown; preview and disable are supported |
 | **Usage ledger** | Records query tokens and result tokens per search, split by tool/type; the notebook view counts queries whose results include notebook entries |
 | **Change diff** | Create/update/delete/bulk/consolidate snapshots; the UI renders a git-style red/green diff with line-level LCS, while agents receive lossless JSON |
 | **Maintenance** | Resource caps, expiry cleanup, rotation archive, dedupe, reflection promotion, consolidation scan, audit/changelog compaction; scheduled or manual |
@@ -310,7 +310,7 @@ Numbers vary with hardware, data distribution, and whether the native core is en
 │  ├─ bin/<platform>-<arch>/  # Go service shipped with the plugin
 │  ├─ native/<platform>-<arch>/# Rust core shipped with the plugin
 │  └─ locale/                 # Chinese/English plugin metadata
-├─ scripts/                   # build / check / benchmark / inspect / probe
+├─ scripts/                   # build / check / benchmark / bench-retrieval / inspect / probe
 ├─ tests/                     # audit / engine / engine-go / tools / search / sqlite / native / api / render
 ├─ CHANGELOG.md
 ├─ ROADMAP.md
@@ -325,6 +325,8 @@ node scripts/check.mjs        # all tests: syntax, audit, engine, tools, storage
 node tests/engine.test.mjs    # engine only
 node tests/go-service.test.mjs
 node scripts/benchmark.mjs --items 2000 --queries 100 --graph 50 --out docs/性能报告.md
+node scripts/bench-retrieval.mjs  # retrieval-layer run on the public benchmark (point BENCH_DIR at a chat-memory-benchmark clone)
+node scripts/recall-eval.mjs      # bundled 20-question recall self-check
 node scripts/inspect-db.mjs   # read-only view of the current memory store
 ```
 

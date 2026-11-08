@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-08
+
+Ranking quality, measured on a public 714-question benchmark: recall@1 went from
+44.0% to 54.5%, recall@3 from 59.0% to 70.2%, recall@10 from 72.7% to 78.9%, and
+"not even in the digest" dropped from 13.7% to 10.5% of questions. No embeddings,
+no model calls — all of it is lexical scoring.
+
+### Changed
+
+- `queryRelevance()` is now BM25 instead of plain hit-counting: rare query terms
+  weigh more (idf), long items are penalised (length normalisation), and repeated
+  occurrences saturate. Scores are still normalised to 0-1, so `RELEVANCE_HIT`
+  keeps its meaning.
+- Per-corpus statistics are computed once per turn (`corpusStats()`: item count,
+  average length, document frequency) and shared by every candidate.
+- Query terms are filtered against a small stop-word list (`QUERY_STOP_TOKENS`) —
+  Chinese is tokenised into characters plus bigrams, so 「的」「我」「一下」「然后」
+  used to carry as much weight as 「灯塔」.
+- Only terms appearing in at most 35% of candidates (`QUERY_DF_RATIO`) take part
+  in scoring.
+- Pseudo-relevance feedback: after the first pass the rare terms of the best
+  candidate are added back to the query (`PRF_WEIGHT` 0.45, up to 5 terms) and
+  everyone is rescored. The `·命中` badge still uses the original query only, so
+  feedback cannot blur which line is actually the best match.
+- Equal scores now break towards the newer item instead of insertion order: when
+  the same topic was recorded twice, the later version is the current one.
+
+### Added
+
+- `scripts/bench-retrieval.mjs`: adapter for the public
+  [chat-memory-benchmark](https://github.com/Ornn8/chat-memory-benchmark) (MIT).
+  It feeds each persona's history into a sandbox store up to the question's
+  cutoff turn and reports retrieval `@1/@3/@10`, whether the evidence turn made
+  the digest at all, badge precision, and a per-topic breakdown. `BENCH_DIR`
+  points at the clone, `BENCH_LIMIT` samples, `BENCH_MERGE` changes how many
+  turns go into one item. Full run takes about 20 seconds and never touches the
+  live store.
+
+### Tests
+
+- `tests/recall.test.mjs` grew to 8 cases: a query mixing a ubiquitous term
+  (「用户」) with a rare one (「柠檬酸」) must rank the rare-term item first.
+- `scripts/check.mjs` now runs `tests/recall.test.mjs` as well — it had been
+  added to the repo but never wired into the default check.
+
 ## [0.4.5] - 2026-11-08
 
 Tighten the `·命中` badge so it means something: only the item that is clearly
