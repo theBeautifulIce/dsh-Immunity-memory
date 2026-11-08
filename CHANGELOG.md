@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.25] - 2026-11-08
+
+Every hourly and daily review costs tokens, and until now nothing measured whether those tokens
+bought anything. A review that keeps saving nothing still ran on schedule forever.
+
+Each review run now records the estimated tokens of the reminder block it was acting on and how many
+entries it created; the capture card shows "cost per 100 tokens". The estimate is the plugin's own
+conservative count of the text it writes into the prompt — the real bill stays with the host.
+
+On top of that number sits adaptive throttling, on by default: three reviews in a row that save
+nothing stretch the review interval up to 3x (hourly reviews wait up to 3x longer, daily reviews skip
+forward by whole days); any saved entry lowers the multiplier by half a step, back to 1x. Immediate
+signals are untouched.
+
 ## [0.4.24] - 2026-11-08
 
 `archiveAfterDays` was one number for everything: six months is right for a project conclusion and

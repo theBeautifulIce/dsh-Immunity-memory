@@ -2777,6 +2777,13 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mp-hint', style: { marginTop: '8px' } },
             `${txt('上次小时回顾', 'Last hourly review')} ${formatTime(diagnostics?.capture?.lastSmallReviewAt ?? boot.capture?.lastSmallReviewAt ?? null)} · `
             + `${txt('上次每日回顾', 'Last daily review')} ${formatTime(diagnostics?.capture?.lastLargeReviewAt ?? boot.capture?.lastLargeReviewAt ?? null)}`)),
+          h('div', { className: 'mp-hint', style: { marginTop: '8px' } }, (() => {
+            const cost = diagnostics?.capture?.cost ?? boot.capture?.cost ?? null
+            if (cost === null || cost.reviews === 0) return txt('回顾成本：还没有小/大回顾的样本。', 'Review cost: no hourly or daily review yet.')
+            const throttle = cost.backoff > 1 ? ` · ${txt('已限流', 'throttled')} ×${cost.backoff}` : ''
+            return `${txt('回顾成本', 'Review cost')} ${cost.reviews}${txt(' 次，平均 ', ' runs, avg ')}${cost.avgPromptTokens}`
+              + `${txt(' token/次，每 100 token 换回 ', ' tokens each, ')}${cost.per100Tokens}${txt(' 条记录', ' entries per 100 tokens')}${throttle}`
+          })()),
         h('div', { className: 'mp-card' },
           h('div', { className: 'mp-card-title' }, txt('存储', 'Storage')),
           h('div', { className: 'mp-code' }, storage.path ?? ''),

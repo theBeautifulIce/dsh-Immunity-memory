@@ -35,6 +35,7 @@ import {
   sanitizeCustomTemplate,
 } from './settings.js'
 import { emptyState, message, STORE_VERSION } from './store.js'
+import { nextBackoff, promptCost, reviewCostSummary } from './cost.js'
 import { createSearchEngine } from './search.js'
 import { fallbackCosineBatch, fallbackDedupe, fallbackImportance } from './fallback-math.js'
 import { estimateTokens, jaccard, searchableText, tokenize } from './text.js'
@@ -2458,12 +2459,14 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const capture = captureState(current)
     const queued = []
     const isoNow = new Date(now).toISOString()
+    // 自适应倍数只拉长回顾间隔，不改变「每 5 分钟看一眼是否到期」的节拍。
+    const backoff = clampNumber(capture.backoff, 1, 3, 1)
     if (cfg.smallEnabled === true) {
       if (capture.lastSmallQueuedAt === null || capture.lastSmallQueuedAt === undefined) {
         capture.lastSmallQueuedAt = isoNow
       } else if (!capture.pending.some((entry) => entry.trigger === 'small_review')) {
         const gap = now - Date.parse(capture.lastSmallQueuedAt)
-        if (Number.isFinite(gap) && gap >= clampInt(cfg.smallIntervalHours, 1, 168, 4) * 3600000) {
+        if (Number.isFinite(gap) && gap >= clampInt(cfg.smallIntervalHours, 1, 168, 4) * backoff * 3600000) {
           const since = capture.lastSmallReviewAt ?? new Date(now - clampInt(cfg.smallWindowHours, 1, 168, 4) * 3600000).toISOString()
           const entry = {
             id: `cap_${randomUUID().slice(0, 8)}`,
@@ -2486,7 +2489,9 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (capture.lastLargeQueuedAt === null || capture.lastLargeQueuedAt === undefined) {
         capture.lastLargeQueuedAt = isoNow
       } else if (!capture.pending.some((entry) => entry.trigger === 'large_review')
-        && isDailyDue(now, cfg.largeAt, capture.lastLargeQueuedAt)) {
+        && isDailyDue(now, cfg.largeAt, capture.lastLargeQueuedAt)
+        // 倍数 2/3 时每日回顾改成隔 1/2 天一次，和小时回顾一起收缩频率。
+        && now - Date.parse(capture.lastLargeQueuedAt) >= (Math.round(backoff) - 1) * 86400000) {
         const since = capture.lastLargeReviewAt
           ?? new Date(now - clampInt(cfg.largeLookbackDays, 1, 365, 7) * 86400000).toISOString()
         const entry = {
@@ -2560,6 +2565,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const facts = Array.isArray(input.facts) ? input.facts.slice(0, maxFacts) : []
     const notes = Array.isArray(input.notes) ? input.notes.slice(0, maxNotes) : []
     const capture = captureState(current)
+    // 回顾成本：先量提醒块，再清待处理信号，否则量到的就是清空后的小块。
+    const promptTokens = promptCost(capturePrompt())
     const now = new Date().toISOString()
     const sessionId = typeof input.sessionId === 'string' ? truncate(input.sessionId, 120) : null
     const turn = Number.isFinite(Number(input.turn)) ? Number(input.turn) : null
@@ -2653,6 +2660,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       sessionId,
       turn,
       summary: clipText(String(input.summary ?? ''), 2000),
+      promptTokens,
       created,
       updated,
       skipped,
@@ -2660,6 +2668,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
     capture.runs.push(run)
     capture.runs = capture.runs.slice(-50)
+    // 自适应限流：连续几次回顾都写不出东西就拉长提醒间隔，写得出来就往回收。
+    // 只对回顾触发器生效，即时信号不受影响；关闭开关后倍数保持 1。
+    if (active.autoCapture.adaptiveThrottle === true
+      && (trigger === 'small_review' || trigger === 'large_review')) {
+      const recent = capture.runs
+        .filter((entry) => entry.trigger === 'small_review' || entry.trigger === 'large_review')
+        .slice(-3)
+      const produced = recent.reduce((sum, entry) => sum + entry.created.length, 0)
+      capture.backoff = nextBackoff(capture.backoff, produced)
+    }
     if (trigger === 'small_review') capture.lastSmallReviewAt = now
     if (trigger === 'large_review') capture.lastLargeReviewAt = now
     capture.pending = capture.pending.filter((entry) => {
@@ -2686,6 +2704,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       enabled: settings().autoCapture.enabled === true,
       pending: capture.pending.length,
       runs: capture.runs.length,
+      backoff: clampNumber(capture.backoff, 1, 3, 1),
+      cost: reviewCostSummary(capture.runs, capture.backoff),
       lastSignalAt: capture.lastSignalAt ?? null,
       lastSmallReviewAt: capture.lastSmallReviewAt ?? null,
       lastLargeReviewAt: capture.lastLargeReviewAt ?? null,
@@ -3729,6 +3749,7 @@ function normalizeCaptureStore(raw) {
         sessionId: typeof run.sessionId === 'string' ? truncate(run.sessionId, 120) : null,
         turn: Number.isFinite(Number(run.turn)) ? Number(run.turn) : null,
         summary: truncate(String(run.summary ?? ''), 2000),
+        promptTokens: clampInt(run.promptTokens, 0, 200000, 0),
         created: Array.isArray(run.created) ? run.created.slice(0, 40) : [],
         updated: Array.isArray(run.updated) ? run.updated.slice(0, 40) : [],
         skipped: Array.isArray(run.skipped) ? run.skipped.slice(0, 40) : [],
@@ -3745,6 +3766,8 @@ function normalizeCaptureStore(raw) {
     lastLargeReviewAt: isoOr(source.lastLargeReviewAt, null),
     lastSmallQueuedAt: isoOr(source.lastSmallQueuedAt, null),
     lastLargeQueuedAt: isoOr(source.lastLargeQueuedAt, null),
+    // 自适应倍数：1 = 按设置间隔，3 = 拉长到 3 倍（连续回顾都写不出东西时）。
+    backoff: clampNumber(source.backoff, 1, 3, 1),
   }
 }
 

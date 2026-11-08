@@ -1095,6 +1095,33 @@ await test('自动记忆定时器首次只记起点，之后入队小时回顾',
   assert.match(engine.capturePrompt(), /小时回顾/)
 })
 
+await test('回顾成本被量化，连续无产出会拉长回顾间隔', async () => {
+  // 三次都写不出东西：倍数从 1 一步步拉长。
+  await engine.capture({ trigger: 'small_review', outcome: 'nothing', summary: '窗口内没有可记的' })
+  await engine.capture({ trigger: 'small_review', outcome: 'nothing', summary: '还是没有可记的' })
+  await engine.capture({ trigger: 'small_review', outcome: 'nothing', summary: '依然没有可记的' })
+  const stats = engine.captureStats()
+  assert.equal(stats.backoff, 2.5)
+  assert.ok(stats.cost.reviews >= 3)
+  assert.ok(stats.cost.avgPromptTokens > 0, '提醒块本身要有 token 估算')
+  assert.equal(stats.cost.totalCreated, 0)
+  // 有产出了就往回收一格。
+  const created = await engine.capture({
+    trigger: 'small_review',
+    facts: [{
+      layer: 'L4',
+      title: '回顾成本要能被量出来',
+      content: '每次回顾记下提醒块 token 与新建条数，用来判断值不值得这么频繁。',
+      ttlDays: 90,
+    }],
+  })
+  assert.equal(created.created.length, 1)
+  const after = engine.captureStats()
+  assert.equal(after.backoff, 2)
+  assert.equal(after.cost.totalCreated >= 1, true)
+  assert.ok(after.cost.per100Tokens > 0)
+})
+
 // 图谱相关的用例各自开一个干净沙箱：注入预算里候选太多会互相挤占，不隔离测不准。
 async function withFreshEngine(run) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-graph-'))

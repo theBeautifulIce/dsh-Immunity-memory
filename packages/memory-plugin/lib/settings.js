@@ -360,6 +360,9 @@ export const DEFAULT_SETTINGS = {
     maxNotes: 6,
     noteDedupe: 0.92,
     queueKeep: 20,
+    // 自适应限流：连续回顾都写不出东西时自动拉长回顾间隔（最多 3 倍），
+    // 一旦写出来就往回收。只影响小/大回顾，不影响即时信号。
+    adaptiveThrottle: true,
   },
   maintenance: {
     autoRun: true,
@@ -939,6 +942,15 @@ export const SETTINGS_SCHEMA = [
         unit: { zh: '条', en: 'items' },
         label: { zh: '待处理信号上限', en: 'Pending signal cap' },
         hint: { zh: '只保留最近这么多条未处理提醒。', en: 'Keep only this many unresolved reminders.' },
+      },
+      {
+        path: 'autoCapture.adaptiveThrottle',
+        type: 'boolean',
+        label: { zh: '自适应限流', en: 'Adaptive throttling' },
+        hint: {
+          zh: '连续三次回顾都没写进任何条目时，把回顾间隔逐步拉长到最多 3 倍；一旦有产出就收回正常间隔。',
+          en: 'When three reviews in a row save nothing, stretch the review interval up to 3x; any output returns it to normal.',
+        },
       },
     ],
   },

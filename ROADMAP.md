@@ -42,7 +42,7 @@ after user feedback, DSH API changes, or performance findings.
 - [x] `memory_capture` tool: the agent explicitly chooses facts, layers, and TTLs.
 - [x] Code-level notebook deduplication; memory layers keep semantic dedupe.
 - [x] Capture state, diagnostics, and maintenance-panel card.
-- [ ] Measure real token cost of capture/review and add adaptive throttling.
+- [x] Measure real token cost of capture/review and add adaptive throttling.
 - [ ] Optional user-defined trigger rules without code changes.
 
 ## v0.5 — Operations and observability
