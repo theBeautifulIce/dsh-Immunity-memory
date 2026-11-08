@@ -27,6 +27,7 @@ tmp/
 # 本地构建产物（要提交的是 packages/memory-plugin/{bin,native}/ 下的发布二进制）
 native/memory-core/target/
 go-service/memory-service.exe
+go-service/bin/
 *.pdb
 
 # 编辑器 / 系统文件

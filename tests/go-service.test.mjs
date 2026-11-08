@@ -137,6 +137,40 @@ try {
     assert.ok(m2.relevance <= 1)
   })
 
+  await test('写入后自动建 related 边（不需要手动指定冲突）', async () => {
+    await api('/items/upsert', {
+      items: [
+        memory('g1', '海鸥桥检修排期', '海鸥桥检修定在周三凌晨，桥面封半幅，值班表已发。'),
+        memory('g2', '周三凌晨桥面封半幅', '海鸥桥检修周三凌晨封半幅，值班表贴在门卫室，记得带反光背心。'),
+      ],
+    })
+    const graph = await api('/graph/bfs', { seeds: ['g1'], depth: 1, minWeight: 0.2, maxResults: 10 })
+    const ids = graph.nodes.map((node) => node.id)
+    assert.ok(ids.includes('g2'), `同主题条目应被 related 边连上：${ids}`)
+    const edge = graph.edges.find((entry) => (entry.source === 'g1' && entry.target === 'g2')
+      || (entry.source === 'g2' && entry.target === 'g1'))
+    assert.ok(edge !== undefined, `应存在 g1↔g2 的边：${JSON.stringify(graph.edges)}`)
+    assert.equal(edge.edgeType, 'related')
+    assert.ok(edge.weight > 0 && edge.weight <= 1)
+  })
+
+  await test('问法随条目入库，旧副本重写时不被抹掉', async () => {
+    const ask = ['灯箱现在到哪一步了']
+    await api('/items/upsert', {
+      items: [{ ...memory('q1', '灯箱验收', '灯箱验收卡在物业电路确认，等周四回话。'), questions: ask }],
+    })
+    let snapshot = await api('/snapshot')
+    let stored = snapshot.state.items.find((item) => item.id === 'q1')
+    assert.deepEqual(stored.questions, ask, '问法应写进元数据并读得回来')
+    // 旧副本（内存里没有问法）再次写入同一条，不能把库里的问法抹平
+    await api('/items/upsert', {
+      items: [memory('q1', '灯箱验收', '灯箱验收卡在物业电路确认，等周四回话。')],
+    })
+    snapshot = await api('/snapshot')
+    stored = snapshot.state.items.find((item) => item.id === 'q1')
+    assert.deepEqual(stored.questions, ask, '不带问法的重写不应清空已有问法')
+  })
+
   await test('过滤条件（分层 / 类型）', async () => {
     const onlyNotes = await api('/search', {
       query: 'SQLite', limit: 5, semantic: false, graph: false,
@@ -191,10 +225,11 @@ try {
   })
 
   await test('删除条目会清掉索引', async () => {
+    const before = await api('/stats')
     await api('/items/delete', { ids: ['m2'] })
     const stats = await api('/stats')
-    assert.equal(stats.stats.memories, 1)
-    assert.equal(stats.stats.vectors, 2)
+    assert.equal(stats.stats.memories, before.stats.memories - 1)
+    assert.equal(stats.stats.vectors, before.stats.vectors - 1)
     const search = await api('/search', { query: '缓存', limit: 5, semantic: false, graph: false })
     assert.equal(search.hits.some((hit) => hit.id === 'm2'), false, '被删条目不应再被检索到')
   })

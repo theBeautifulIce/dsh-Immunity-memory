@@ -47,6 +47,7 @@ type Item struct {
 	Title        string   `json:"title"`
 	Content      string   `json:"content"`
 	Tags         []string `json:"tags"`
+	Questions    []string `json:"questions,omitempty"`
 	Importance   int      `json:"importance"`
 	Status       string   `json:"status"`
 	Pinned       bool     `json:"pinned"`
@@ -135,6 +136,11 @@ func Open(path string, logf func(string, ...any)) (*Store, error) {
 	if err := s.backfillIndexes(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("补齐索引失败: %w (dsn=%s)", err, dsn)
+	}
+	// 旧库的 relationships 里只有 conflict 边（甚至一条都没有）：开机补一次相关边，
+	// 让图谱在第一次检索之前就有东西可走。失败不影响启动，检索仍可用。
+	if err := s.SyncRelatedEdges(); err != nil {
+		logf("自动建边失败（不影响启动）：%v", err)
 	}
 	logf("SQLite 已打开：%s", path)
 	return s, nil
@@ -448,6 +454,7 @@ func (s *Store) loadMemories() ([]Item, error) {
 		var meta struct {
 			Notebook     *string  `json:"notebook"`
 			Tags         []string `json:"tags"`
+			Questions    []string `json:"questions"`
 			Pinned       bool     `json:"pinned"`
 			ExpiresAt    *string  `json:"expiresAt"`
 			Source       *Source  `json:"source"`
@@ -464,6 +471,9 @@ func (s *Store) loadMemories() ([]Item, error) {
 			item.Notebook = meta.Notebook
 			if meta.Tags != nil {
 				item.Tags = meta.Tags
+			}
+			if meta.Questions != nil {
+				item.Questions = meta.Questions
 			}
 			item.Pinned = meta.Pinned
 			item.ExpiresAt = meta.ExpiresAt
@@ -638,7 +648,11 @@ func (s *Store) UpsertItems(items []Item) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 条目变了，相关边跟着重建（已持有 s.mu，走 locked 版本）。
+	return s.syncRelatedEdgesLocked()
 }
 
 func (s *Store) upsertItem(tx *sql.Tx, item Item) error {
@@ -667,8 +681,17 @@ func (s *Store) upsertItem(tx *sql.Tx, item Item) error {
 			return err
 		}
 	default:
+		// 写入没带问法时沿用库里已有的，避免旧副本把问法抹平（与 Node 侧同一条保护）。
+		questions := item.Questions
+		if len(questions) == 0 {
+			questions = storedQuestions(tx, item.ID)
+		}
+		if questions == nil {
+			questions = []string{}
+		}
 		metadata, _ := json.Marshal(map[string]any{
 			"notebook": item.Notebook, "tags": item.Tags, "pinned": item.Pinned,
+			"questions": questions,
 			"expiresAt": item.ExpiresAt, "source": item.Source, "version": item.Version,
 			"conflicts": item.Conflicts, "duplicateOf": item.DuplicateOf,
 			"key": item.Key, "supersedes": item.Supersedes, "supersededBy": item.SupersededBy,
@@ -753,7 +776,11 @@ func (s *Store) DeleteItems(ids []string) error {
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 删掉的条目可能带着边一起走了，剩下的条目需要重新连边。
+	return s.syncRelatedEdgesLocked()
 }
 
 // upsertMeta 同步过滤用元数据（layer/type/status/notebook/tags）。
@@ -998,6 +1025,21 @@ func jsonString(value []string) string {
 	}
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+// storedQuestions 读库里已经存着的问法；读不到就返回 nil（调用方会补成空数组）。
+func storedQuestions(tx *sql.Tx, id string) []string {
+	var metadata string
+	if err := tx.QueryRow(`SELECT metadata FROM memories WHERE id = ?`, id).Scan(&metadata); err != nil {
+		return nil
+	}
+	var meta struct {
+		Questions []string `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
+		return nil
+	}
+	return meta.Questions
 }
 
 func nullString(value string) sql.NullString {

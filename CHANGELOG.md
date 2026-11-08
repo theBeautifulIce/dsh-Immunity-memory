@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-11-08
+
+0.4.11 shipped the relationship graph in the Node SQLite layer, but the running
+installation is served by the Go service, so the live store still had zero `related`
+edges after a restart. The graph is now built on the side that actually owns the
+database: `go-service/internal/store/related.go` derives the same idf-weighted cosine
+neighbours (top 3 per item, threshold 0.22) and rebuilds them on open, after
+`UpsertItems` and after `DeleteItems`.
+
+Rebuilding them on open exposed a second, older bug: the Go `upsertItem` reassembled
+`metadata` from a fixed field list that never included `questions`, and a service
+restart makes the JS side treat every item as new, so one restart wiped the
+"能回答什么问题" entries for all 40 memories. `Item` now carries `Questions`, the write
+path keeps the stored values when the incoming item has none (the same protection the
+Node store got in 0.4.10), and `loadMemories` parses them back so the engine sees them.
+The lost entries were restored from the pre-dedupe backup with
+`scripts/backfill-questions.mjs`.
+
+### Added
+
+- `go-service/internal/store/related.go`: `SyncRelatedEdges()` — rebuilds `related`
+  edges from live items, pruning stale ones in the same transaction.
+- `tests/go-service.test.mjs`: related edges are created on write, and `questions`
+  survive a rewrite that does not carry them.
+
+### Fixed
+
+- Go service dropped `metadata.questions` on every upsert, and a service restart
+  rewrote the whole table, erasing the questions for every memory.
+- The "delete clears indexes" test assumed a fixed item count and broke as soon as
+  another test added items; it now compares before/after.
+
 ## [0.4.11] - 2026-11-08
 
 The relationship graph existed in code and in the settings, but it had no edges to walk:
