@@ -1138,6 +1138,10 @@ await test('人工关联：连上的条目没有共同词，也会被注入带�
       weight: weight ?? 1,
     })
     await localEngine.linkItems({ sourceId: anchor.id, targetId: neighbour.id }, 'agent')
+    const listed = await localEngine.itemLinks(anchor.id)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0].title, '周四去前台取材料', '关联列表要带上对端标题，不能只给 id')
+    assert.equal(listed[0].layer, 'L4')
     const stats = localEngine.injectionStats(Date.now(), undefined, { query: '灯箱验收单签了吗' })
     const ids = stats.lines.filter((line) => line.source === 'memory').map((line) => line.id)
     assert.ok(ids.includes(anchor.id), '命中条目本身应在注入里')

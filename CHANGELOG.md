@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-11-08
+
+Related entries in the panel showed memory ids instead of titles. The link list only ever
+carried the other end's id; the panel resolved titles from the entries on the current page,
+so anything outside that page fell back to `mem_…` — readable for a machine, useless for a
+person deciding whether the link is right.
+
+The list now resolves the other end against the whole store and returns its title, layer and
+kind alongside the edge, so the panel shows `L4 · 灯箱验收卡在物业` instead of an id even when
+that entry lives on another page. Ids still travel as the key, unchanged, so the API shape
+only gained fields.
+
+### Fixed
+
+- `links.list` / `memory_link` list results carry the other entry's title, layer and type,
+  not just its id.
+
 ## [0.4.17] - 2026-11-08
 
 The injection line cap was quietly doing the damage. `prompt.topN` was clamped to 30 in

@@ -2957,7 +2957,20 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     // 只能靠人工补一条。人工边存成 edge_type='manual'，重建自动边时不会被清掉。
     itemLinks: async (id, options = {}) => {
       if (typeof store.links !== 'function') return []
-      return store.links(String(id ?? ''), options ?? {})
+      const links = await store.links(String(id ?? ''), options ?? {})
+      const state = await ensureLoaded()
+      const byId = new Map((state.items ?? []).map((item) => [item.id, item]))
+      // 面板里只给 id 的话人看不出连的是哪条，这里把对端标题一并带上。
+      return (Array.isArray(links) ? links : []).map((link) => {
+        const other = byId.get(link?.id)
+        return {
+          ...link,
+          title: other?.title ?? '',
+          layer: other?.layer ?? '',
+          itemType: other?.type ?? 'memory',
+          notebook: other?.notebook ?? null,
+        }
+      })
     },
     linkItems: async (params = {}, actor = 'user') => {
       const sourceId = String(params.sourceId ?? '')

@@ -1327,8 +1327,8 @@ window.__ModuleLoader__.load({
             style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', padding: '4px 0' },
           },
             h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
-              h('span', null, titleOf(link.id)),
-              h('span', { className: 'mp-hint' }, `${link.edgeType ?? 'manual'} · ${Number(link.weight ?? 1).toFixed(2)}`)),
+              h('span', null, link.title !== undefined && link.title !== '' ? link.title : titleOf(link.id)),
+              h('span', { className: 'mp-hint' }, `${link.layer !== undefined && link.layer !== '' ? `${link.layer} · ` : ''}${link.edgeType ?? 'manual'} · ${Number(link.weight ?? 1).toFixed(2)}`)),
             h('button', {
               type: 'button',
               className: 'mp-btn is-ghost',
