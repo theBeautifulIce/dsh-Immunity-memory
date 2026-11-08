@@ -54,9 +54,9 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | Feature | Description |
 | --- | --- |
 | **Eight layers** | L0 Soul, L1 Core Thoughts, L2 Thought Flow, L3 Instincts, L4 Learned Behavior, L5 Goals, L6 Rotating Memory, L7 Situational Awareness. L0/L1/L3 are immutable by default; the agent chooses among L2/L4-L7 for mutable memories |
-| **Four notebooks** | Memory, Daily, Asset, Pitfall. Pitfall notes use the fixed "symptom / root cause / fix / prevention" shape and support record / search / check |
+| **Four notebooks** | Fragments, Daily, Asset, Pitfall. Fragments holds one-line facts (who / where / what it is called / how much); anything needing context belongs in Daily. Pitfall notes use the fixed "symptom / root cause / fix / prevention" shape and support record / search / check |
 | **Hybrid retrieval** | FTS5 bm25 + 384-d hashed-vector cosine + graph BFS; default weights 0.4 / 0.4 / 0.2, auto-normalized and configurable |
-| **Write protection** | Minimum content length, Jaccard dedupe, immutable-layer protection, L2 conflict detection; every mutable write/update must provide explicit `ttlDays`, never a silent permanent default |
+| **Write protection** | Minimum content length, Jaccard dedupe, immutable-layer protection (read-only for the agent, always editable by the user), L2 conflict detection; every mutable write/update must provide explicit `ttlDays`, never a silent permanent default |
 | **Conflict resolution** | L2 conflicts can keep one side or merge body/tags; the loser is archived with a supersedes link and the decision is audited |
 | **Forgetting curve** | Exponential decay by last access with configurable half-life and score floor; ranking only, `importance` is never rewritten |
 | **Project spaces** | Entries can carry `workspace`; writes default to the cwd, searches see the current project plus global entries, and `"*"` spans projects |

@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-08
+
+Audit transparency, human-source detection, and a clearer split between what
+the agent may touch and what only the user may touch.
+
+### Fixed
+
+- Audit denials for `memory_write` / `memory_update` now carry the pending
+  payload into the approval dialog: tool, action, target id, layer, importance,
+  TTL, tags, title, body, and quote. Previously the dialog showed only the
+  judge's comment, so approving meant approving text the user could not see.
+  The body is capped at 1200 characters and the whole reason at 2000.
+- The pending snapshot is built before `recordAuditRun`, so a store failure can
+  no longer produce a denial with no content.
+- `sourceQuote()` no longer discards user messages delivered by a channel
+  plugin: a `source.kind` of `plugin:<id>` (for example `plugin:dsh-onebot` for
+  QQ) now counts as the user's own words, and a missing or non-object source
+  falls back to `data.message.role` / `data.role`. When no quote can be found it
+  logs a warning with up to five source samples instead of staying silent.
+- Immutable layers (L0 / L1 / L3) are read-only to the agent only. The user can
+  edit and delete them in the panel without enabling anything;
+  `assertLayerWritable(active, layer, actor)` defaults to `'agent'`, and the
+  delete / update guards check `actor !== 'user'`. The settings switch is now
+  labelled "also let the agent edit immutable layers".
+- Approving or rejecting a consolidation candidate no longer fails with
+  `NOT_CANDIDATE` when the list legitimately shows states the guard did not
+  expect (`new`, `rejected`): the check now asks
+  `consolidationCandidates()` whether the entry is actually listed.
+
+### Added
+
+- `items.list` returns `content`, and the consolidation panel renders the
+  candidate body plus a state chip (not proposed / pending audit / rejected
+  before / consolidated) with per-row busy labels.
+- The notebook filter gained an "all notes" option (empty id); new items still
+  default to the `memory` notebook, which is now named "fragment notes" with a
+  one-line hint (who / where / what it is called / how much).
+
+### Tests
+
+- `tests/client.render.mjs` asserts the client never calls `window.prompt(`,
+  because some DSH desktop builds do not implement it and the click silently
+  does nothing.
+
 ## [0.4.2] - 2026-11-06
 
 ### Fixed
