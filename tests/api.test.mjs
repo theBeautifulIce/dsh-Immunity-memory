@@ -226,6 +226,19 @@ try {
     assert.equal(body.value.range.since, since)
   })
 
+  await test('diagnostics.bundle 一次带走状态、设置、备份与审计', async () => {
+    const { body } = await call('diagnostics.bundle')
+    const bundle = body.value
+    assert.ok(typeof bundle.generatedAt === 'string' && bundle.generatedAt.length > 10)
+    assert.ok(bundle.runtime.node.startsWith('v'))
+    assert.ok(bundle.status !== undefined && bundle.status !== null)
+    assert.ok(bundle.settings !== undefined && bundle.settings !== null)
+    assert.ok(Array.isArray(bundle.audit))
+    // JSON 存储没有 SQLite 备份列表：要明确说「0 份、没得校验」，而不是伪造通过。
+    assert.equal(bundle.backups.total, 0)
+    assert.equal(bundle.backups.latest, null)
+  })
+
   await test('audit.list 记录过前面的写操作', async () => {
     const { body } = await call('audit.list', { limit: 10 })
     assert.ok(body.value.audit.length >= 1)

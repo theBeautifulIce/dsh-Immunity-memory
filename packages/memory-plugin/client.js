@@ -2576,6 +2576,26 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 诊断包：版本、状态、设置（已打码）、备份校验、最近审计，一个文件带走。
+      async function exportDiagnostics() {
+        try {
+          const value = await api('diagnostics.bundle', {})
+          const text = JSON.stringify(value, null, 2)
+          if (typeof document !== 'undefined') {
+            const blob = new Blob([text], { type: 'application/json' })
+            const url = URL.createObjectURL(blob)
+            const anchor = document.createElement('a')
+            anchor.href = url
+            anchor.download = `dsh-memory-diagnostics-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`
+            anchor.click()
+            setTimeout(() => URL.revokeObjectURL(url), 2000)
+          }
+          notify(txt('已导出诊断包', 'Exported diagnostics'))
+        } catch (error) {
+          notify(error.message, 'error')
+        }
+      }
+
       async function backupNow() {
         try {
           const value = await api('backups.create', { tag: 'manual' })
@@ -2781,6 +2801,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', className: 'mp-btn', onClick: exportData }, txt('导出 JSON', 'Export JSON')),
             h('button', { type: 'button', className: 'mp-btn', onClick: backupNow }, txt('立即备份', 'Back up now')),
             h('button', { type: 'button', className: 'mp-btn', onClick: verifyBackupNow }, txt('校验最新备份', 'Verify latest backup')),
+            h('button', { type: 'button', className: 'mp-btn', onClick: exportDiagnostics }, txt('导出诊断包', 'Export diagnostics')),
             h('button', { type: 'button', className: 'mp-btn', onClick: rebuildIndexes }, txt('重建索引', 'Rebuild index')),
             h('button', { type: 'button', className: 'mp-btn', onClick: loadAudit }, txt('刷新审计日志', 'Refresh audit'))),
           h('div', { className: 'mp-list-plain' },

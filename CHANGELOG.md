@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.21] - 2026-11-08
+
+When something looks wrong, the useful question is "what state is the plugin actually in?" — and
+answering it from a chat window meant asking for status, settings, backup health and recent audit
+one at a time. The diagnostics bundle answers it in one file.
+
+`diagnostics.bundle` returns the moment it was generated, the runtime, the full status, the settings
+with credential-looking fields redacted, how many backups exist plus the verification result of the
+newest one, the last 20 audit entries and usage totals. The panel's「导出诊断包」button downloads it
+as `dsh-memory-diagnostics-<timestamp>.json`. It is read-only: nothing is written and no backup is
+touched.
+
+### Added
+
+- `diagnostics.bundle` plus a「导出诊断包」panel button: status, redacted settings, backup
+  verification, recent audit and usage in a single downloadable JSON file.
+
 ## [0.4.20] - 2026-11-08
 
 A backup that exists is not a backup that works. `backups.list` could only tell you the file was

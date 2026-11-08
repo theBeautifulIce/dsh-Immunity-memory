@@ -52,7 +52,8 @@ after user feedback, DSH API changes, or performance findings.
 - [x] Injection hit rate, token cost trend, and memory health score.
 - [x] Backup verification (restore into a temporary store and run integrity).
 - [ ] Retention policies per layer and per notebook.
-- [ ] Structured JSON logs with rotation and a downloadable diagnostics bundle.
+- [ ] Structured JSON logs with rotation.
+- [x] Downloadable diagnostics bundle (status, settings, backups and audit in one file).
 
 ## v1.0 — Production readiness
 

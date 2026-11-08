@@ -66,6 +66,7 @@ export const API_METHODS = [
   'data.import',
   'health',
   'diagnostics',
+  'diagnostics.bundle',
   'search.stats',
   'indexes.rebuild',
   'backups.list',
@@ -134,6 +135,28 @@ function createMethods(engineOf, context = {}) {
     },
     diagnostics() {
       return engine().diagnostics()
+    },
+    // 诊断包：把「现在到底什么状态」拼成一份可以直接交出去的 JSON。
+    // 只读、不写库；凭据类字段一律打码，避免把 token 带进聊天窗口。
+    async 'diagnostics.bundle'() {
+      const backups = typeof store?.listBackups === 'function' ? await store.listBackups() : []
+      let latest = null
+      if (backups.length > 0) {
+        try {
+          latest = engine().verifyBackup()
+        } catch (error) {
+          latest = { ok: false, name: backups[0]?.name ?? '', integrity: message(error) }
+        }
+      }
+      return {
+        generatedAt: new Date().toISOString(),
+        runtime: { node: process.version, platform: process.platform, arch: process.arch },
+        status: engine().status(),
+        settings: redactSecrets(engine().getSettings()),
+        backups: { total: backups.length, latest },
+        audit: engine().auditList(20),
+        usage: engine().usageStats({}),
+      }
     },
     'hooks.list'() {
       return engine().writeHooks.list()
@@ -504,6 +527,19 @@ export function sendJson(res, status, payload) {
   res.setHeader('content-length', Buffer.byteLength(text))
   res.setHeader('cache-control', 'no-store')
   res.end(text)
+}
+
+/** 递归给凭据类字段打码：诊断包常被贴进聊天窗口，token 不能跟着走。 */
+function redactSecrets(value, depth = 0) {
+  if (depth > 6 || value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map((entry) => redactSecrets(entry, depth + 1))
+  const out = {}
+  for (const [key, entry] of Object.entries(value)) {
+    out[key] = /token|secret|password|apikey|api_key|credential/i.test(key)
+      ? '***'
+      : redactSecrets(entry, depth + 1)
+  }
+  return out
 }
 
 export { LAYERS, NOTEBOOKS, clone }
