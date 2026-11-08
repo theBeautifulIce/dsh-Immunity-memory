@@ -64,6 +64,31 @@ after user feedback, DSH API changes, or performance findings.
 - [ ] Complete Chinese/English docs and a contributor guide.
 - [ ] At least one external user upgrade story validated end to end.
 
+## Measured limits of lexical ranking
+
+Measured on the public `natural-timegrid-20261101-v2` set (714 questions, 1 turn
+per item, 30-item injection budget), single-run v0.4.10 code:
+
+| variant | @1 | @3 | @10 | in list | marked hits | wrong marks |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 62.7% | 83.6% | 90.3% | 94.1% | 22.1% | 9.9% |
+| PRF off | 63.0% | 83.8% | 90.3% | 94.0% | — | — |
+| PRF seed 0.15 | 60.6% | 83.6% | 90.6% | — | — | — |
+| BM25 b = 0.5 | 62.7% | 83.5% | 90.1% | 94.1% | 17.8% | 8.4% |
+| BM25 b = 0.9 | 61.9% | 83.6% | 90.5% | 94.3% | 18.5% | 7.8% |
+
+Every PRF/BM25 parameter, including the title-and-questions term weight, moves
+recall by at most two questions — noise. Lowering `b` only trims wrong hit
+badges. Title/question weight is not measurable on this set at all: the benchmark
+items are titled `day N - turn N` and carry no questions, so the strong-token
+channel never fires (three weight variants scored identically to the baseline).
+
+Conclusion: lexical ranking is saturated at ~83.6% @3 and 94.1% in-list. The
+remaining 42 misses are paraphrases, pronoun references and answers that span
+several turns. Going further requires semantic similarity (an actual embedding
+model, not the 384-dim feature hash) or populated relationship edges — the live
+store currently has none.
+
 ## Non-goals
 
 - A hosted multi-tenant memory service.
