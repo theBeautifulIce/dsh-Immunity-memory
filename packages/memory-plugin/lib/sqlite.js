@@ -629,6 +629,7 @@ function rowFromMemory(row) {
     title: row.title,
     content: row.content,
     tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+    questions: Array.isArray(metadata.questions) ? metadata.questions : [],
     importance: clampImportance((row.importance_score ?? 0.5) * 10),
     status: row.status,
     pinned: metadata.pinned === true,
@@ -754,6 +755,7 @@ function upsertItem(database, item) {
   const metadata = {
     notebook: item.notebook ?? null,
     tags: item.tags ?? [],
+    questions: item.questions ?? [],
     pinned: item.pinned === true,
     expiresAt: item.expiresAt ?? null,
     source: item.source ?? null,

@@ -54,6 +54,10 @@ const PLUGIN_VERSION = JSON.parse(readFileSync(new URL('../package.json', import
 const MAX_TITLE = 240
 const MAX_TAGS = 24
 const MAX_TAG_LENGTH = 48
+// 「能回答什么问题」：入库时替未来的人写好问法，检索时直接比这句话，
+// 不用再从「这条讲什么」翻译回「你会怎么问」。每条最多几句，越短越准。
+const MAX_QUESTIONS = 4
+const MAX_QUESTION_LENGTH = 120
 const MAX_CONTENT = 200000
 const DEDUPE_SCAN_LIMIT = 1200
 // 变更快照只保留可审阅的字段；正文过长时保留开头并在 UI/API 标记截断。
@@ -65,7 +69,7 @@ const MAX_SOURCE_QUOTE = 2000
 const MAX_SUPERSEDES = 20
 const AUDIT_RUN_STATUSES = ['running', 'approved', 'rejected', 'needs_user', 'failed']
 const AUDIT_VERDICTS = ['approve', 'reject', 'merge', 'needs_user']
-const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'key', 'supersedes', 'supersededBy']
+const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'questions', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'key', 'supersedes', 'supersededBy']
 
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
 // 相关度阈值：低于它只当「背景资料」，不标命中，避免满屏都是命中。
@@ -459,6 +463,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         snapshot.contentTruncated = text.length > MAX_CHANGE_CONTENT
       } else if (field === 'tags') {
         snapshot.tags = Array.isArray(item.tags) ? item.tags.slice(0, 24) : []
+      } else if (field === 'questions') {
+        snapshot.questions = Array.isArray(item.questions) ? item.questions.slice(0, MAX_QUESTIONS) : []
       } else if (field === 'title') {
         snapshot.title = truncate(item.title, MAX_CHANGE_TEXT)
       } else if (field === 'notebook') {
@@ -1177,6 +1183,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       title,
       content,
       tags: normalizeTags(input.tags),
+      questions: normalizeQuestions(input.questions),
       importance: clampInt(input.importance, 1, 10, active.write.defaultImportance),
       status: 'active',
       pinned: input.pinned === true,
@@ -1287,6 +1294,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (patch.title !== undefined) next.title = truncate(String(patch.title).trim(), MAX_TITLE) || before.title
     if (patch.content !== undefined) next.content = truncate(String(patch.content), MAX_CONTENT)
     if (patch.tags !== undefined) next.tags = normalizeTags(patch.tags)
+    if (patch.questions !== undefined) next.questions = normalizeQuestions(patch.questions)
     if (patch.importance !== undefined) next.importance = clampInt(patch.importance, 1, 10, before.importance)
     if (patch.layer !== undefined) {
       const layer = normalizeLayer(patch.layer)
@@ -1332,6 +1340,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     }
     if (patch.supersedes !== undefined) next.supersedes = normalizeIdList(patch.supersedes)
     if (patch.title === undefined && patch.content === undefined && patch.tags === undefined
+      && patch.questions === undefined
       && patch.importance === undefined && patch.layer === undefined && patch.pinned === undefined
       && patch.workspace === undefined
       && patch.status === undefined && patch.ttlDays === undefined && patch.notebook === undefined
@@ -2367,6 +2376,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       '【自动记忆】当用户纠正你、要求你记住、表达明显满意/不满，或你自己发现答错时，调用 memory_capture。'
       + '事实写到哪一层、TTL 多长由你按内容判断；若这次判断形成了可复用的规则，把它作为 L4 学习层记忆写入。'
       + '笔记由代码按记事本去重。',
+      '【能回答什么问题】每条记忆顺手写一句 questions：用他当时问法或下次会问的说法写（例如“怎么才能不把钱花超”），'
+      + '只从原话与事实里抽，不要照着答案反推、不要写成标签。这句话检索时等价于第二个标题，写好了下次才找得到。',
     ]
     const pending = capture.pending.slice(-5)
     if (pending.length > 0) {
@@ -2426,6 +2437,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           content: fact.content,
           ttlDays: fact.ttlDays,
           tags: fact.tags,
+          questions: fact.questions,
           importance: fact.importance,
           key: fact.key,
           workspace: fact.workspace ?? workspace,
@@ -2469,6 +2481,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           title: note.title,
           content,
           tags: note.tags,
+          questions: note.questions,
           importance: note.importance,
           workspace: note.workspace ?? workspace,
           quote: note.reason ?? note.quote,
@@ -2980,12 +2993,16 @@ function queryRelevance(item, queryTokens, stats = undefined) {
   const titleTokens = tokenize(item.title)
   const contentTokens = tokenize(item.content)
   const tagTokens = tokenize(item.tags.join(' '))
+  const questionTokens = tokenize((item.questions ?? []).join(' '))
+  // 标题与「能回答什么问题」同属「这条在讲什么」的高权重面：同一个词不重复计分，
+  // 但两边任一对上就够了 —— 这样归一化分母不变，0.12 这个绝对阈值仍然有意义。
+  const strongTokens = new Set([...titleTokens, ...questionTokens])
   if (stats === undefined) {
     let titleHits = 0
     let contentHits = 0
     let tagHits = 0
     for (const token of queryTokens) {
-      if (titleTokens.has(token)) titleHits += 1
+      if (strongTokens.has(token)) titleHits += 1
       if (contentTokens.has(token)) contentHits += 1
       if (tagTokens.has(token)) tagHits += 1
     }
@@ -3002,7 +3019,7 @@ function queryRelevance(item, queryTokens, stats = undefined) {
     const df = stats.df.get(token) ?? 0
     if (df === 0) continue
     const idf = Math.log(1 + (stats.n - df + 0.5) / (df + 0.5))
-    const tf = (titleTokens.has(token) ? 2 : 0) + (contentTokens.has(token) ? 1 : 0) + (tagTokens.has(token) ? 1.5 : 0)
+    const tf = (strongTokens.has(token) ? 2 : 0) + (contentTokens.has(token) ? 1 : 0) + (tagTokens.has(token) ? 1.5 : 0)
     if (tf > 0) raw += idf * ((tf * (k1 + 1)) / (tf + norm))
     ceiling += idf * (k1 + 1)
   }
@@ -3038,7 +3055,7 @@ function corpusStats(candidates) {
  */
 function matchedQueryTokens(item, queryTokens) {
   if (queryTokens === undefined || queryTokens.size === 0) return 0
-  const haystack = tokenize(item.title + ' ' + item.content + ' ' + item.tags.join(' '))
+  const haystack = tokenize(searchableText(item))
   let matched = 0
   for (const token of queryTokens) if (haystack.has(token)) matched += 1
   return matched
@@ -3326,6 +3343,8 @@ function normalizeChangeSnapshot(raw) {
       out.contentTruncated = raw.contentTruncated === true
     } else if (field === 'tags') {
       out.tags = Array.isArray(raw.tags) ? raw.tags.filter((tag) => typeof tag === 'string').slice(0, 24) : []
+    } else if (field === 'questions') {
+      out.questions = Array.isArray(raw.questions) ? raw.questions.filter((question) => typeof question === 'string').slice(0, MAX_QUESTIONS) : []
     } else if (field === 'notebook') {
       out.notebook = NOTEBOOK_IDS.includes(raw.notebook) ? raw.notebook : null
     } else if (field === 'title') {
@@ -3538,6 +3557,7 @@ function normalizeItem(raw) {
     title: title || deriveTitle(content, type),
     content,
     tags: normalizeTags(raw.tags),
+    questions: normalizeQuestions(raw.questions),
     importance: clampInt(raw.importance, 1, 10, 5),
     status: ITEM_STATUSES.includes(raw.status) ? raw.status : 'active',
     pinned: raw.pinned === true,
@@ -3599,6 +3619,23 @@ function normalizeWorkspace(value) {
   if (typeof value !== 'string') return null
   const text = value.trim().replace(/\\/g, '/').replace(/\/+$/, '')
   return text === '' ? null : truncate(text.toLowerCase(), 400)
+}
+
+function normalizeQuestions(value) {
+  if (!Array.isArray(value)) return []
+  const out = []
+  const seen = new Set()
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const text = entry.replace(/\s+/g, ' ').trim()
+    if (text === '') continue
+    const key = text.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(truncate(text, MAX_QUESTION_LENGTH))
+    if (out.length >= MAX_QUESTIONS) break
+  }
+  return out
 }
 
 function normalizeTags(value) {

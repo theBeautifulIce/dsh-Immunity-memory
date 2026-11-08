@@ -1209,6 +1209,7 @@ window.__ModuleLoader__.load({
         title: item.title ?? '',
         content: item.content ?? '',
         tags: (item.tags ?? []).join(', '),
+        questions: (item.questions ?? []).join(' / '),
         workspace: item.workspace ?? '',
         importance: item.importance ?? 5,
         layer: item.layer ?? 'L5',
@@ -1226,6 +1227,7 @@ window.__ModuleLoader__.load({
         title: String(draft.title ?? ''),
         content: String(draft.content ?? ''),
         tags: String(draft.tags ?? '').split(/[,，;；\s]+/).map((tag) => tag.trim()).filter((tag) => tag !== ''),
+        questions: String(draft.questions ?? '').split(/[\n/|]+/).map((question) => question.trim()).filter((question) => question !== ''),
         workspace: String(draft.workspace ?? '').trim(),
         importance: Number(draft.importance) || 5,
         layer: String(draft.layer ?? 'L5'),
@@ -1313,6 +1315,18 @@ window.__ModuleLoader__.load({
             placeholder: txt('用逗号分隔，例如：构建, 偏好', 'Comma separated, e.g. build, preference'),
             onChange: (event) => update('tags', event.target.value),
           })),
+        h('label', { className: 'mp-field' },
+          h('span', { className: 'mp-label' }, txt('能回答什么问题', 'Questions it answers')),
+          h('input', {
+            className: 'mp-input',
+            value: draft.questions ?? '',
+            placeholder: txt('用 / 分隔，写成他会问的句子，例如：怎么才能不把钱花超',
+              'Separate with /, phrased as the user would ask'),
+            onChange: (event) => update('questions', event.target.value),
+          }),
+          h('span', { className: 'mp-hint' }, txt(
+            '这句话按标题的权重参与召回，写具体问法比堆关键词有用。',
+            'Indexed like a second title; a concrete question beats keyword stuffing.'))),
         h('label', { className: 'mp-field' },
           h('span', { className: 'mp-label' }, txt('项目空间', 'Project space')),
           h('input', {
@@ -1914,14 +1928,14 @@ window.__ModuleLoader__.load({
       )
     }
 
-    const DIFF_FIELD_ORDER = ['title', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'content']
+    const DIFF_FIELD_ORDER = ['title', 'layer', 'notebook', 'tags', 'questions', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'content']
     const DIFF_FIELD_LABELS = {
       zh: {
-        title: '标题', layer: '记忆层', notebook: '记事本', tags: '标签', importance: '重要度',
+        title: '标题', layer: '记忆层', notebook: '记事本', tags: '标签', questions: '能回答什么问题', importance: '重要度',
         status: '状态', pinned: '置顶', ttlDays: '保鲜期', expiresAt: '过期时间', content: '正文',
       },
       en: {
-        title: 'Title', layer: 'Layer', notebook: 'Notebook', tags: 'Tags', importance: 'Importance',
+        title: 'Title', layer: 'Layer', notebook: 'Notebook', tags: 'Tags', questions: 'Questions it answers', importance: 'Importance',
         status: 'Status', pinned: 'Pinned', ttlDays: 'TTL', expiresAt: 'Expires at', content: 'Content',
       },
     }
@@ -2022,6 +2036,10 @@ window.__ModuleLoader__.load({
       if (field === 'tags') {
         const tags = Array.isArray(value) ? value.filter((tag) => String(tag).trim() !== '') : []
         return tags.length === 0 ? txt('（无标签）', '(no tags)') : tags.map((tag) => `#${tag}`).join(' ')
+      }
+      if (field === 'questions') {
+        const questions = Array.isArray(value) ? value.filter((question) => String(question).trim() !== '') : []
+        return questions.length === 0 ? txt('（无）', '(none)') : questions.join(' / ')
       }
       if (field === 'pinned') return value ? txt('是', 'Yes') : txt('否', 'No')
       if (field === 'ttlDays') {

@@ -66,7 +66,7 @@
 | **记忆模板** | 每个模板按 L0/L1/L3 逐条配置不可变记忆，可新增多套并热切换；L2 与 L4-L7 始终共享，不会因切换模板被复制或删除 |
 | **写入审计** | 每次 `memory_write` / `memory_update` 前由无工具权限的独立子智能体对照用户原话审计；可开关、可影子运行，失败/超时放行；待确认候选在界面批准后才落库，审计 token 计入账本 |
 | **固化机制** | 反复写入、更新或命中的记忆进入候选；经 `memory_consolidate` 审计或界面确认后永久固化到 L1/L3，全程写审计 |
-| **提示词注入** | 每轮把最相关的记忆拼进系统提示词：排序用「当轮上下文」（最近几条用户消息 + 工具报错，只在内存、半小时过期），打分是 BM25（少见词权重更高、长条目打折）＋虚词过滤＋伪相关反馈＋少量同义扩展（问「多大」也会找写着出生年份的那条），同分时新记的优先；只有明显最相关的那一条（至少对上两个查询词、且高于第二名 1.5 倍）才带 `·命中` 标记，无关提问不会乱标；正文按相关度分层给（命中条给全文，其余只留一行线索）；页面显示注入 token 总量，展开可看逐层消耗；可预览、可关闭 |
+| **提示词注入** | 每轮把最相关的记忆拼进系统提示词：排序用「当轮上下文」（最近几条用户消息 + 工具报错，只在内存、半小时过期），打分是 BM25（少见词权重更高、长条目打折）＋虚词过滤＋伪相关反馈＋少量同义扩展（问「多大」也会找写着出生年份的那条），同分时新记的优先；只有明显最相关的那一条（至少对上两个查询词、且高于第二名 1.5 倍）才带 `·命中` 标记，无关提问不会乱标；正文按相关度分层给（命中条给全文，其余只留一行线索）；条目还可带一句「能回答什么问题」（`questions`），按与标题同样的权重参与召回、不占注入 token；页面显示注入 token 总量，展开可看逐层消耗；可预览、可关闭 |
 | **用量账本** | 记录每次检索的查询 token、结果 token，按工具/类型拆分；记事本视图统计含记事本结果的查询 |
 | **变更 diff** | 创建/更新/删除/批量/固化都有前后快照；界面用 git 风格红绿差异展示，正文按行 LCS，智能体拿到无损 JSON |
 | **自动维护** | 资源上限、过期清理、轮转归档、去重、反思提升、固化扫描、审计与变更历史压缩；支持定时与手动触发 |
@@ -198,11 +198,11 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 
 | 工具 | 作用 |
 | --- | --- |
-| `memory_write` | 写入记忆或记事本条目；必须显式选择可修改层并给出 `ttlDays`；可带实体键 `key`、来源原话 `quote`、被取代 id `supersedes` |
+| `memory_write` | 写入记忆或记事本条目；必须显式选择可修改层并给出 `ttlDays`；可带实体键 `key`、来源原话 `quote`、被取代 id `supersedes`、能回答什么问题 `questions`（最多 4 句，按标题权重参与召回） |
 | `memory_capture` | 自动记忆捕获：智能体提交事实与记事本条目，显式选择层级/TTL；记事本按同本归一化正文去重；可传 `pendingId` 清除已处理的提醒 |
 | `memory_search` | 混合检索；返回评分拆解、层级、标签、命中原因 |
 | `memory_get` | 按 id 读取完整正文、实体键与来源原话 |
-| `memory_update` | 修改标题、正文、标签、重要度、层、保鲜期；版本号递增；支持实体键与 `supersedes` |
+| `memory_update` | 修改标题、正文、标签、能回答什么问题、重要度、层、保鲜期；版本号递增；支持实体键与 `supersedes` |
 | `memory_forget` | 删除条目并清理冲突引用 |
 | `memory_stats` | 条目数、分层/类型分布、存储与健康状态 |
 | `memory_usage` | 查询 token 用量账本，按工具/类型拆分 |
@@ -310,7 +310,7 @@ Go 服务二进制在启动时复制到 `<库目录>\service\<platform>-<arch>\`
 │  ├─ bin/<platform>-<arch>/  # 打包进插件的 Go 服务
 │  ├─ native/<platform>-<arch>/# 打包进插件的 Rust 核心
 │  └─ locale/                 # 中英文插件元数据
-├─ scripts/                   # build / check / benchmark / bench-retrieval / inspect / probe
+├─ scripts/                   # build / check / benchmark / bench-retrieval / questions-ab / inspect / probe
 ├─ tests/                     # audit / engine / engine-go / tools / search / sqlite / native / api / render
 ├─ CHANGELOG.md
 ├─ ROADMAP.md
@@ -327,6 +327,8 @@ node tests/go-service.test.mjs
 node scripts/benchmark.mjs --items 2000 --queries 100 --graph 50 --out docs/性能报告.md
 node scripts/bench-retrieval.mjs  # 公开题库的检索层评测（需先 BENCH_DIR 指向 chat-memory-benchmark 克隆）
 node scripts/recall-eval.mjs      # 自带的 20 题召回自检
+node scripts/questions-ab.mjs sample 50   # 按原文抽轮次写问法（不打印题面）
+node scripts/questions-ab.mjs eval        # 同一批题对比「有/无 questions」
 node scripts/inspect-db.mjs   # 只读查看当前记忆库
 ```
 

@@ -178,4 +178,35 @@ await test('命中条目给全文，背景条目只留一行', async () => {
   assert.ok(background.chars < 150, '背景条只留一行，不占预算')
 })
 
+await test('能回答什么问题：问法写在条目里，换个说法也找得到', async () => {
+  // 这条只把「问法」写进 questions，正文里用的是另一套词（火锅约人、聚餐、排期）。
+  // 只靠正文词面本该排不到前面，靠 questions 才上来。
+  await engine.createItem({
+    layer: 'L4',
+    title: '周末聚餐的排期约定',
+    content: '周六晚上七点，老地方，人多了就再加一张桌子。',
+    questions: ['这周末什么时候开饭', '聚餐几点'],
+    ttlDays: 30,
+    importance: 3,
+  }, 'user')
+  engine.noteTurnContext({ sessionId: 'session-i', kind: 'user', text: '这周末什么时候开饭' })
+  const stats = engine.injectionStats()
+  const lines = memoryLines(stats)
+  assert.match(lines[0].title, /周末聚餐的排期约定/, 'questions 应当和标题同权，把它顶到第一')
+  assert.match(stats.text, /·命中/, '命中判断也要把 questions 算上')
+})
+
+await test('questions 最多存 4 条，去空白去重', async () => {
+  const item = await engine.createItem({
+    layer: 'L4',
+    title: '问法上限',
+    content: '测试用条目，正文要够八个字符。',
+    questions: ['一', '二', ' 二 ', '三', '四', '五'],
+    ttlDays: 30,
+  }, 'user')
+  assert.deepEqual(item.questions, ['一', '二', '三', '四'])
+  const updated = await engine.updateItem(item.id, { questions: ['改过的问题'] }, 'user')
+  assert.deepEqual(updated.questions, ['改过的问题'], 'update 应整体替换 questions')
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

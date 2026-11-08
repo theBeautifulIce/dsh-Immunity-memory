@@ -65,10 +65,11 @@ export function estimateTokens(text) {
   return Math.max(1, Math.ceil(wide + narrow / 4))
 }
 
-/** 一条记忆可检索的文本：标题 + 正文 + 标签。 */
+/** 一条记忆可检索的文本：标题 + 正文 + 标签 + 「能回答什么问题」。 */
 export function searchableText(item) {
   const tags = Array.isArray(item?.tags) ? item.tags.join(' ') : ''
-  return `${item?.title ?? ''} ${item?.content ?? ''} ${tags}`
+  const questions = Array.isArray(item?.questions) ? item.questions.join(' ') : ''
+  return `${item?.title ?? ''} ${item?.content ?? ''} ${tags} ${questions}`
 }
 
 /** FTS5 用的 search_text：把分词结果用空格拼起来（中文已切成二元组）。 */

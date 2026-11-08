@@ -6,6 +6,45 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-08
+
+Tags were ranking topic words, not the way he actually asks. This release adds an
+explicit `questions` field — one to four sentences written in the asker's voice —
+that carries the same weight as the title during recall. The A/B is honest: the
+questions were written from the source turns only, never from the exam text, and on
+61 single-anchor questions that share those turns recall@1 went 49.2% → 57.4%
+(15 better, 1 worse). Entries without questions behave exactly as before.
+
+### Added
+
+- `questions` on memories and notebook entries (`MAX_QUESTIONS = 4`,
+  `MAX_QUESTION_LENGTH = 120`, `normalizeQuestions()`): whitespace collapsed,
+  lower-cased de-duplication, truncated. Stored inside the `metadata` JSON column, so
+  no schema migration and existing rows keep working.
+- Retrieval: `queryRelevance()` folds title and questions into one `strongTokens` set
+  (2× weight, each token counted once) and `matchedQueryTokens()` sponges
+  `searchableText(item)`, so a question's wording also counts as hit evidence.
+  Questions are index-only — they never enter the injected body or the token budget.
+- Capture prompt now asks for one 「能回答什么问题」 sentence per item, written from the
+  original wording, explicitly not reverse-engineered from the answer.
+- Surface: `memory_write` / `memory_update` / `memory_capture` accept it, the panel
+  editor has a 「能回答什么问题 / Questions it answers」 box (`/`-separated), diff labels
+  and `memory_get` show it.
+- `scripts/questions-ab.mjs`: samples single-anchor turns (source text only, the exam
+  question is never printed), then A/Bs the same exams with and without the authored
+  questions.
+
+### Changed
+
+- `tests/recall.test.mjs` is 12 items (was 10): a question phrased differently from the
+  body still ranks first and is labelled `·命中`, and questions are capped and
+  de-duplicated on write and replace wholesale on update.
+- Full `scripts/check.mjs` green: 40 modules, 61 engine + 12 audit + 15 tools +
+  10 search + 12 recall + 13 sqlite + 6 native + 12 go-service + 8 engine×go,
+  21 panel renders.
+- `scripts/bench-retrieval.mjs` holds at 54.3% @1 — benchmark items carry no
+  questions, so this round should not move that number, and it did not.
+
 ## [0.4.7] - 2026-11-08
 
 Smaller, sharper digest after 0.4.6's ranking work. This round is honest about what

@@ -66,7 +66,7 @@ This is not "dump the chat history into a JSON file", and it is not "wrap a vect
 | **Memory templates** | Each template configures immutable memories per L0/L1/L3, with multiple templates and hot switching; L2 and L4-L7 are shared and are never copied or deleted by a switch |
 | **Write audit** | Before every `memory_write` / `memory_update`, a tool-less isolated subagent audits it against the user's turn; optional enforce or shadow mode, fail-open on errors/timeouts, with pending candidates approved in the UI and per-run token accounting |
 | **Consolidation** | Frequently written, updated, or recalled memories become candidates; after `memory_consolidate` review or UI approval they become permanent L1/L3 memories, fully audited |
-| **Prompt injection** | The most relevant memories are injected into the system prompt each turn. Ranking uses per-turn context (recent user messages + failed tool results, memory only, 30-minute TTL) and scores with BM25 (rare terms weigh more, long items are penalised) plus stop-word filtering, pseudo-relevance feedback and a small synonym table (asking 「多大」 also finds the item that only states a birth year); ties go to the newer item. Only the clearly best match of the turn is labelled `·命中` (it must cover at least two query tokens and beat the runner-up by 1.5×), so unrelated questions stay unmarked. Body length is layered by relevance (hit entries get the full text, the rest one line); the page shows total injected tokens and a per-layer breakdown; preview and disable are supported |
+| **Prompt injection** | The most relevant memories are injected into the system prompt each turn. Ranking uses per-turn context (recent user messages + failed tool results, memory only, 30-minute TTL) and scores with BM25 (rare terms weigh more, long items are penalised) plus stop-word filtering, pseudo-relevance feedback and a small synonym table (asking 「多大」 also finds the item that only states a birth year); ties go to the newer item. Only the clearly best match of the turn is labelled `·命中` (it must cover at least two query tokens and beat the runner-up by 1.5×), so unrelated questions stay unmarked. Body length is layered by relevance (hit entries get the full text, the rest one line); entries may also carry a 「能回答什么问题」 / `questions` line, which ranks with the same weight as the title and costs no injection tokens; the page shows total injected tokens and a per-layer breakdown; preview and disable are supported |
 | **Usage ledger** | Records query tokens and result tokens per search, split by tool/type; the notebook view counts queries whose results include notebook entries |
 | **Change diff** | Create/update/delete/bulk/consolidate snapshots; the UI renders a git-style red/green diff with line-level LCS, while agents receive lossless JSON |
 | **Maintenance** | Resource caps, expiry cleanup, rotation archive, dedupe, reflection promotion, consolidation scan, audit/changelog compaction; scheduled or manual |
@@ -198,11 +198,11 @@ At startup the Go binary is copied to `<store-dir>\service\<platform>-<arch>\` b
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_write` | Write a memory or notebook entry; the agent must choose a mutable layer and provide `ttlDays`; optional entity `key`, source `quote`, and `supersedes` |
+| `memory_write` | Write a memory or notebook entry; the agent must choose a mutable layer and provide `ttlDays`; optional entity `key`, source `quote`, `supersedes`, and `questions` (up to 4 phrasings, ranked with title weight) |
 | `memory_capture` | Automatic capture: submit facts and notebook entries with an explicit layer/TTL; notebook entries are deduplicated by code within the same notebook; pass `pendingId` to clear a handled reminder |
 | `memory_search` | Hybrid retrieval; returns score breakdown, layer, tags, and match reasons |
 | `memory_get` | Read full content, entity key, and source quote by id |
-| `memory_update` | Change title, content, tags, importance, layer, TTL; increments version; supports `key` and `supersedes` |
+| `memory_update` | Change title, content, tags, questions, importance, layer, TTL; increments version; supports `key` and `supersedes` |
 | `memory_forget` | Delete an entry and clean up conflict references |
 | `memory_stats` | Entry counts, layer/type distribution, storage and health |
 | `memory_usage` | Query the token usage ledger, split by tool/type |
@@ -310,7 +310,7 @@ Numbers vary with hardware, data distribution, and whether the native core is en
 │  ├─ bin/<platform>-<arch>/  # Go service shipped with the plugin
 │  ├─ native/<platform>-<arch>/# Rust core shipped with the plugin
 │  └─ locale/                 # Chinese/English plugin metadata
-├─ scripts/                   # build / check / benchmark / bench-retrieval / inspect / probe
+├─ scripts/                   # build / check / benchmark / bench-retrieval / questions-ab / inspect / probe
 ├─ tests/                     # audit / engine / engine-go / tools / search / sqlite / native / api / render
 ├─ CHANGELOG.md
 ├─ ROADMAP.md
@@ -327,6 +327,8 @@ node tests/go-service.test.mjs
 node scripts/benchmark.mjs --items 2000 --queries 100 --graph 50 --out docs/性能报告.md
 node scripts/bench-retrieval.mjs  # retrieval-layer run on the public benchmark (point BENCH_DIR at a chat-memory-benchmark clone)
 node scripts/recall-eval.mjs      # bundled 20-question recall self-check
+node scripts/questions-ab.mjs sample 50   # sample turns and write questions from the source text (exam questions are never printed)
+node scripts/questions-ab.mjs eval        # A/B the same exams with and without questions
 node scripts/inspect-db.mjs   # read-only view of the current memory store
 ```
 
