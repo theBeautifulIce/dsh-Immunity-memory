@@ -5,7 +5,7 @@
  * 运行：node tests/client.render.mjs
  */
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
@@ -13,6 +13,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_FILE = join(REPO, 'packages', 'memory-plugin', 'client.js')
+
+// DSH 桌面端不保证实现 window.prompt；任何按钮处理函数只要先调用它，
+// 就可能直接抛错或挂起，表现为“点击无反应”。这里锁住这条约束。
+const clientSource = readFileSync(CLIENT_FILE, 'utf8')
+assert.ok(
+  !/window\.prompt\s*\(/.test(clientSource),
+  '客户端不应调用 window.prompt；请在页面内渲染输入框或直接提交可选空备注',
+)
 
 const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
 const profilePkg = join(dshHome, 'profiles', 'web', 'package.json')

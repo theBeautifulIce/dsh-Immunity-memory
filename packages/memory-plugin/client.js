@@ -208,6 +208,9 @@ window.__ModuleLoader__.load({
       .mp-kpi b { display:block; font-size:18px; line-height:1.2 }
       .mp-consolidate-row { border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px; padding:8px 10px;
         display:flex; flex-direction:column; gap:6px }
+      .mp-consolidate-content { white-space:pre-wrap; word-break:break-word; max-height:190px; overflow:auto;
+        font-size:12px; line-height:1.65; background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.04));
+        border-radius:6px; padding:6px 8px }
       /* 变更类型改用操作徽章内的小圆点标识，避免卡片左侧出现粗色条。 */
       .mp-change-card.is-create .mp-chip:first-child,
       .mp-change-card.is-delete .mp-chip:first-child,
@@ -911,7 +914,7 @@ window.__ModuleLoader__.load({
       const [layer, setLayer] = useState('')
       const [status, setStatus] = useState('usable')
       const [sort, setSort] = useState('updated')
-      const [notebook, setNotebook] = useState('memory')
+      const [notebook, setNotebook] = useState('')
       const [page, setPage] = useState(0)
       const [result, setResult] = useState({ items: [], total: 0, limit: settings.ui.pageSize })
       const [loading, setLoading] = useState(false)
@@ -934,7 +937,7 @@ window.__ModuleLoader__.load({
             limit: pageSize,
             offset: page * pageSize,
           }
-          if (isNote) params.notebook = notebook
+          if (isNote && notebook !== '') params.notebook = notebook
           const value = appliedQuery === ''
             ? await api('items.list', params)
             : await api('items.search', { ...params, query: appliedQuery })
@@ -973,7 +976,7 @@ window.__ModuleLoader__.load({
           importance: settings.write.defaultImportance,
           // 用户新建时先选 L4，可在下拉框里改；智能体写入则由它自己判断层级。
           layer: 'L4',
-          notebook,
+          notebook: notebook === '' ? 'memory' : notebook,
           ttlDays: kind === 'note' ? '' : String(settings.write.defaultTtlDays ?? 30),
           pinned: false,
           status: 'active',
@@ -1228,7 +1231,7 @@ window.__ModuleLoader__.load({
         layer: String(draft.layer ?? 'L5'),
         pinned: draft.pinned === true,
       }
-      if (kind === 'note') payload.notebook = draft.notebook ?? notebook
+      if (kind === 'note') payload.notebook = draft.notebook ?? (notebook === '' ? 'memory' : notebook)
       if (ttlText !== '') payload.ttlDays = Number(ttlText)
       // 新建只给 active；已有条目的状态改动在编辑区显式提交。
       if (draft.status !== undefined) payload.status = draft.status
@@ -1239,7 +1242,8 @@ window.__ModuleLoader__.load({
       const txt = (zh, en) => (lang === 'zh' ? zh : en)
       const update = (key, value) => setDraft({ ...draft, [key]: value })
       const immutable = ['L0', 'L1', 'L3'].includes(draft.layer)
-      const readOnly = immutable && !settings.write.allowImmutableEdit
+      // 不可变层只对智能体只读；用户本人在面板里可以改、可以删。
+      const readOnly = false
       const ttlRequired = isNote !== true && immutable !== true
       const ttlMissing = ttlRequired && String(draft.ttlDays ?? '').trim() === ''
 
@@ -1253,8 +1257,13 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'mp-btn is-ghost', onClick: onClose }, txt('关闭', 'Close'))),
         readOnly
           ? h('div', { className: 'mp-toast' }, txt(
-            `${draft.layer} 是不可变层，默认只读。需要修改请在设置里打开“允许改写不可变层”。`,
-            `${draft.layer} is immutable and read-only. Enable immutable edits in settings to change it.`))
+            `${draft.layer} 对智能体只读；你可以直接修改。`,
+            `${draft.layer} is read-only for the agent; you can edit it.`))
+          : null,
+        immutable
+          ? h('div', { className: 'mp-hint' }, txt(
+            '这一层（本能 / 核心）对智能体只读——它不能自己改；你改完立刻生效。',
+            'This layer is read-only for the agent. Your own edits apply immediately.'))
           : null,
         creating || (draft.conflicts ?? []).length === 0
           ? null
@@ -1344,7 +1353,10 @@ window.__ModuleLoader__.load({
                 className: 'mp-select',
                 value: draft.notebook,
                 onChange: (event) => update('notebook', event.target.value),
-              }, NOTEBOOK_FALLBACK.map((entry) => h('option', { key: entry.id, value: entry.id }, labelOf(entry.name)))))
+              }, NOTEBOOK_FALLBACK.map((entry) => h('option', { key: entry.id, value: entry.id }, labelOf(entry.name)))),
+              draft.notebook === 'memory'
+                ? h('span', { className: 'mp-hint' }, txt('一句话就够：谁 / 在哪 / 叫什么 / 多少；需要交代来龙去脉的，放日常记事本。', 'One line is enough: who / where / what it is called / how much. Anything needing context belongs in daily notes.'))
+                : null)
             : null,
           h('label', { className: 'mp-field' },
             h('span', { className: 'mp-label' }, ttlRequired
@@ -1676,6 +1688,7 @@ window.__ModuleLoader__.load({
       const txt = (zh, en) => (lang === 'zh' ? zh : en)
       const [candidates, setCandidates] = useState(boot.consolidation?.candidates ?? [])
       const [loading, setLoading] = useState(false)
+      const [busyId, setBusyId] = useState('')
       const settings = boot.settings?.consolidation ?? {}
 
       const load = useCallback(async () => {
@@ -1705,12 +1718,10 @@ window.__ModuleLoader__.load({
       }
 
       async function decide(candidate, decision) {
-        let note = ''
-        if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-          note = window.prompt(txt(
-            `审计意见（${decision === 'approve' ? '同意固化' : '拒绝固化'}，可留空）：`,
-            `Audit note (${decision}, optional):`), '') ?? ''
-        }
+        // DSH 桌面端不保证实现 window.prompt；调用它可能抛错或挂起，导致
+        // 按钮没有任何反应。审计意见是可选字段，直接提交空备注。
+        const note = ''
+        setBusyId(candidate.id)
         setLoading(true)
         try {
           await api('consolidation.apply', {
@@ -1728,8 +1739,16 @@ window.__ModuleLoader__.load({
           notify(error.message, 'error')
         } finally {
           setLoading(false)
+          setBusyId('')
         }
       }
+
+      const stateLabel = (state) => ({
+        new: txt('未登记', 'not proposed'),
+        candidate: txt('待审计', 'pending audit'),
+        rejected: txt('曾拒绝', 'rejected before'),
+        approved: txt('已固化', 'consolidated'),
+      }[state] ?? String(state))
 
       return h('div', { className: 'mp-panel' },
         h('div', { className: 'mp-card' },
@@ -1751,15 +1770,19 @@ window.__ModuleLoader__.load({
                   h(LayerBadge, { item: candidate }),
                   h('strong', null, candidate.title),
                   h('span', { className: 'mp-chip' }, `${candidate.signals} 次信号`),
+                  h('span', { className: 'mp-chip' }, stateLabel(candidate.state)),
                   h('span', { className: 'mp-hint' }, `${candidate.windowDays} 天`)),
+                candidate.content === undefined || candidate.content === ''
+                  ? h('div', { className: 'mp-hint' }, txt('（这条记忆没有正文内容）', '(this memory has no body text)'))
+                  : h('div', { className: 'mp-consolidate-content' }, String(candidate.content)),
                 h('div', { className: 'mp-hint' }, txt(
                   `写入 ${candidate.breakdown?.create ?? 0} · 更新 ${candidate.breakdown?.update ?? 0} · 命中 ${candidate.breakdown?.hit ?? 0}；建议 → ${candidate.suggestedLayer}（永久，不再过期）`,
                   `create ${candidate.breakdown?.create ?? 0} · update ${candidate.breakdown?.update ?? 0} · hit ${candidate.breakdown?.hit ?? 0}; suggested ${candidate.suggestedLayer} (permanent, never expires)`)),
                 h('div', { className: 'mp-toolbar' },
                   h('button', { type: 'button', className: 'mp-btn is-primary', disabled: loading, onClick: () => decide(candidate, 'approve') },
-                    txt('审计通过并固化', 'Approve & consolidate')),
+                    busyId === candidate.id ? txt('固化中…', 'Consolidating…') : txt('审计通过并固化', 'Approve & consolidate')),
                   h('button', { type: 'button', className: 'mp-btn is-danger', disabled: loading, onClick: () => decide(candidate, 'reject') },
-                    txt('拒绝', 'Reject'))))))),
+                    busyId === candidate.id ? txt('处理中…', 'Working…') : txt('拒绝', 'Reject'))))))),
         h('div', { className: 'mp-card' },
           h('div', { className: 'mp-card-title' }, txt('规则', 'Rules')),
           h('div', { className: 'mp-hint' }, txt(
@@ -2648,9 +2671,11 @@ window.__ModuleLoader__.load({
     // 新建/移动只允许可修改层；不可变层只能通过固化进入。
     const WRITABLE_LAYER_IDS = ['L2', 'L4', 'L5', 'L6', 'L7']
     const NOTEBOOK_FALLBACK = [
-      { id: 'memory', name: { zh: '记忆记事本', en: 'Memory notes' } },
+      { id: '', name: { zh: '全部记事', en: 'All notes' } },
+      { id: 'memory', name: { zh: '零碎记忆记事本', en: 'Fragment notes' } },
       { id: 'daily', name: { zh: '日常记事本', en: 'Daily notes' } },
       { id: 'asset', name: { zh: '资产记事本', en: 'Asset notes' } },
+      { id: 'pitfall', name: { zh: '踩坑记事本', en: 'Pitfall notes' } },
     ]
 
     const boot_layers = LAYER_FALLBACK

@@ -550,6 +550,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       out.push({
         id: item.id,
         title: item.title,
+        content: typeof item.content === 'string' ? item.content : String(item.content ?? ''),
         layer: item.layer,
         layerName: layerInfo(item.layer).name,
         importance: item.importance,
@@ -634,8 +635,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       throw createError('INVALID_LAYER', '固化目标只能是 L1 思想核心或 L3 本能行为')
     }
     if (!layerEnabled(active, targetLayer)) throw createError('LAYER_DISABLED', `${targetLayer} 已在设置里关闭`)
+    // 候选状态必须与列表口径一致：列表会把「尚未 propose 过」(state=new) 或
+    // 拒绝后又积累了新信号的条目也列出来，这里若只认 state==='candidate'，
+    // 用户点「审计通过并固化」就会直接抛 NOT_CANDIDATE，界面看起来像按钮失灵。
     if (records[id]?.state !== 'candidate') {
-      throw createError('NOT_CANDIDATE', `条目 ${id} 不在固化候选状态，请先扫描强化信号`)
+      const listed = consolidationCandidates({ limit: Math.max(1, active.consolidation.maxCandidates) })
+        .some((candidate) => candidate.id === id)
+      if (!listed) {
+        throw createError('NOT_CANDIDATE', `条目 ${id} 当前不满足固化条件（信号数已过期或重要度过低），请先扫描强化信号`)
+      }
     }
     const fromLayer = item.layer
     const beforeChange = clone(item)
@@ -1024,7 +1032,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     } else {
       layer = 'L4'
     }
-    assertLayerWritable(active, layer)
+    assertLayerWritable(active, layer, actor)
     const type = input.type === 'note' ? 'note' : 'memory'
     const notebook = type === 'note' ? normalizeNotebook(input.notebook) : null
     const title = truncate(String(input.title ?? '').trim(), MAX_TITLE) || deriveTitle(input.content, type)
@@ -1158,7 +1166,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       throw createError('WRITE_BLOCKED', beforeHook.reason)
     }
     patch = beforeHook.input
-    assertLayerWritable(active, before.layer)
+    assertLayerWritable(active, before.layer, actor)
     const next = { ...before }
     if (patch.title !== undefined) next.title = truncate(String(patch.title).trim(), MAX_TITLE) || before.title
     if (patch.content !== undefined) next.content = truncate(String(patch.content), MAX_CONTENT)
@@ -1166,7 +1174,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (patch.importance !== undefined) next.importance = clampInt(patch.importance, 1, 10, before.importance)
     if (patch.layer !== undefined) {
       const layer = normalizeLayer(patch.layer)
-      assertLayerWritable(active, layer)
+      assertLayerWritable(active, layer, actor)
       next.layer = layer
       // 不可变层不允许携带保鲜期，移入时一并清掉。
       if (layerInfo(layer).immutable) next.ttlDays = null
@@ -1271,8 +1279,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const removedItems = []
     current.items = current.items.filter((item) => {
       if (!wanted.has(item.id)) return true
-      if (layerInfo(item.layer).immutable && !active.write.allowImmutableEdit) {
-        log('warn', `拒绝删除不可变分层的条目 ${item.id}（${item.layer}）`)
+      if (layerInfo(item.layer).immutable && actor !== 'user' && !active.write.allowImmutableEdit) {
+        log('warn', `拒绝删除不可变分层的条目 ${item.id}（${item.layer}）：仅用户可在面板里删除`)
         return true
       }
       removed.push(item.id)
@@ -1305,7 +1313,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     let changed = 0
     for (const item of current.items) {
       if (!wanted.has(item.id)) continue
-      if (layerInfo(item.layer).immutable && !active.write.allowImmutableEdit) continue
+      if (layerInfo(item.layer).immutable && actor !== 'user' && !active.write.allowImmutableEdit) continue
       const before = changed
       const beforeChange = clone(item)
       if (action === 'archive' && item.status !== 'archived') {
@@ -3301,11 +3309,13 @@ function assertEnabled(active) {
   if (!active.enabled) throw createError('DISABLED', '记忆插件已关闭（设置页可以重新打开）')
 }
 
-function assertLayerWritable(active, layer) {
+function assertLayerWritable(active, layer, actor = 'agent') {
   const info = layerInfo(layer)
   if (!layerEnabled(active, layer)) throw createError('LAYER_DISABLED', `${layer} 已在设置里关闭`)
-  if (info.immutable && !active.write.allowImmutableEdit) {
-    throw createError('READ_ONLY', `${layer} ${info.name.zh} 是不可变层，只读`)
+  // 不可变层只对智能体只读：啸春本人在界面上可以随时改、随时删。
+  // 设置里的 allowImmutableEdit 仅作为"也放开给智能体"的开关，默认关闭。
+  if (info.immutable && actor !== 'user' && !active.write.allowImmutableEdit) {
+    throw createError('READ_ONLY', `${layer} ${info.name.zh} 对智能体只读（用户可在记忆面板里直接修改）`)
   }
 }
 

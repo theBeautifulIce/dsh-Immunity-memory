@@ -78,7 +78,7 @@ export const LAYER_IDS = LAYERS.map((layer) => layer.id)
 
 /** 记事本定义。 */
 export const NOTEBOOKS = [
-  { id: 'memory', name: { zh: '记忆记事本', en: 'Memory notes' }, desc: { zh: '值得长期保留的事实与线索', en: 'Facts worth keeping' } },
+  { id: 'memory', name: { zh: '零碎记忆记事本', en: 'Fragment notes' }, desc: { zh: '一句话就能说完的零碎事实（谁、在哪、叫什么、多少），不需要背景说明', en: 'One-line fragments: who, where, what it is called, how much' } },
   { id: 'daily', name: { zh: '日常记事本', en: 'Daily notes' }, desc: { zh: '按日期记录的工作日志', en: 'Dated work log' } },
   { id: 'asset', name: { zh: '资产记事本', en: 'Asset notes' }, desc: { zh: '路径、账号、配置等可复用资产', en: 'Paths, accounts and reusable assets' } },
   { id: 'pitfall', name: { zh: '踩坑笔记', en: 'Pitfall notes' }, desc: { zh: '历史踩坑事件、根因与可复用的解决办法', en: 'Past pitfalls, root causes and reusable fixes' } },
@@ -696,8 +696,8 @@ export const SETTINGS_SCHEMA = [
       {
         path: 'write.allowImmutableEdit',
         type: 'boolean',
-        label: { zh: '允许修改不可变层', en: 'Allow editing immutable layers' },
-        hint: { zh: 'L0 / L1 / L3 默认只读；打开后解锁（谨慎使用）。', en: 'L0 / L1 / L3 are read-only by default; this unlocks them.' },
+        label: { zh: '允许智能体也修改不可变层', en: 'Also let the agent edit immutable layers' },
+        hint: { zh: 'L0 / L1 / L3 对智能体默认只读（你本人在记忆面板里始终可改可删）；打开后智能体也能改，谨慎使用。', en: 'L0 / L1 / L3 are read-only for the agent (you can always edit them yourself); enabling this also unlocks them for the agent.' },
       },
       {
         path: 'write.defaultTtlDays',
