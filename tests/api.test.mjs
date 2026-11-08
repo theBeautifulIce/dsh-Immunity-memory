@@ -243,6 +243,37 @@ try {
     assert.ok(bundle.logs.dir.endsWith('logs'))
   })
 
+  await test('diagnostics.bundle 会等异步备份校验，并把凭据打码', async () => {
+    // 备份存在时 verifyBackup() 是 Promise：忘记 await 会被 JSON.stringify 化成 {}，
+    // 面板上就变成"备份节是空的"。这一条专门盯住"带着备份时"的那条路径。
+    const fakeEngine = {
+      status: () => ({ storage: { engine: 'go' }, stats: { total: 1 } }),
+      getSettings: () => ({ ui: { pageSize: 20 }, apiToken: 'secret-token' }),
+      auditList: () => [],
+      usageStats: () => ({ total: 0 }),
+      verifyBackup: async () => ({ ok: true, name: 'backup-x.sqlite3', integrity: 'ok', items: 3, edges: 4, bytes: 10 }),
+    }
+    const fakeStore = { dir: join(sandbox, 'fake-logs'), listBackups: async () => [{ name: 'backup-x.sqlite3' }] }
+    const inner = []
+    mountApi({ register: (route) => { inner.push(route); return () => {} } }, fakeEngine, log, { store: fakeStore })
+    const fakeServer = createServer((req, res) => inner[0].handler(req, res))
+    await new Promise((resolve) => fakeServer.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = fakeServer.address().port
+      const response = await fetch(`http://127.0.0.1:${port}${API_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'diagnostics.bundle', params: {} }),
+      })
+      const body = await response.json()
+      assert.equal(body.value.backups.latest.ok, true)
+      assert.equal(body.value.backups.latest.items, 3)
+      assert.equal(body.value.settings.apiToken, '***')
+    } finally {
+      fakeServer.close()
+    }
+  })
+
   await test('audit.list 记录过前面的写操作', async () => {
     const { body } = await call('audit.list', { limit: 10 })
     assert.ok(body.value.audit.length >= 1)

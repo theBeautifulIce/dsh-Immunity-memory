@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.23] - 2026-11-08
+
+The diagnostics bundle listed 7 backups but its `latest` block came back as `{}`. `verifyBackup` is
+async, and the bundle assembled the field without awaiting it: JSON serialization turned the pending
+promise into an empty object. Only the "there is a backup" path was affected — the JSON-store path
+returned `null` and looked fine.
+
+The bundle now awaits the verification, and a test mounts a second API with a fake engine whose
+`verifyBackup` is async, so a missing `await` fails the suite instead of shipping. The same test
+also checks that credential-looking settings are redacted.
+
 ## [0.4.22] - 2026-11-08
 
 `plugin.log` was a text file: fine to read, useless to filter. When something goes wrong the first

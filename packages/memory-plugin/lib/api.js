@@ -146,7 +146,8 @@ function createMethods(engineOf, context = {}) {
       let latest = null
       if (backups.length > 0) {
         try {
-          latest = engine().verifyBackup()
+          // verifyBackup 是异步的：漏掉 await 会拿到一个 Promise，序列化后变成空对象。
+          latest = await engine().verifyBackup()
         } catch (error) {
           latest = { ok: false, name: backups[0]?.name ?? '', integrity: message(error) }
         }
