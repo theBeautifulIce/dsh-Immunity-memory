@@ -2975,7 +2975,7 @@ function scoreItem(item, queryTokens, active, now, stats = undefined) {
   const access = clampNumber(Math.log1p(item.accessCount ?? 0) / Math.log(11), 0, 1, 0)
   const pin = item.pinned ? active.retrieval.pinnedBoost : 0
   const weight = STATUS_WEIGHT[item.status] ?? 0.5
-  const base = (relevance * 0.55 + importance * 0.2 + recency * 0.15 + access * 0.1) * weight
+  const base = (relevance * 0.75 + importance * 0.12 + recency * 0.03 + access * 0.1) * weight
   return (base * forgettingFactor(item, active, now)) + pin * weight
 }
 

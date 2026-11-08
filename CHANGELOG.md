@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-11-08
+
+The retrieval weights were tuned for a chat log, not for a memory store: recency held
+0.15 while relevance held 0.55, so a fact from three months ago lost to an unrelated
+sentence from yesterday. On the 714-question benchmark this single line was the
+largest loss we had left. Relevance now holds 0.75, importance 0.12, recency 0.03 and
+access 0.1: recall@1 54.3% → 62.7%, recall@10 79.3% → 90.3%, in-list 89.1% → 94.1%
+(42 questions now miss the list entirely, down from 78). Recency still breaks ties
+(equal scores prefer the newer item) and expiry/forgetting are untouched; what changed
+is that a stale-but-relevant fact no longer loses to a recent-but-irrelevant one.
+
+### Changed
+
+- `scoreItem()`: `base = (relevance * 0.75 + importance * 0.12 + recency * 0.03 +
+  access * 0.1) * weight` (was `0.55 / 0.2 / 0.15 / 0.1`).
+
+### Not changed (measured, rejected)
+
+- Query coverage weighting (`matched / answerable` blended into `queryRelevance()`):
+  0.3 → recall@1 51.5%, 0.12 → 53.4%, both below the 54.3% baseline. BM25's idf already
+  carries that signal; multiplying by coverage leans back toward long items that happen
+  to share several common words.
+
 ## [0.4.8] - 2026-11-08
 
 Tags were ranking topic words, not the way he actually asks. This release adds an

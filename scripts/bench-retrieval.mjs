@@ -24,6 +24,10 @@ const DATASET = join(BENCH, 'datasets/natural-timegrid-20261101-v2')
 const LIMIT = Number(process.env.BENCH_LIMIT ?? 0)
 // 每条记忆合并几轮对话（1 = 一轮一条）。答案常常横跨两三轮的题，靠合并才可能进榜。
 const MERGE = Math.max(1, Number(process.env.BENCH_MERGE ?? 1))
+// 模拟「邻域展开」：前 K 条命中的条目，顺手把它前后各一轮也带进注入榜。
+const EXPAND = Math.max(0, Number(process.env.BENCH_EXPAND ?? 0))
+// 邻域展开往里看几轮（1 = 只看前后一轮，2 = 前后两轮…）。
+const REACH = Math.max(1, Number(process.env.BENCH_REACH ?? 1))
 
 const readJsonl = (path) => readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
 
@@ -107,7 +111,12 @@ for (const persona of personas) {
     const stats = state.engine.injectionStats(now)
     const anchorIds = new Set((keyById.get(exam.id)?.anchors ?? []).map((anchor) => groupOf(persona, anchor.last_turn)))
     const memories = stats.lines.filter((line) => line.source === 'memory')
+    if (process.env.BENCH_DEBUG === '1' && process.env.BENCH_DEBUG_ID === exam.id) {
+      console.log(`DEBUG ${exam.id} anchor=${[...anchorIds].join(',')}`)
+      console.log(`DEBUG listed=${memories.slice(0, 10).map((line) => line.id).join(' ')}`)
+    }
     let rank = Infinity
+    let rankedExpand = Infinity
     let marked = false
     let falseMark = 0
     const bar = typeof stats.query?.hitBar === 'number' ? stats.query.hitBar : Infinity
@@ -122,10 +131,39 @@ for (const persona of personas) {
         falseMark += 1
       }
     }
+    if (EXPAND > 0) {
+      const order = []
+      const seen = new Set()
+      const push = (id) => {
+        if (id === undefined || seen.has(id)) return
+        seen.add(id)
+        order.push(id)
+      }
+      for (let index = 0; index < memories.length; index += 1) {
+        push(memories[index].id)
+        if (index >= EXPAND) continue
+        const body = String(memories[index].id)
+        const match = /-g(\d+)$/.exec(body)
+        if (match === null) continue
+        const turn = Number(match[1])
+        const prefix = body.slice(0, match.index)
+        for (let delta = -REACH; delta <= REACH; delta += 1) {
+          if (delta === 0) continue
+          push(`${prefix}-g${turn + delta}`)
+        }
+      }
+      for (let index = 0; index < order.length; index += 1) {
+        if (anchorIds.has(order[index])) {
+          rankedExpand = index
+          break
+        }
+      }
+    }
     results.push({
       id: exam.id,
       persona,
       rank,
+      rankedExpand,
       marked,
       falseMark,
       tags: keyById.get(exam.id)?.content_tags ?? [],
@@ -145,6 +183,12 @@ const falseMarks = results.reduce((sum, result) => sum + result.falseMark, 0)
 console.log(`题目 ${results.length} 道｜每条合并 ${MERGE} 轮｜候选条目中位数 ${results.map((r) => r.total).sort((a, b) => a - b)[Math.floor(results.length / 2)]}`)
 console.log(`检索命中：@1 ${within(1)} (${pct(within(1))})  @3 ${within(3)} (${pct(within(3))})  @10 ${within(10)} (${pct(within(10))})  进榜 ${results.length - missing} (${pct(results.length - missing)})`)
 console.log(`带「命中」标记且命中正确：${markedCount} (${pct(markedCount)})｜标错（非证据条也被标）：${falseMarks} 条（占 ${((falseMarks / Math.max(1, results.length)) * 100).toFixed(1)}%）｜未进榜 ${missing}`)
+
+if (EXPAND > 0) {
+  const withinExpand = (n) => results.filter((result) => result.rankedExpand < n).length
+  const missingExpand = results.filter((result) => result.rankedExpand === Infinity).length
+  console.log(`邻域展开（前 ${EXPAND} 条各带前后一轮）：@1 ${withinExpand(1)} (${pct(withinExpand(1))})  @3 ${withinExpand(3)} (${pct(withinExpand(3))})  @10 ${withinExpand(10)} (${pct(withinExpand(10))})  进榜 ${results.length - missingExpand} (${pct(results.length - missingExpand)})`)
+}
 
 const byTag = new Map()
 for (const result of results) {
