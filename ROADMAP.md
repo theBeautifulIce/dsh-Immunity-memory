@@ -51,7 +51,7 @@ after user feedback, DSH API changes, or performance findings.
 - [x] Slow-query log and retrieval score breakdown in the UI.
 - [x] Injection hit rate, token cost trend, and memory health score.
 - [x] Backup verification (restore into a temporary store and run integrity).
-- [ ] Retention policies per layer and per notebook.
+- [x] Retention policies per layer and per notebook.
 - [x] Structured JSON logs with rotation.
 - [x] Downloadable diagnostics bundle (status, settings, backups and audit in one file).
 

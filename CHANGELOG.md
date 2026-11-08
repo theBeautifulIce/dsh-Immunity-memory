@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.24] - 2026-11-08
+
+`archiveAfterDays` was one number for everything: six months is right for a project conclusion and
+wrong for yesterday's short-lived fact. Retention now has a policy per layer (L2/L4/L5/L6/L7) and per
+notebook (memory/daily/asset/pitfall), each a number of days — the last item of the v0.5 roadmap.
+
+A new `retention` maintenance task archives an entry when it is still active, not pinned, and has not
+been updated for the number of days its policy gives. `0` means unset, which is the default, so an
+existing install behaves exactly as before until someone fills a number in. Items are only archived,
+never deleted: they stay in the panel behind the status filter and in exports. The report says how
+many went per layer and per notebook. The task joins the default maintenance rotation, where it is a
+no-op until a policy exists.
+
 ## [0.4.23] - 2026-11-08
 
 The diagnostics bundle listed 7 backups but its `latest` block came back as `{}`. `verifyBackup` is

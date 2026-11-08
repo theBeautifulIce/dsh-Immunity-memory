@@ -321,6 +321,44 @@ await test('维护任务能跑完并给出报告', async () => {
   assert.ok(report.totals.total >= 4)
 })
 
+await test('保留策略按层与按记事本归档超期条目，0 表示不设', async () => {
+  const note = await engine.createItem({
+    type: 'note',
+    notebook: 'daily',
+    title: '很久以前的进展',
+    content: '这条日志只用来验证保留策略。',
+  })
+  const short = await engine.createItem({
+    layer: 'L6',
+    title: '短期事实',
+    content: '这条短期事实也只用来验证保留策略。',
+    ttlDays: 365,
+  })
+  const later = Date.now() + 40 * 86400000
+  // 默认全是 0：不设策略时就什么都不动。
+  const idle = await engine.runMaintenance({ tasks: ['retention'], now: later })
+  assert.equal(idle.tasks[0].changed, 0)
+  assert.equal(engine.getItem(note.id).status, 'active')
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), {
+    maintenance: { retention: { byNotebook: { daily: 30 }, byLayer: { L6: 30 } } },
+  }))
+  const report = await engine.runMaintenance({ tasks: ['retention'], now: later })
+  assert.ok(report.tasks[0].changed >= 2)
+  assert.equal(engine.getItem(note.id).status, 'archived')
+  assert.equal(engine.getItem(short.id).status, 'archived')
+  assert.ok(report.tasks[0].byNotebook.daily >= 1)
+  assert.equal(report.tasks[0].byLayer.L6 >= 1, true)
+  // 没超期的条目不受影响：把「现在」拨回来再看。
+  const fresh = await engine.createItem({ type: 'note', notebook: 'daily', title: '刚写的进展', content: '刚写的日志不该被归档。' })
+  const again = await engine.runMaintenance({ tasks: ['retention'], now: Date.now() })
+  assert.equal(again.tasks[0].changed, 0)
+  assert.equal(engine.getItem(fresh.id).status, 'active')
+  await engine.bulkAction([note.id, short.id], 'restore')
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), {
+    maintenance: { retention: { byNotebook: { daily: 0 }, byLayer: { L6: 0 } } },
+  }))
+})
+
 await test('过期条目会被清理任务归档为 expired', async () => {
   const shortLived = await engine.createItem({
     layer: 'L6',

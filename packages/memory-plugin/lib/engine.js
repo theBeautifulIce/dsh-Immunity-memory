@@ -1609,6 +1609,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
    *   cleanup  过期清理（按 expiresAt）
    *   rotate   轮转清理（按原生重要性评分，L6/L7 低分条目过期）
    *   archive  归档（长期未更新且重要度低）
+   *   retention 按层 / 按记事本的保留策略（超期未更新即归档，只归档不删除）
    *   dedupe   去重/冲突（LSH 候选 + 精确 Jaccard，原生核心批量算）
    *   reflect  反思提升（访问次数 + 重要性评分给出建议或自动提升）
    *   compact  压缩审计日志
@@ -1617,10 +1618,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   async function runMaintenance(options = {}) {
     const current = await ensureLoaded()
     const active = settings()
-    const now = Date.now()
+    const now = Number.isFinite(options.now) ? options.now : Date.now()
     const wanted = Array.isArray(options.tasks) && options.tasks.length > 0
       ? options.tasks.filter((task) => typeof task === 'string')
-      : ['cleanup', 'rotate', 'archive', 'dedupe', 'reflect', 'consolidate']
+      : ['cleanup', 'rotate', 'archive', 'retention', 'dedupe', 'reflect', 'consolidate']
     const report = { ranAt: new Date().toISOString(), tasks: [], totals: {} }
     let dirty = false
 
@@ -1677,6 +1678,43 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           await persist()
         }
         report.tasks.push({ task, changed: archived, note: `归档 ${archived} 条（>${days} 天未更新且重要度≤4）` })
+      } else if (task === 'retention') {
+        // 按层 / 按记事本分别归档「太久没更新」的条目；只归档、不删除，
+        // 归档后仍能在面板里按状态筛出来，也能导出。
+        const layers = active.maintenance.retention?.byLayer ?? {}
+        const notebooks = active.maintenance.retention?.byNotebook ?? {}
+        const archivedByLayer = {}
+        const archivedByNotebook = {}
+        let archived = 0
+        for (const item of current.items) {
+          if (item.status !== 'active' || item.pinned) continue
+          const isNote = item.type === 'note'
+          const days = isNote
+            ? clampInt(notebooks[item.notebook] ?? 0, 0, 3650, 0)
+            : clampInt(layers[item.layer] ?? 0, 0, 3650, 0)
+          if (days <= 0) continue
+          const age = (now - Date.parse(item.updatedAt)) / 86400000
+          if (!(age >= days)) continue
+          item.status = 'archived'
+          archived += 1
+          if (isNote) archivedByNotebook[item.notebook] = (archivedByNotebook[item.notebook] ?? 0) + 1
+          else archivedByLayer[item.layer] = (archivedByLayer[item.layer] ?? 0) + 1
+        }
+        if (archived > 0) {
+          dirty = true
+          await persist()
+        }
+        const parts = [
+          ...Object.entries(archivedByLayer).map(([layer, count]) => `${layer} ${count} 条`),
+          ...Object.entries(archivedByNotebook).map(([notebook, count]) => `${notebook} ${count} 条`),
+        ]
+        report.tasks.push({
+          task,
+          changed: archived,
+          note: archived > 0 ? `按保留策略归档 ${archived} 条（${parts.join('，')}）` : '按保留策略归档 0 条',
+          byLayer: archivedByLayer,
+          byNotebook: archivedByNotebook,
+        })
       } else if (task === 'dedupe') {
         const result = await dedupeAll(current, active)
         if (result.changed > 0) {

@@ -378,6 +378,12 @@ export const DEFAULT_SETTINGS = {
     historyKeep: 20,
     slowQueryMs: 200,
     slowQueryKeep: 50,
+    // 保留策略：按层 / 按记事本分别给天数，0 表示不设（这些条目交给 cleanup / archive 的
+    // 全局规则处理）。只归档，不删除：archived 条目仍能在面板里筛出来、能导出。
+    retention: {
+      byLayer: { L2: 0, L4: 0, L5: 0, L6: 0, L7: 0 },
+      byNotebook: { memory: 0, daily: 0, asset: 0, pitfall: 0 },
+    },
   },
   performance: {
     nativeCore: true,
@@ -1119,6 +1125,45 @@ export const SETTINGS_SCHEMA = [
         label: { zh: '慢查询保留', en: 'Slow query log size' },
         hint: { zh: '只保留最近这么多条慢查询；0 表示关闭记录。', en: 'Keep this many slow queries; 0 disables logging.' },
       },
+      // 保留策略按「层」与「记事本」各给一组天数：超过这么久没更新就归档。
+      // 0 表示不设，条目仍按全局 archiveAfterDays 的规则处理，不会因为默认值被误伤。
+      ...[
+        ['L2', 'L2 演进想法', 'L2 evolving thoughts'],
+        ['L4', 'L4 项目学习', 'L4 project learnings'],
+        ['L5', 'L5 目标偏好', 'L5 goals and preferences'],
+        ['L6', 'L6 短期事实', 'L6 short-lived facts'],
+        ['L7', 'L7 当前情境', 'L7 current context'],
+      ].map(([layer, zh, en]) => ({
+        path: `maintenance.retention.byLayer.${layer}`,
+        type: 'number',
+        min: 0,
+        max: 3650,
+        step: 10,
+        unit: { zh: '天', en: 'days' },
+        label: { zh: `保留 ${zh}`, en: `Keep ${en}` },
+        hint: {
+          zh: '超过这么多天没更新就归档该层条目；0 表示不设。',
+          en: 'Archive entries of this layer untouched for this long; 0 means unset.',
+        },
+      })),
+      ...[
+        ['memory', '记忆本', 'memory notebook'],
+        ['daily', '日志本', 'daily notebook'],
+        ['asset', '资料本', 'asset notebook'],
+        ['pitfall', '踩坑本', 'pitfall notebook'],
+      ].map(([notebook, zh, en]) => ({
+        path: `maintenance.retention.byNotebook.${notebook}`,
+        type: 'number',
+        min: 0,
+        max: 3650,
+        step: 10,
+        unit: { zh: '天', en: 'days' },
+        label: { zh: `保留 ${zh}`, en: `Keep ${en}` },
+        hint: {
+          zh: '超过这么多天没更新就归档该记事本条目；0 表示不设。',
+          en: 'Archive notes in this notebook untouched for this long; 0 means unset.',
+        },
+      })),
     ],
   },
   {
