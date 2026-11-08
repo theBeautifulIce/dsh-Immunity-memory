@@ -50,7 +50,7 @@ after user feedback, DSH API changes, or performance findings.
 - [x] Maintenance dashboard: last run, duration, archived, deduped, promoted.
 - [x] Slow-query log and retrieval score breakdown in the UI.
 - [x] Injection hit rate, token cost trend, and memory health score.
-- [ ] Backup verification (restore into a temporary store and run integrity).
+- [x] Backup verification (restore into a temporary store and run integrity).
 - [ ] Retention policies per layer and per notebook.
 - [ ] Structured JSON logs with rotation and a downloadable diagnostics bundle.
 

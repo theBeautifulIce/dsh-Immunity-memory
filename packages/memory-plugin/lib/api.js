@@ -70,6 +70,7 @@ export const API_METHODS = [
   'indexes.rebuild',
   'backups.list',
   'backups.create',
+  'backups.verify',
   'backups.restore',
   'graph.neighbors',
   'links.list',
@@ -309,6 +310,10 @@ function createMethods(engineOf, context = {}) {
     'backups.create'(params) {
       if (typeof store?.backup !== 'function') throw createError('UNSUPPORTED', '当前存储引擎不支持备份')
       return store.backup(params?.tag ?? 'manual')
+    },
+    async 'backups.verify'(params) {
+      const name = typeof params?.name === 'string' && params.name !== '' ? params.name : undefined
+      return engine().verifyBackup(name)
     },
     async 'backups.restore'(params) {
       if (typeof store?.restore !== 'function') throw createError('UNSUPPORTED', '当前存储引擎不支持恢复')

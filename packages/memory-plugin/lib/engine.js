@@ -45,6 +45,7 @@ import {
   findNoteDuplicate,
   isDailyDue,
 } from './capture.js'
+import { verifyBackupFile } from './backup-verify.js'
 
 export { jaccard, tokenize }
 
@@ -2952,6 +2953,25 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       reindexAll()
       if (typeof store.rebuildIndexes === 'function') return store.rebuildIndexes(current.items)
       return { fts: false, vectors: false, items: current.items.length }
+    },
+    // 备份校验：把备份复制到临时目录、真的打开它读一遍。只「列出文件存在」
+    // 说明不了备份能不能用，所以面板和运维脚本共用这一条真正的校验路径。
+    verifyBackup: async (name) => {
+      const list = typeof store.listBackups === 'function' ? await store.listBackups() : []
+      const target = name ? list.find((entry) => entry.name === name) : list[0]
+      if (target === undefined) {
+        const error = new Error(name ? `备份不存在：${name}` : '还没有可校验的备份')
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+      const report = verifyBackupFile(target.path)
+      const state = await ensureLoaded()
+      return {
+        ...report,
+        name: target.name,
+        modifiedAt: target.modifiedAt ?? '',
+        liveItems: (state.items ?? []).length,
+      }
     },
     // 人工关联：自动建边只认词面余弦，判错了、或者两条明明相关却没词面交集时，
     // 只能靠人工补一条。人工边存成 edge_type='manual'，重建自动边时不会被清掉。

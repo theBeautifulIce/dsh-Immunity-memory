@@ -2586,6 +2586,28 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 只「有备份文件」说明不了备份能用：真的打开它读一遍，数出条目再做完整性检查。
+      async function verifyBackupNow() {
+        try {
+          const value = await api('backups.verify', {})
+          const report = value.verify ?? value
+          const name = report.name ?? ''
+          if (report.ok === true) {
+            notify(txt(
+              `备份可用：${name}（${report.items ?? 0} 条，${report.edges ?? 0} 条关联）`,
+              `Backup ok: ${name} (${report.items ?? 0} items, ${report.edges ?? 0} links)`,
+            ))
+          } else {
+            notify(txt(
+              `备份不可用：${name}（${report.integrity ?? '未知原因'}）`,
+              `Backup failed: ${name} (${report.integrity ?? 'unknown'})`,
+            ), 'error')
+          }
+        } catch (error) {
+          notify(error.message, 'error')
+        }
+      }
+
       async function rebuildIndexes() {
         try {
           const value = await api('indexes.rebuild', {})
@@ -2758,6 +2780,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mp-toolbar' },
             h('button', { type: 'button', className: 'mp-btn', onClick: exportData }, txt('导出 JSON', 'Export JSON')),
             h('button', { type: 'button', className: 'mp-btn', onClick: backupNow }, txt('立即备份', 'Back up now')),
+            h('button', { type: 'button', className: 'mp-btn', onClick: verifyBackupNow }, txt('校验最新备份', 'Verify latest backup')),
             h('button', { type: 'button', className: 'mp-btn', onClick: rebuildIndexes }, txt('重建索引', 'Rebuild index')),
             h('button', { type: 'button', className: 'mp-btn', onClick: loadAudit }, txt('刷新审计日志', 'Refresh audit'))),
           h('div', { className: 'mp-list-plain' },

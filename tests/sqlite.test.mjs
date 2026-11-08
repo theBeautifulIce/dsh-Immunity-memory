@@ -14,6 +14,7 @@ import { join } from 'node:path'
 
 import { DB_FILE, LEGACY_JSON_FILE, createSqliteStore } from '../packages/memory-plugin/lib/sqlite.js'
 import { createEngine } from '../packages/memory-plugin/lib/engine.js'
+import { verifyBackupFile } from '../packages/memory-plugin/lib/backup-verify.js'
 import { normalizeSettings } from '../packages/memory-plugin/lib/settings.js'
 
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-memory-sqlite-'))
@@ -376,6 +377,22 @@ test('设置里关闭备份时不产生 .bak 文件', () => {
   const files = []
   for (let index = 1; index <= 3; index += 1) files.push(existsSync(`${store.path}.bak-${index}`))
   assert.deepEqual(files, [false, false, false])
+})
+
+test('备份校验：备份打开后完整性为 ok，损坏的文件判失败', () => {
+  const backup = store.backup('verify-test')
+  const good = verifyBackupFile(backup.path)
+  assert.equal(good.ok, true)
+  assert.equal(good.integrity, 'ok')
+  assert.ok(good.items >= 1, '备份里应能数出条目')
+  assert.ok(good.edges >= 0)
+  assert.ok(good.bytes > 0)
+  const broken = join(sandbox, 'broken.sqlite3')
+  writeFileSync(broken, 'this is not a sqlite database')
+  const bad = verifyBackupFile(broken)
+  assert.equal(bad.ok, false, '打不开的文件不能算校验通过')
+  assert.notEqual(bad.integrity, 'ok')
+  rmSync(backup.path, { force: true })
 })
 
 store.close()

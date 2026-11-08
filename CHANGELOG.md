@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.20] - 2026-11-08
+
+A backup that exists is not a backup that works. `backups.list` could only tell you the file was
+there, and the repair path silently trusted it — a truncated or half-synced file would have been
+"restored" over a healthy database.
+
+Backups can now be verified: the file is copied into a temporary directory, opened there, checked
+with `PRAGMA integrity_check`, and the entries and relations are counted. The temporary copy keeps
+verification away from the live database (and from whatever `-wal` the store still holds). Panel
+gains a「校验最新备份」button, the API gains `backups.verify`, and `node scripts/verify-backup.mjs
+[--all]` does the same from a terminal and exits non-zero when a backup fails.
+
+### Added
+
+- `backups.verify` and a panel button: restore the newest backup into a temporary store, count what
+  is inside and run integrity before trusting it.
+- `node scripts/verify-backup.mjs [--all] [backups 目录]`: same check from a terminal, non-zero exit
+  when any backup fails.
+
 ## [0.4.19] - 2026-11-08
 
 Related entries showed the same neighbour twice. Two separate causes, both from writing links
