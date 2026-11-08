@@ -146,6 +146,32 @@ test('更新条目只改那一行，读回生效', () => {
   assert.equal(back.version, 3)
 })
 
+test('旧副本写回不会抹平库里的「能回答什么问题」', () => {
+  const state = store.read()
+  const item = state.items.find((entry) => entry.id === 'mem_a1')
+  // 先在库里写上问法（等效于外部脚本 backfill-questions.mjs 直接写库）
+  item.questions = ['仓库用什么包管理器', '测试跑什么命令']
+  store.write(state)
+  assert.deepEqual(store.read().items.find((entry) => entry.id === 'mem_a1').questions, [
+    '仓库用什么包管理器',
+    '测试跑什么命令',
+  ])
+  // 插件内存里还是旧副本（questions 为空），回写一次
+  const stale = store.read()
+  const staleItem = stale.items.find((entry) => entry.id === 'mem_a1')
+  staleItem.questions = []
+  staleItem.accessCount += 1
+  store.write(stale)
+  const back = store.read().items.find((entry) => entry.id === 'mem_a1')
+  assert.deepEqual(back.questions, ['仓库用什么包管理器', '测试跑什么命令'])
+  assert.equal(back.accessCount, staleItem.accessCount)
+  // 真带着新问法时照旧覆盖
+  const fresh = store.read()
+  fresh.items.find((entry) => entry.id === 'mem_a1').questions = ['换新的问法']
+  store.write(fresh)
+  assert.deepEqual(store.read().items.find((entry) => entry.id === 'mem_a1').questions, ['换新的问法'])
+})
+
 test('删除条目会同时清掉关系边', () => {
   const state = store.read()
   state.items = state.items.filter((entry) => entry.id !== 'mem_b2')

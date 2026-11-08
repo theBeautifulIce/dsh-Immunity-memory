@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-11-08
+
+A live store lost nine items' `questions` field after they had been backfilled straight
+into SQLite: the running plugin still held the pre-backfill copy in memory, and any
+ordinary write (an access-count bump, a maintenance pass) rewrote `metadata` wholesale,
+so an empty `questions` array silently erased the good one. The store now reads the
+stored questions before overwriting an empty array, and the incremental-write signature
+includes `questions` and `tags` so a change to either is actually persisted instead of
+waiting for some other field to move with it.
+
+### Fixed
+
+- `upsertItem()`: when an item arrives with no `questions`, keep the ones already in the
+  row (`readStoredQuestions()`), instead of replacing `metadata` and losing them.
+- `itemSignature()`: include `questions` and `tags`; previously a write that only touched
+  either of them was skipped as "unchanged".
+
+### Known limitation
+
+- Clearing all questions through `memory_update` is now refused by the same guard; the
+  old value survives. Edit the database directly when a memory must have none.
+
 ## [0.4.9] - 2026-11-08
 
 The retrieval weights were tuned for a chat log, not for a memory store: recency held

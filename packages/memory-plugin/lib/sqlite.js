@@ -711,6 +711,18 @@ function rowFromAsset(row) {
   }
 }
 
+// 读库里已有的「能回答什么问题」，读不到就返回空数组（不抛，脏数据也不阻断写入）。
+function readStoredQuestions(database, id) {
+  try {
+    const row = database.prepare('SELECT metadata FROM memories WHERE id = ?').get(id)
+    if (row?.metadata === undefined || row?.metadata === null) return []
+    const parsed = JSON.parse(row.metadata)
+    return Array.isArray(parsed?.questions) ? parsed.questions : []
+  } catch {
+    return []
+  }
+}
+
 function upsertItem(database, item) {
   const priority = clampImportance(item.importance) / 10
   if (item.type === 'note' && item.notebook === 'daily') {
@@ -752,10 +764,18 @@ function upsertItem(database, item) {
     )
     return
   }
+  // 「能回答什么问题」可能由外部脚本（scripts/backfill-questions.mjs）直接写进库。
+  // 如果插件内存里还是补问法之前那份旧副本（questions=[]），整块覆盖 metadata
+  // 会把它抹平；所以只在这次确实带着问法时才写，否则沿用库里已有的值。
+  let questions = item.questions ?? []
+  if (questions.length === 0) {
+    const kept = readStoredQuestions(database, item.id)
+    if (kept.length > 0) questions = kept
+  }
   const metadata = {
     notebook: item.notebook ?? null,
     tags: item.tags ?? [],
-    questions: item.questions ?? [],
+    questions,
     pinned: item.pinned === true,
     expiresAt: item.expiresAt ?? null,
     source: item.source ?? null,
@@ -880,6 +900,9 @@ function itemSignature(item) {
     item.supersededBy ?? '',
     item.title ?? '',
     (item.content ?? '').length,
+    // 问法与标签只能靠「内容变了」触发写入，漏在这里就只能等别的字段一起变才落库。
+    JSON.stringify(item.questions ?? []),
+    JSON.stringify(item.tags ?? []),
   ].join('|')
 }
 
