@@ -70,6 +70,7 @@ const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'importa
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
 // 相关度阈值：低于它只当「背景资料」，不标命中，避免满屏都是命中。
 const RELEVANCE_HIT = 0.12
+const MIN_HIT_TOKENS = 2
 // 一次最多拿多少个查询词参与打分：太多会把 relevance 摊薄，太少又不够区分。
 const QUERY_TOKEN_LIMIT = 32
 
@@ -1950,7 +1951,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       topN: budget.topN,
       maxChars: budget.maxChars,
       truncated: false,
-      query: { used: false, tokens: 0, chars: queryText.length, preview: truncate(queryText, 160) },
+      query: { used: false, tokens: 0, chars: queryText.length, preview: truncate(queryText, 160), hitBar: RELEVANCE_HIT },
       template: {
         id: template.id,
         name: template.name,
@@ -2008,8 +2009,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const scored = candidates.map((item) => ({
       item,
       relevance: queryRelevance(item, queryTokens),
+      matched: matchedQueryTokens(item, queryTokens),
       score: scoreItem(item, queryTokens, active, now),
     }))
+    // 命中门槛不能只看绝对值：一句无关的话也可能碰上一两个通用词，
+    // 于是「每条都标命中」。用候选集自身的中位数当背景，只有明显高于背景的才算命中。
+    const hitBar = relevanceBar(scored.map((entry) => entry.relevance))
     scored.sort((left, right) => right.score - left.score)
     const chosen = scored.slice(0, budget.topN)
     // 空库也要注入模板头部：否则新会话只剩工具描述，模型不知道有长期记忆可用。
@@ -2022,12 +2027,13 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       lines.push(`- [${entry.layer} ${layerLabel}·模板] ${entry.title}：${body}`)
       lineMeta.push({ ...entry, source: 'template', importance: null })
     }
-    for (const { item, relevance } of chosen) {
+    for (const { item, relevance, matched } of chosen) {
       const body = truncate(item.content.replace(/\s+/g, ' ').trim(), 220)
       // 命中标记：让模型一眼看出哪几条是「跟这一轮有关」，而不是又一份需要通读的背景资料。
-      const hit = relevance >= RELEVANCE_HIT ? '·命中' : ''
+      // 只沾上一个词不算——短查询里一个通用词就能拿到 0.5 的相对分，所以要求至少对上两个词。
+      const hit = relevance >= hitBar && matched >= MIN_HIT_TOKENS ? '·命中' : ''
       lines.push(`- [${item.layer}·重要度${item.importance}${hit}] ${item.title}：${body}`)
-      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance })
+      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance, matched })
     }
     const header = coldStart
       ? [
@@ -2077,6 +2083,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         importance: entry.importance,
         source: entry.source,
         relevance: entry.relevance ?? null,
+        matched: entry.matched ?? null,
         tokens,
         chars: lines[index].length,
       })
@@ -2099,6 +2106,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         tokens: queryTokens.size,
         chars: queryText.length,
         preview: truncate(queryText, 160),
+        hitBar: Number.isFinite(hitBar) ? Math.round(hitBar * 1000) / 1000 : null,
       },
       template: {
         id: template.id,
@@ -2869,6 +2877,43 @@ function queryRelevance(item, queryTokens) {
     if (tagTokens.has(token)) tagHits += 1
   }
   return clampNumber((titleHits * 2 + contentHits + tagHits * 1.5) / (queryTokens.size * 2), 0, 1, 0)
+}
+
+/**
+ * 命中门槛：绝对下限与「候选集自身背景」的较大者。
+ * 一句与记忆无关的话也可能靠一两个通用词拿到 0.2-0.5 的相对分；
+ * 用中位数当背景，只有当这条明显高出其它条目时才标「·命中」。
+ */
+/**
+ * 查询词在条目里对上了几个（标题 + 正文 + 标签）。
+ * 「·命中」需要的不只是相对分高，还要有足够的字面证据。
+ */
+function matchedQueryTokens(item, queryTokens) {
+  if (queryTokens === undefined || queryTokens.size === 0) return 0
+  const haystack = tokenize(item.title + ' ' + item.content + ' ' + item.tags.join(' '))
+  let matched = 0
+  for (const token of queryTokens) if (haystack.has(token)) matched += 1
+  return matched
+}
+
+/**
+ * 命中门槛：只标「明显最相关」的那条，分不出高低就一条都不标。
+ *
+ * 一句与记忆无关的话也能靠一两个通用词（「一下」「这段」）拿到 0.2-0.5 的相对分，
+ * 光设绝对阈值会把一堆背景条目都标成命中。所以要同时满足三条：最高分至少到
+ * RELEVANCE_HIT、最高分只有一条（并列就说明分不出高低）、并且明显高于第二档
+ * （1.5 倍以上）；否则返回 Infinity，这一轮不标命中。
+ */
+function relevanceBar(relevances) {
+  if (!Array.isArray(relevances) || relevances.length === 0) return Infinity
+  const sorted = [...relevances].sort((left, right) => right - left)
+  const top = sorted[0]
+  if (!(top >= RELEVANCE_HIT)) return Infinity
+  const tied = sorted.filter((value) => value >= top - 1e-6).length
+  if (tied > 1) return Infinity
+  const runnerUp = sorted.find((value) => value < top - 1e-6) ?? 0
+  if (runnerUp > 0 && top < runnerUp * 1.5) return Infinity
+  return top - 1e-9
 }
 
 /**

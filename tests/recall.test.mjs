@@ -91,6 +91,7 @@ await test('工具报错进入上下文后，相关记忆被顶到最前并标�
   assert.match(lines[0].title, /pwsh 挂了要请用户发/, '相关条应排第一')
   assert.ok((lines[0].relevance ?? 0) >= 0.12, '相关条应带命中相关度')
   assert.match(stats.text, /·命中\] pwsh 挂了要请用户发/)
+  assert.ok((lines[0].matched ?? 0) >= 2, '命中要至少对上两个查询词，避免单个通用词误伤')
   // 不相关的条目照旧注入，但不能被标成命中。
   const others = lines.slice(1)
   for (const line of others) assert.ok((line.relevance ?? 0) < 0.12)
@@ -114,6 +115,19 @@ await test('空白上下文不入队，也不会把已有上下文冲掉', async
   assert.equal(engine.noteTurnContext({ sessionId: 'session-c', kind: 'user', text: '   ' }), false)
   assert.equal(engine.turnContext().sessionId, before.sessionId)
   assert.ok(engine.injectionStats().query.used)
+})
+
+await test('完全无关的问句一条都不标命中', async () => {
+  engine.noteTurnContext({ sessionId: 'session-d', kind: 'user', text: '今天上海天气怎么样' })
+  const stats = engine.injectionStats()
+  assert.equal(stats.query.hitBar, null, '分不出高低时 hitBar 设为 null')
+  assert.equal(stats.text.includes('·命中'), false)
+})
+
+await test('只有一个查询词时也不标命中', async () => {
+  engine.noteTurnContext({ sessionId: 'session-e', kind: 'user', text: '这首诗押韵吗' })
+  const stats = engine.injectionStats()
+  assert.equal(stats.text.includes('·命中'), false)
 })
 
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

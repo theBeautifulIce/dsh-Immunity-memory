@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-08
+
+Tighten the `·命中` badge so it means something: only the item that is clearly
+the best match of the turn gets it, and unrelated questions no longer light up
+half the digest.
+
+### Fixed
+
+- The hit badge no longer fires on background noise. A single common word
+  (「一下」「这段」) used to be enough to reach the old 0.12 threshold; a line is
+  now marked only when its relevance is the strict maximum of the turn, is at
+  least 1.5× the next distinct score, and matches at least two query tokens.
+- Ties are treated as "cannot tell them apart" and mark nothing, instead of
+  marking every tied line.
+- `injectionStats()` lines now carry `matched` (how many query tokens the item
+  hit) alongside `relevance`, and `query.hitBar` reports the effective threshold
+  (`null` when this turn marks nothing). The field had been dropped when the
+  stats objects were rebuilt.
+
+### Tests
+
+- `tests/recall.test.mjs` grew to 7 cases: an unrelated question
+  (「今天上海天气怎么样」) and a single-token question must both leave the digest
+  unmarked, and a real hit must cover at least two query tokens.
+- `scripts/recall-eval.mjs`: sandbox evaluation harness — 21 seeded memories,
+  20 recall questions plus 3 negatives, reporting `@1/@3/@5` and badge accuracy.
+  Current numbers: `@1` 18/20, `@3` 20/20, `@5` 20/20, 13/20 badged, 0 false
+  badges across the 3 negatives.
+
 ## [0.4.4] - 2026-11-08
 
 Recall reranking: the injected digest now follows what the current turn is
