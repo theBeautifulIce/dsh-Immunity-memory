@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-08
+
+Recall reranking: the injected digest now follows what the current turn is
+about, instead of always replaying the highest-importance items.
+
+### Added
+
+- Per-turn context for ranking: the last eight user messages and failed tool
+  results (700 characters each, 30-minute TTL, memory only — never persisted,
+  never exported) are recorded via `engine.noteTurnContext()` and reset when the
+  session changes.
+- `promptDigest()` / `injectionStats()` now report `query` (`used`, `tokens`,
+  `chars`, `preview`), and every injected line carries `relevance`. Lines above
+  the hit threshold are labelled `·命中`, so "relevant to this turn" is visually
+  distinct from "background".
+- `engine.turnContext()` exposes what the ranking currently sees.
+
+### Changed
+
+- Query tokens are filtered by document frequency before scoring: tokens no
+  memory mentions, and tokens more than half of the memories mention, are
+  dropped, and at most 32 remain. A long turn therefore keeps its discriminating
+  words instead of diluting relevance to zero.
+- `scoreItem()` delegates the lexical half to `queryRelevance()`; the ranking
+  weights are unchanged (`relevance 0.55 / importance 0.2 / recency 0.15 /
+  access 0.1`, × status weight, × forgetting factor, + pin boost), so with no
+  turn context the order is exactly what it was before.
+- Injection is skipped back to importance-only ranking above 4000 candidate
+  items, so a very large library cannot turn every request into a full scan.
+
+### Tests
+
+- New `tests/recall.test.mjs` (5 cases): importance-only order without context,
+  a tool error pulling the matching memory to the front with a hit marker,
+  duplicate suppression, session switch reset, and blank input ignored.
+
 ## [0.4.3] - 2026-11-08
 
 Audit transparency, human-source detection, and a clearer split between what

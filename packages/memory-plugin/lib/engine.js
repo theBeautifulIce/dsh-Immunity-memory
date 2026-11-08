@@ -37,7 +37,7 @@ import {
 import { emptyState, message, STORE_VERSION } from './store.js'
 import { createSearchEngine } from './search.js'
 import { fallbackCosineBatch, fallbackDedupe, fallbackImportance } from './fallback-math.js'
-import { estimateTokens, jaccard, tokenize } from './text.js'
+import { estimateTokens, jaccard, searchableText, tokenize } from './text.js'
 import {
   CAPTURE_TRIGGERS,
   captureLabel,
@@ -68,6 +68,10 @@ const AUDIT_VERDICTS = ['approve', 'reject', 'merge', 'needs_user']
 const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'key', 'supersedes', 'supersededBy']
 
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
+// 相关度阈值：低于它只当「背景资料」，不标命中，避免满屏都是命中。
+const RELEVANCE_HIT = 0.12
+// 一次最多拿多少个查询词参与打分：太多会把 relevance 摊薄，太少又不够区分。
+const QUERY_TOKEN_LIMIT = 32
 
 /** 新建一条记忆/记事本条目。 */
 export async function createEngine({ store, getSettings, initialSettings, log, native }) {
@@ -78,6 +82,39 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   let itemMap = new Map()
   // 同一个候选的并发 approve/reject 只允许一个进入写库流程。
   const auditDecisionsInFlight = new Set()
+
+  // 当轮上下文：给提示词注入排序用的「现在到底在聊什么」。
+  // 只放内存，不落库、不进导出；换会话即重置，超过半小时自然失效。
+  // 用户消息和工具报错都算数——踩过的坑往往是先以「报错」的形式回来的。
+  const TURN_CONTEXT_ENTRIES = 8
+  const TURN_CONTEXT_CHARS = 700
+  const TURN_CONTEXT_TTL_MS = 30 * 60 * 1000
+  let turnContext = { sessionId: null, entries: [], at: 0 }
+
+  /** 记一条当轮上下文；同一条重复（例如同一个报错连着重试）不入队。 */
+  function noteTurnContext(input) {
+    const text = truncate(String(input?.text ?? '').replace(/\s+/g, ' ').trim(), TURN_CONTEXT_CHARS)
+    if (text === '') return false
+    const sessionId = typeof input?.sessionId === 'string' ? input.sessionId : null
+    if (sessionId !== turnContext.sessionId) turnContext = { sessionId, entries: [], at: 0 }
+    const last = turnContext.entries[turnContext.entries.length - 1]
+    if (last !== undefined && last.text === text) {
+      turnContext.at = Date.now()
+      return false
+    }
+    turnContext.entries.push({ text, kind: input?.kind === 'tool' ? 'tool' : 'user' })
+    const overflow = turnContext.entries.length - TURN_CONTEXT_ENTRIES
+    if (overflow > 0) turnContext.entries.splice(0, overflow)
+    turnContext.at = Date.now()
+    return true
+  }
+
+  /** 当前当轮上下文的文本；为空或过期时返回空串（此时排序退回纯重要度/新近度）。 */
+  function turnContextText(now = Date.now()) {
+    if (turnContext.entries.length === 0) return ''
+    if (now - turnContext.at > TURN_CONTEXT_TTL_MS) return ''
+    return turnContext.entries.map((entry) => entry.text).join(' ')
+  }
 
   // 设置归属：存档里有就以存档为准（用户在设置页改的），否则用行配置里的初始值。
   const fallbackSettings = () => normalizeSettings(initialSettings ?? getSettings?.() ?? {})
@@ -1894,12 +1931,16 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
    * promptDigest 只要文本；injectionStats 还要每层 token 明细，两者共用这一份结果，
    * 避免 UI 看到的预算与实际注入的不是同一套算法。
    */
-  function buildDigest(now = Date.now(), workspace = undefined) {
+  function buildDigest(now = Date.now(), workspace = undefined, options = {}) {
     const current = currentState()
     const active = settings()
     const template = activeTemplate(active)
     const budget = promptBudget(active)
     const enabled = active.enabled !== false && active.prompt.inject !== false && budget.topN > 0
+    // 当轮上下文 → 查询词：让注入跟着「现在在干什么」走，而不是永远按重要度排。
+    const queryText = typeof options.query === 'string' && options.query !== ''
+      ? options.query
+      : turnContextText(now)
     const empty = {
       enabled,
       text: '',
@@ -1909,6 +1950,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       topN: budget.topN,
       maxChars: budget.maxChars,
       truncated: false,
+      query: { used: false, tokens: 0, chars: queryText.length, preview: truncate(queryText, 160) },
       template: {
         id: template.id,
         name: template.name,
@@ -1962,7 +2004,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (configuredImmutable && layerInfo(item.layer).immutable) return false
       return true
     })
-    const scored = candidates.map((item) => ({ item, score: scoreItem(item, new Set(), active, now) }))
+    const queryTokens = selectQueryTokens(queryText, candidates)
+    const scored = candidates.map((item) => ({
+      item,
+      relevance: queryRelevance(item, queryTokens),
+      score: scoreItem(item, queryTokens, active, now),
+    }))
     scored.sort((left, right) => right.score - left.score)
     const chosen = scored.slice(0, budget.topN)
     // 空库也要注入模板头部：否则新会话只剩工具描述，模型不知道有长期记忆可用。
@@ -1975,10 +2022,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       lines.push(`- [${entry.layer} ${layerLabel}·模板] ${entry.title}：${body}`)
       lineMeta.push({ ...entry, source: 'template', importance: null })
     }
-    for (const { item } of chosen) {
+    for (const { item, relevance } of chosen) {
       const body = truncate(item.content.replace(/\s+/g, ' ').trim(), 220)
-      lines.push(`- [${item.layer}·重要度${item.importance}] ${item.title}：${body}`)
-      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory' })
+      // 命中标记：让模型一眼看出哪几条是「跟这一轮有关」，而不是又一份需要通读的背景资料。
+      const hit = relevance >= RELEVANCE_HIT ? '·命中' : ''
+      lines.push(`- [${item.layer}·重要度${item.importance}${hit}] ${item.title}：${body}`)
+      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance })
     }
     const header = coldStart
       ? [
@@ -2027,6 +2076,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
         layer: entry.layer,
         importance: entry.importance,
         source: entry.source,
+        relevance: entry.relevance ?? null,
         tokens,
         chars: lines[index].length,
       })
@@ -2044,6 +2094,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       topN: budget.topN,
       maxChars: budget.maxChars,
       truncated,
+      query: {
+        used: queryTokens.size > 0,
+        tokens: queryTokens.size,
+        chars: queryText.length,
+        preview: truncate(queryText, 160),
+      },
       template: {
         id: template.id,
         name: template.name,
@@ -2062,15 +2118,15 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   }
 
   /** 提示词注入用的摘要文本。 */
-  function promptDigest(now = Date.now(), workspace = null) {
-    const built = buildDigest(now, normalizeWorkspace(workspace))
+  function promptDigest(now = Date.now(), workspace = null, options = {}) {
+    const built = buildDigest(now, normalizeWorkspace(workspace), options)
     noteInjection(currentState(), built.lines.filter((line) => line.source === 'memory').map((line) => line.id))
     return built.text
   }
 
   /** 注入预算明细（UI 与 API 用）。 */
-  function injectionStats(now = Date.now(), workspace = undefined) {
-    return buildDigest(now, workspace === undefined ? undefined : normalizeWorkspace(workspace))
+  function injectionStats(now = Date.now(), workspace = undefined, options = {}) {
+    return buildDigest(now, workspace === undefined ? undefined : normalizeWorkspace(workspace), options)
   }
 
   // ------------------------------------------------------------ 自动记忆 ----
@@ -2669,6 +2725,14 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     deleteItems,
     bulkAction,
     runMaintenance,
+    // 提示词注入：当轮上下文（用户消息/工具报错）用于召回重排
+    noteTurnContext,
+    turnContext: () => ({
+      sessionId: turnContext.sessionId,
+      entries: turnContext.entries.length,
+      at: turnContext.at,
+      text: turnContextText(),
+    }),
     // 数据
     exportData,
     importData,
@@ -2777,6 +2841,22 @@ function sortItems(items, sort) {
 
 /** 关键词加权打分。 */
 function scoreItem(item, queryTokens, active, now) {
+  const relevance = queryRelevance(item, queryTokens)
+  const recency = recencyScore(item.updatedAt, active.retrieval.recencyHalfLifeDays, now)
+  const importance = clampNumber(item.importance / 10, 0, 1, 0.5)
+  const access = clampNumber(Math.log1p(item.accessCount ?? 0) / Math.log(11), 0, 1, 0)
+  const pin = item.pinned ? active.retrieval.pinnedBoost : 0
+  const weight = STATUS_WEIGHT[item.status] ?? 0.5
+  const base = (relevance * 0.55 + importance * 0.2 + recency * 0.15 + access * 0.1) * weight
+  return (base * forgettingFactor(item, active, now)) + pin * weight
+}
+
+/**
+ * 词面相关度（0-1）：查询词在标题/正文/标签里的命中比例。
+ * 标题权重最高，正文次之，标签再略重一点（标签是人手写的归类，比正文更准）。
+ */
+function queryRelevance(item, queryTokens) {
+  if (queryTokens === undefined || queryTokens.size === 0) return 0
   const titleTokens = tokenize(item.title)
   const contentTokens = tokenize(item.content)
   const tagTokens = tokenize(item.tags.join(' '))
@@ -2788,17 +2868,36 @@ function scoreItem(item, queryTokens, active, now) {
     if (contentTokens.has(token)) contentHits += 1
     if (tagTokens.has(token)) tagHits += 1
   }
-  const querySize = Math.max(1, queryTokens.size)
-  const relevance = querySize === 0
-    ? 0
-    : clampNumber((titleHits * 2 + contentHits + tagHits * 1.5) / (querySize * 2), 0, 1, 0)
-  const recency = recencyScore(item.updatedAt, active.retrieval.recencyHalfLifeDays, now)
-  const importance = clampNumber(item.importance / 10, 0, 1, 0.5)
-  const access = clampNumber(Math.log1p(item.accessCount ?? 0) / Math.log(11), 0, 1, 0)
-  const pin = item.pinned ? active.retrieval.pinnedBoost : 0
-  const weight = STATUS_WEIGHT[item.status] ?? 0.5
-  const base = (relevance * 0.55 + importance * 0.2 + recency * 0.15 + access * 0.1) * weight
-  return (base * forgettingFactor(item, active, now)) + pin * weight
+  return clampNumber((titleHits * 2 + contentHits + tagHits * 1.5) / (queryTokens.size * 2), 0, 1, 0)
+}
+
+/**
+ * 从当轮上下文里挑判别力强的查询词。
+ *
+ * 直接拿整段话去打分会被两类词撑死：库里根本没人提的（df=0，永远不命中）
+ * 和几乎每条记忆都有的（中文单字、"用户""记忆"这类，谁都能蹭分）。
+ * 只留「至少一条、但不到一半」的词，再按稀有度取前 32 个：真正在聊的东西浮上来。
+ */
+function selectQueryTokens(text, candidates) {
+  const raw = tokenize(text)
+  if (raw.size === 0 || candidates.length === 0) return new Set()
+  // 超大库不在这里做全量 df：宁可退回重要度排序，也不把每次请求拖成几十毫秒。
+  if (candidates.length > 4000) return new Set()
+  const ceiling = Math.max(2, Math.floor(candidates.length * 0.5))
+  const df = new Map()
+  for (const item of candidates) {
+    for (const token of tokenize(searchableText(item))) {
+      if (raw.has(token)) df.set(token, (df.get(token) ?? 0) + 1)
+    }
+  }
+  const kept = []
+  for (const [token, count] of df) {
+    if (count === 0 || count > ceiling) continue
+    kept.push({ token, count })
+  }
+  if (kept.length === 0) return new Set()
+  kept.sort((left, right) => left.count - right.count)
+  return new Set(kept.slice(0, QUERY_TOKEN_LIMIT).map((entry) => entry.token))
 }
 
 function recencyScore(iso, halfLifeDays, now) {

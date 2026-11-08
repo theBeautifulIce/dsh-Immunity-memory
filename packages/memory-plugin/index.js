@@ -161,6 +161,31 @@ export async function apply(ctx, config) {
     },
   }), 'memory-plugin:prompt')
 
+  // 当轮上下文：只给注入排序用（不落库、不进导出）。
+  // 用户消息说「现在要什么」，工具报错说「现在撞上了什么坑」——后者让"昨天踩过的坑"
+  // 在报错当轮就被拉回提示词前排，而不是靠模型自己想起来去搜。
+  ctx.effect(() => ctx.on('session/event', (session, event) => {
+    const kind = event?.type
+    if (kind !== 'user/message' && kind !== 'tool/result') return
+    const origin = session?.header?.origin ?? session?.origin ?? session?.header?.kind
+    if (origin === 'subagent' || origin === 'subagent-run') return
+    const sessionId = typeof session?.id === 'string' ? session.id : null
+    try {
+      if (kind === 'user/message') {
+        const sourceKind = event?.data?.source?.kind
+        // 真人来源：浏览器/CLI 会话没有 source，插件通道是 plugin:*（QQ 就是 plugin:dsh-onebot）。
+        if (sourceKind !== undefined && sourceKind !== 'user' && !String(sourceKind).startsWith('plugin:')) return
+        engine.noteTurnContext({ sessionId, kind: 'user', text: messageText(event) })
+        return
+      }
+      // 只拿失败的调用结果：成功的输出大多是文件内容、日志，词面噪声太大。
+      if (event?.data?.message?.isError !== true) return
+      engine.noteTurnContext({ sessionId, kind: 'tool', text: messageText(event) })
+    } catch (error) {
+      log('warn', `记录当轮上下文失败：${message(error)}`)
+    }
+  }), 'memory-plugin:turn-context')
+
   // 即时信号：只入队提醒，不直接写记忆。session/event 是 post-commit，
   // 用户消息和助手消息都能拿到；子智能体会话不参与，避免审计子会话自我触发。
   ctx.effect(() => ctx.on('session/event', (session, event) => {
