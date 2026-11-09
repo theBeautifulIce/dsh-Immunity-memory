@@ -482,7 +482,7 @@ window.__ModuleLoader__.load({
               h('textarea', {
                 className: 'mp-textarea',
                 rows: 4,
-                maxLength: 2000,
+                maxLength: 5000,
                 placeholder: txt('这一层固定不变的内容…', 'Immutable content for this layer…'),
                 value: entry.content,
                 onChange: (event) => updateEntry(layer.id, index, { content: event.target.value }),
@@ -630,8 +630,8 @@ window.__ModuleLoader__.load({
               h('span', { className: 'mp-inject-tokens' }, total.toLocaleString()),
               h('span', { className: 'mp-inject-unit' }, txt('token', 'tokens')),
               h('span', { className: 'mp-hint' }, txt(
-                `${injection.itemCount ?? 0} 条 · 字符 ${injection.chars ?? 0}/${maxChars || '不限'}${injection.truncated ? ' · 已截断' : ''}`,
-                `${injection.itemCount ?? 0} items · ${injection.chars ?? 0}/${maxChars || 'unlimited'} chars${injection.truncated ? ' · truncated' : ''}`)))),
+                `${injection.itemCount ?? 0} 条 · 字符 ${injection.chars ?? 0}/${maxChars || '不限'}${injection.full ? ' · 全量注入' : ''}${injection.truncated ? ' · 已截断' : ''}`,
+                `${injection.itemCount ?? 0} items · ${injection.chars ?? 0}/${maxChars || 'unlimited'} chars${injection.full ? ' · full injection' : ''}${injection.truncated ? ' · truncated' : ''}`)))),
           h('div', { className: 'mp-toolbar' },
             h('select', {
               className: 'mp-select',
@@ -653,7 +653,7 @@ window.__ModuleLoader__.load({
               onClick: () => setExpanded((value) => !value),
             }, expanded ? txt('收起分层', 'Hide layers') : txt('展开分层', 'Show layers')))),
         h('div', { className: 'mp-hint' },
-          `${txt('模板', 'template')} ${activeLabel} · ${txt('估算口径', 'estimate')}：CJK 1 字≈1 token，其它 4 字符≈1 token${injection.enabled ? '' : txt(' · 注入已关闭', ' · injection is off')}`),
+          `${txt('模板', 'template')} ${activeLabel} · ${txt('模式', 'mode')}：${injection.full ? txt('全量注入（整库原样，不裁剪）', 'full (entire store, no trimming)') : txt('预算裁剪', 'budgeted')} · ${txt('估算口径', 'estimate')}：CJK 1 字≈1 token，其它 4 字符≈1 token${injection.enabled ? '' : txt(' · 注入已关闭', ' · injection is off')}`),
         managing
           ? h('div', { className: 'mp-template-manage' },
             h('div', { className: 'mp-toolbar', style: { justifyContent: 'space-between' } },
@@ -699,7 +699,7 @@ window.__ModuleLoader__.load({
                       className: 'mp-input',
                       type: 'number',
                       min: 1,
-                      max: 60,
+                      max: 150,
                       value: draft.topN,
                       onChange: (event) => setDraft({ ...draft, topN: Number(event.target.value) }),
                     })),
@@ -709,7 +709,7 @@ window.__ModuleLoader__.load({
                       className: 'mp-input',
                       type: 'number',
                       min: 100,
-                      max: 8000,
+                      max: 20000,
                       value: draft.maxChars,
                       onChange: (event) => setDraft({ ...draft, maxChars: Number(event.target.value) }),
                     }))),

@@ -94,10 +94,10 @@ export const NOTEBOOK_IDS = NOTEBOOKS.map((notebook) => notebook.id)
  */
 export const TEMPLATE_LAYER_IDS = ['L0', 'L1', 'L3']
 export const TEMPLATE_LAYER_META = TEMPLATE_LAYER_IDS.map((id) => LAYERS.find((layer) => layer.id === id))
-const TEMPLATE_LAYER_MAX_ENTRIES = 20
+const TEMPLATE_LAYER_MAX_ENTRIES = 50
 const TEMPLATE_LAYER_TITLE_MAX = 80
-const TEMPLATE_LAYER_CONTENT_MAX = 2000
-const TEMPLATE_LAYER_CHARS_MAX = 12000
+const TEMPLATE_LAYER_CONTENT_MAX = 5000
+const TEMPLATE_LAYER_CHARS_MAX = 30000
 
 /** 不可变层条目：每条都必须能独立看出“属于哪一层、说什么”。 */
 export function sanitizeTemplateLayers(raw) {
@@ -193,8 +193,8 @@ export function sanitizeCustomTemplate(raw) {
   const topN = Math.round(Number(raw.topN))
   const maxChars = Math.round(Number(raw.maxChars))
   if (name === '' || header === '') return undefined
-  if (!Number.isFinite(topN) || topN < 1 || topN > 60) return undefined
-  if (!Number.isFinite(maxChars) || maxChars < 100 || maxChars > 8000) return undefined
+  if (!Number.isFinite(topN) || topN < 1 || topN > 150) return undefined
+  if (!Number.isFinite(maxChars) || maxChars < 100 || maxChars > 20000) return undefined
   const id = typeof raw.id === 'string' && /^[a-z0-9][a-z0-9_-]{1,39}$/.test(raw.id)
     ? raw.id
     : undefined
@@ -321,6 +321,10 @@ export const DEFAULT_SETTINGS = {
   prompt: {
     inject: true,
     template: 'default',
+    // 啸春 2026-11-09：长期记忆要「时刻完整」——默认整库原样注入，
+    // 不按相关度丢条、不按字符预算截断、不截断单条正文。
+    // 关掉后才会回到 topN / maxChars 的预算裁剪。
+    fullInject: true,
     topN: 6,
     maxChars: 1200,
     // 用户自定义模板；内置模板见 MEMORY_TEMPLATES。
@@ -743,6 +747,12 @@ export const SETTINGS_SCHEMA = [
         hint: { zh: '开启后每次对话都会带上最重要的若干条记忆。', en: 'Each turn carries the most important memories.' },
       },
       {
+        path: 'prompt.fullInject',
+        type: 'boolean',
+        label: { zh: '全量注入（长期记忆时刻完整）', en: 'Inject everything (always-complete memory)' },
+        hint: { zh: '打开后所有启用层的记忆整条注入，不按条数/字符裁剪；下面的覆盖预算只在关闭时生效。', en: 'When on, every active memory is injected in full; the override budget below only applies when this is off.' },
+      },
+      {
         path: 'prompt.overrideBudget',
         type: 'boolean',
         label: { zh: '覆盖模板预算', en: 'Override template budget' },
@@ -752,7 +762,7 @@ export const SETTINGS_SCHEMA = [
         path: 'prompt.topN',
         type: 'number',
         min: 0,
-        max: 60,
+        max: 150,
         step: 1,
         unit: { zh: '条', en: 'entries' },
         label: { zh: '注入条数（覆盖）', en: 'Entries injected (override)' },
@@ -762,7 +772,7 @@ export const SETTINGS_SCHEMA = [
         path: 'prompt.maxChars',
         type: 'number',
         min: 0,
-        max: 8000,
+        max: 20000,
         step: 100,
         unit: { zh: '字符', en: 'chars' },
         label: { zh: '注入字符上限（覆盖）', en: 'Injection cap (override)' },

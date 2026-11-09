@@ -106,13 +106,16 @@ const GRAPH_BONUS = envNumber('DSH_GRAPH_BONUS', 0.12)
 const GRAPH_POSTING_MAX = 40
 // 人工关联的读取上限：一条记忆被手工连到几十条已经算滥用，读太多只会拖慢启动。
 const MANUAL_EDGE_LIMIT = 20
-// 注入时的分层：命中条目给全文，靠前的给摘要，其余只留一行线索。
-// 三十条平铺六千字，模型真正看进去的只有前几条；把字符预算按相关度分配，
-// 同样的 token 数里能装下更多「有用的那一半」。
-const HIT_BODY_CHARS = 400
-const TOP_BODY_CHARS = 260
-const BACKGROUND_BODY_CHARS = 90
+// 注入时的分层：这是「关掉全量注入」后的回退路径——命中条目给全文，
+// 靠前的给摘要，其余只留一行线索。默认的 fullInject 模式不看这三档。
+const HIT_BODY_CHARS = 3000
+const TOP_BODY_CHARS = 3000
+const BACKGROUND_BODY_CHARS = 3000
 const TOP_RANK = 3
+// 啸春 2026-11-09：长期记忆要「时刻完整」，默认整库原样注入。
+// 这个硬上限只防单条异常大的正文（写库时允许到 20 万字符）把会话撑爆，
+// 正常库远达不到；真触发时 truncated 会亮起，不会被悄悄吞掉。
+const FULL_INJECT_HARD_MAX = 100000
 
 /**
  * 查询词里的虚词黑名单：中文按字+二元组切词，不滤掉这些词的话，
@@ -2155,8 +2158,9 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
 
   /**
    * 构造提示词注入：模板头 + 模板不可变层 + 共享可改写记忆。
-   * 模板自带 L0/L1/L3 时，数据库中同层条目不再重复注入；没有模板层的旧配置
-   * 仍按老行为注入数据库里的不可变层，保持向前兼容。
+   * 默认 fullInject：启用层里的记忆整条注入，模板层正文也不裁剪；
+   * 只有关掉全量后才回到 topN/maxChars 的预算裁剪。
+   * 数据库里的同层条目照常注入，模板层只做「人格底座」，不再遮蔽同层记忆。
    * promptDigest 只要文本；injectionStats 还要每层 token 明细，两者共用这一份结果，
    * 避免 UI 看到的预算与实际注入的不是同一套算法。
    */
@@ -2164,8 +2168,18 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     const current = currentState()
     const active = settings()
     const template = activeTemplate(active)
-    const budget = promptBudget(active)
-    const enabled = active.enabled !== false && active.prompt.inject !== false && budget.topN > 0
+    const baseBudget = promptBudget(active)
+    // 啸春 2026-11-09：长期记忆要「时刻完整」。默认全量注入——所有启用层的
+    // 记忆整条进提示词，不按相关度丢条、不按字符预算截断、不截断单条正文。
+    // topN / maxChars 仍然保留在返回里，只用于关掉全量后的预算模式。
+    const fullInject = active.prompt.fullInject !== false
+    const budget = {
+      topN: baseBudget.topN,
+      maxChars: fullInject ? 0 : baseBudget.maxChars,
+    }
+    const enabled = active.enabled !== false
+      && active.prompt.inject !== false
+      && (fullInject || budget.topN > 0)
     // 当轮上下文 → 查询词：让注入跟着「现在在干什么」走，而不是永远按重要度排。
     const queryText = typeof options.query === 'string' && options.query !== ''
       ? options.query
@@ -2178,6 +2192,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       chars: 0,
       topN: budget.topN,
       maxChars: budget.maxChars,
+      full: fullInject,
       truncated: false,
       query: { used: false, tokens: 0, chars: queryText.length, preview: truncate(queryText, 160), hitBar: RELEVANCE_HIT },
       template: {
@@ -2227,10 +2242,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (item.supersededBy !== null && item.supersededBy !== undefined) return false
       if (isExpiredItem(item, now)) return false
       if (!layerEnabled(active, item.layer)) return false
-      if (workspace !== undefined && item.workspace !== null && item.workspace !== workspace) return false
+      // 2026-11-09 啸春要求：长期记忆要时刻完整。未指定 workspace（null/undefined）时不再按 workspace 排除任何记忆。
+      if (workspace != null && item.workspace !== null && item.workspace !== workspace) return false
       if (item.type !== 'memory') return false
-      // 模板已经提供不可变层时，以模板为准，避免数据库里的旧同层条目重复注入。
-      if (configuredImmutable && layerInfo(item.layer).immutable) return false
+      // 2026-11-09：模板自带 L0/L1/L3 时，数据库里的同层记忆也照样注入（原先会被整层屏蔽）。
       return true
     })
     const queryTokens = selectQueryTokens(queryText, candidates)
@@ -2275,14 +2290,17 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (Number.isFinite(newer) && newer !== 0) return newer
       return 0
     })
-    const chosen = scored.slice(0, budget.topN)
+    const chosen = fullInject ? scored : scored.slice(0, budget.topN)
     // 空库也要注入模板头部：否则新会话只剩工具描述，模型不知道有长期记忆可用。
     const coldStart = chosen.length === 0 && templateEntries.length === 0
     const lines = []
     const lineMeta = []
     for (const entry of templateEntries) {
       const layerLabel = entry.layerName?.zh ?? entry.layer
-      const body = truncate(String(entry.content).replace(/\s+/g, ' ').trim(), 800)
+      // 模板层也是记忆的一部分：全量注入时按原样保留换行与版式，
+      // 800 字的摘要裁剪只在预算模式里用。
+      const raw = String(entry.content).trim()
+      const body = fullInject ? raw : truncate(raw.replace(/\s+/g, ' ').trim(), 800)
       lines.push(`- [${entry.layer} ${layerLabel}·模板] ${entry.title}：${body}`)
       lineMeta.push({ ...entry, source: 'template', importance: null })
     }
@@ -2293,7 +2311,9 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       // 只沾上一个词不算——短查询里一个通用词就能拿到 0.5 的相对分，所以要求至少对上两个词。
       const hit = (relevanceRaw ?? relevance) >= hitBar && matched >= MIN_HIT_TOKENS
       const limit = hit ? HIT_BODY_CHARS : rank < TOP_RANK ? TOP_BODY_CHARS : BACKGROUND_BODY_CHARS
-      const body = truncate(item.content.replace(/\s+/g, ' ').trim(), limit)
+      const raw = String(item.content).trim()
+      // 全量注入：正文原样进提示词，保留换行（代码/路径清单靠换行才读得清）。
+      const body = fullInject ? raw : truncate(raw.replace(/\s+/g, ' ').trim(), limit)
       const mark = hit ? '·命中' : ''
       lines.push(`- [${item.layer}·重要度${item.importance}${mark}] ${item.title}：${body}`)
       lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance: relevanceRaw ?? relevance, matched })
@@ -2306,7 +2326,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       : template.header
     let text = [header, ...lines].filter((part) => part !== '').join('\n')
     let truncated = false
-    if (budget.maxChars > 0 && text.length > budget.maxChars) {
+    if (fullInject && text.length > FULL_INJECT_HARD_MAX) {
+      // 这不是常规裁剪：只有单条异常大的正文才会碰到。亮了就说明库里有东西
+      // 该拆分了，交给 UI 和 diagnostics 显示，不静默吞。
+      text = `${text.slice(0, Math.max(0, FULL_INJECT_HARD_MAX - 1))}…`
+      truncated = true
+    } else if (!fullInject && budget.maxChars > 0 && text.length > budget.maxChars) {
       text = `${text.slice(0, Math.max(0, budget.maxChars - 1))}…`
       truncated = true
     }
@@ -2363,6 +2388,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       chars: text.length,
       topN: budget.topN,
       maxChars: budget.maxChars,
+      full: fullInject,
       truncated,
       query: {
         used: queryTokens.size > 0,
@@ -2736,7 +2762,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       : (next.prompt.customTemplates ?? []).find((template) => template.id === input.id)
     const sanitized = sanitizeCustomTemplate(previous === undefined ? input : { ...previous, ...input })
     if (sanitized === undefined) {
-      throw createError('INVALID_TEMPLATE', '模板需要 1-40 字名称、1-4000 字头部，条数 1-30，字符预算 100-8000；不可变层条目需包含内容')
+      throw createError('INVALID_TEMPLATE', '模板需要 1-40 字名称、1-4000 字头部，条数 1-150，字符预算 100-20000；不可变层条目需包含内容')
     }
     if (input.id !== undefined && sanitized.id === undefined) {
       throw createError('INVALID_TEMPLATE_ID', '模板 id 只能使用小写字母、数字、下划线和短横线，且不能与内置模板重名')

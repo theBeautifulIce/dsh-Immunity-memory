@@ -4,11 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.26] - 2026-11-09
+
+Long-term memory is meant to be in the prompt whole, at every turn. The digest used to rank entries and spend a character budget on them, cut each body to a few thousand characters, and — the worst part — truncate every template layer entry at 800 characters, so a long identity or language block reached the model cut mid-sentence while the UI still reported "not truncated". Injection now has a `prompt.fullInject` mode, on by default: every enabled entry goes in verbatim, no relevance cut, no per-entry cut, no budget. `topN`/`maxChars` stay as the budgeted fallback for anyone who turns it off. A 100000-character hard cap remains only so a single pathological body (up to 200000 characters is storable) cannot blow up the session, and it sets `truncated` when it fires.
+
+Template layers are no longer treated as a reason to suppress database entries of the same layer, and the update removes that masking branch; templates are a persona base, the store is still injected. The old 30-entry / 8000-character template budget no longer caps anything in the default mode.
 
 The audit subagent used to answer one question — whether the user's own wording supported the write — and treated missing wording as the main reason to reject. It had no way to say "supported, but not worth keeping", so one-off status updates and restatements of the current turn passed whenever a quote existed. The judge now weighs two independent dimensions: evidence, and whether the entry earns a place in long-term memory. Appearing in a quote is necessary, not sufficient; noise is rejected even when it is true. On updates the prompt also carries the previous title and body, so "edited well" and "edited away the useful part" stop looking identical.
 
 Separately, the review card showed only the quoted user turn, so approving meant trusting a memory you could not see. Each candidate now renders the pending title, body, layer, importance, TTL, tags and notebook, plus the previous version on updates. The recent-runs list shows the written body, and the deny message carries both the new and the old text.
+
+Workspace-scoped entries were also being dropped from sessions that asked for no particular workspace: the filter compared `null` against a scoped entry's project and excluded it, so a session with no stated project silently lost memories written from a project. The filter now only applies when a workspace is actually named; an unscoped digest carries the whole store.
 
 ## [0.4.25] - 2026-11-08
 

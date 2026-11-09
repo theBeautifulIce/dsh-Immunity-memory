@@ -42,3 +42,7 @@ desktop.ini
 go-service/.probe/
 *~
 
+# 本地打包与手工备份（2026-11-09：zip 与 .bak-* 不进仓库）
+*.zip
+*.bak-*
+

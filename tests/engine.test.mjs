@@ -422,12 +422,57 @@ await test('模板热切换立即改变注入预算', async () => {
   await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { template: 'default' } }))
 })
 
-await test('注入条数上限放宽到 60，45 条不会再被折回 30', async () => {
+await test('注入条数上限 150、字符上限 20000，超出的才被收敛', async () => {
   const normalized = normalizeSettings({ prompt: { overrideBudget: true, topN: 45, maxChars: 6000 } })
   assert.equal(normalized.prompt.overrideBudget, true)
   assert.equal(normalized.prompt.topN, 45)
-  const tooMany = normalizeSettings({ prompt: { overrideBudget: true, topN: 90 } })
-  assert.ok(tooMany.prompt.topN < 90)
+  const bigger = normalizeSettings({ prompt: { overrideBudget: true, topN: 120, maxChars: 18000 } })
+  assert.equal(bigger.prompt.topN, 120)
+  assert.equal(bigger.prompt.maxChars, 18000)
+  const tooMany = normalizeSettings({ prompt: { overrideBudget: true, topN: 151, maxChars: 20001 } })
+  assert.equal(tooMany.prompt.topN, 150)
+  assert.equal(tooMany.prompt.maxChars, 20000)
+})
+
+await test('默认全量注入：不按条数/字符裁剪，单条长正文也完整进入提示词', async () => {
+  // 每条用不同主题词，避免被去重逻辑标记为 duplicateOf（那样本来就不该注入）。
+  const topics = ['灯塔', '潮汐', '陶器', '蜂群', '铁轨', '盐湖', '松针', '船坞', '风车', '石桥',
+    '苔原', '铜钟', '茶垄', '雪线', '盐井', '沙丘', '鱼汛', '木刻', '纸鸢', '矿灯',
+    '藤桥', '礁石', '雨林', '瓦窑', '马帮', '冰川', '稻浪', '陶轮', '船舷', '石门',
+    '牧场', '盐霜', '麦垛', '渔火', '纺车', '水磨', '蜂箱', '铁砧', '茶园', '晒场']
+  const created = []
+  for (let index = 0; index < topics.length; index += 1) {
+    created.push(await engine.createItem({
+      layer: 'L4',
+      title: `全量注入样本 ${topics[index]}`,
+      content: `关于${topics[index]}的独立记录，编号 bulk-${index}，与其它主题不相干。`,
+      importance: 5,
+      ttlDays: 30,
+    }, 'agent'))
+  }
+  const tail = '长正文结尾标记 LONG_TAIL_OK'
+  const longItem = await engine.createItem({
+    layer: 'L4',
+    title: '超长正文记忆',
+    content: `${'铺'.repeat(3500)}${tail}`,
+    importance: 5,
+    ttlDays: 30,
+  }, 'agent')
+  const stats = engine.injectionStats()
+  assert.equal(stats.full, true, '默认应处于全量注入模式')
+  assert.equal(stats.truncated, false, '全量模式不应触发截断')
+  assert.ok(stats.sharedItemCount >= 41, `应注入全部记忆，实际 ${stats.sharedItemCount} 条`)
+  assert.ok(stats.text.includes('bulk-39'), '超出模板 30 条预算的条目也要在注入里')
+  assert.ok(stats.text.includes(tail), '超过 3000 字的单条正文不能被截尾')
+  await engine.deleteItems([...created.map((item) => item.id), longItem.id], 'user')
+})
+
+await test('关闭全量注入后回到按条数预算裁剪', async () => {
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { fullInject: false } }))
+  const stats = engine.injectionStats()
+  assert.equal(stats.full, false)
+  assert.ok(stats.sharedItemCount <= stats.topN, `预算模式下条数不应超过 topN（${stats.sharedItemCount}/${stats.topN}）`)
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), { prompt: { fullInject: true } }))
 })
 
 await test('自定义模板可新增、切换、删除', async () => {
