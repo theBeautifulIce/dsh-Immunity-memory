@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.4.2-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.4.26-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -36,6 +36,18 @@ Context windows get cleared, sessions get switched, and models forget what happe
 - **Lock-in**: data lives in local SQLite, with no cloud memory service. Missing Go/Rust components degrade gracefully instead of breaking the plugin.
 
 This is not "dump the chat history into a JSON file", and it is not "wrap a vector database". It is a complete local memory subsystem: **Node control layer + Go persistence/retrieval service + Rust native compute core + visual UI**.
+
+## What it remembers is a person
+
+Nobody remembers everything. What stays in mind at all times is only "what kind of person I am": the temper, who I care about, the rules I keep, what I promised. The rest — which day something happened, how a path was configured, what went wrong that time — is usually looked up when it is actually needed, and looked up accurately.
+
+The memory layer works the same way:
+
+- **The essence stays resident**: identity, boundaries, preferences and long-term goals ride along in a small slice of context on every turn, so a new session does not reset who it is.
+- **The details wait to be asked for**: concrete findings, procedures and lessons stay in the store, retrieved and re-checked when they are needed, updated once they are used.
+- **Judgment may change, the character does not**: conclusions can be superseded as new facts arrive, but with evidence and an audit trail.
+
+In other words, the little context it spends buys consistency: a different session, a different model, and still the same it.
 
 ## What it solves
 

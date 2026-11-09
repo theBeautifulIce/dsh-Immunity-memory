@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.4.2-4f46e5?style=flat-square" />
+  <img alt="version" src="https://img.shields.io/badge/version-0.4.26-4f46e5?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2da44e?style=flat-square" />
   <img alt="DSH plugin" src="https://img.shields.io/badge/DSH-plugin-0ea5e9?style=flat-square" />
   <img alt="local first" src="https://img.shields.io/badge/local--first-yes-8250df?style=flat-square" />
@@ -36,6 +36,18 @@
 - **锁定**：数据保存在本机 SQLite，不依赖云端记忆服务；Go / Rust 组件缺失时自动降级，而不是直接罢工。
 
 它不是“把聊天记录塞进一个 JSON 文件”，也不是“只包一层向量数据库”。它是一个完整的本地记忆子系统：**Node 控制层 + Go 持久化/检索服务 + Rust 原生计算核心 + 可视化界面**。
+
+## 记得的，是一个人
+
+人本来记不全所有事。真正一直留在心里的，只有「我是个什么样的人」：脾气、在乎谁、守什么规矩、答应过什么。至于哪天做了什么、哪个路径怎么配、当初又踩了什么坑，多半是等用得上的时候再翻——翻得到、翻得准，就够了。
+
+这套记忆也照这个来：
+
+- **本色常驻**：身份、边界、偏好、长期目标用一小块上下文一直留在提示词里，跨会话不丢，让它始终是同一个人；
+- **细节按需**：具体结论、过程、教训留在库里，用得上再检索、再核对，用过就更新；
+- **该改就改**：本质不变，判断会跟着新事实走——旧结论可以被取代，但要留依据、留痕迹。
+
+换句话说，它花掉的那点上下文，买的是「一致性」：换了会话、换了模型，它还是那个它。
 
 ## 它解决什么问题
 
