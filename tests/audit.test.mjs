@@ -363,4 +363,70 @@ await test('startActivation 卡住时按超时放行', async () => {
   assert.equal(runs[0].status, 'failed')
 })
 
+await test('更新审计的提示词携带新旧内容与可读元数据', async () => {
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), {
+    hook: { enabled: true, enforce: true, minConfidence: 0.7, timeoutSeconds: 10 },
+  }))
+  const existing = await engine.createItem({
+    layer: 'L4',
+    title: '包管理器旧版',
+    content: '旧正文：团队使用 npm 8 管理依赖。',
+    ttlDays: 30,
+  }, 'user')
+  const fake = fakeSubagents({ verdict: 'approve', confidence: 0.9, reason: '更新后更准确' })
+  const hook = createAuditHook({ engine, getSubagents: () => fake.service, log })
+  const decision = await hook.gate({
+    name: 'memory_update',
+    callId: 'call-prompt-update',
+    arguments: {
+      id: existing.id,
+      layer: 'L4',
+      title: '包管理器新版',
+      content: '新正文：团队统一使用 pnpm 10 管理依赖。',
+      ttlDays: 60,
+      importance: 8,
+      tags: ['包管理器', '约定'],
+    },
+    agent: fakeAgent(),
+  }, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const prompt = fake.calls[0].request.prompt[0].text
+  assert.ok(prompt.includes('新正文：团队统一使用 pnpm 10'), '提示词应带新正文')
+  assert.ok(prompt.includes('旧正文：团队使用 npm 8'), '提示词应带旧正文')
+  assert.ok(prompt.includes(`更新（目标条目 ${existing.id}）`), '提示词应标明更新目标')
+  assert.ok(prompt.includes('重要度 8/10'), '提示词应带重要度')
+  assert.ok(prompt.includes('有效期 60 天'), '提示词应带有效期')
+  assert.ok(prompt.includes('标签 包管理器、约定'), '提示词应带标签')
+  assert.ok(prompt.includes('必要条件'), '提示词应说明原话只是必要条件')
+})
+
+await test('更新被拒绝时 deny 文案包含新旧正文', async () => {
+  await engine.replaceSettings(applySettingsPatch(engine.getSettings(), {
+    hook: { enabled: true, enforce: true, minConfidence: 0.7 },
+  }))
+  const existing = await engine.createItem({
+    layer: 'L4',
+    title: '待改条目',
+    content: '旧正文：保留关键配置 A 与回退路径。',
+    ttlDays: 30,
+  }, 'user')
+  const fake = fakeSubagents({ verdict: 'reject', confidence: 0.93, reason: '新版本删掉了关键信息' })
+  const hook = createAuditHook({ engine, getSubagents: () => fake.service, log })
+  const decision = await hook.gate({
+    name: 'memory_update',
+    callId: 'call-deny-before',
+    arguments: {
+      id: existing.id,
+      layer: 'L4',
+      title: '待改条目',
+      content: '新正文：配置 A 已不再需要。',
+    },
+    agent: fakeAgent(),
+  }, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.ok(decision.reason.includes('新正文：配置 A 已不再需要'), 'deny 文案应带待写入正文')
+  assert.ok(decision.reason.includes('原内容（本次更新之前）'), 'deny 文案应标出旧内容段')
+  assert.ok(decision.reason.includes('旧正文：保留关键配置 A'), 'deny 文案应带旧正文')
+})
+
 console.log(`\n${passed} 项通过，数据目录：${store.dir}`)

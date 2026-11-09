@@ -175,9 +175,14 @@ const boot = {
       tokens: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, total: 125 },
     },
     runs: [{
-      id: 'audit_demo0001', at: '2026-11-06T03:00:00.000Z', tool: 'memory_write',
+      id: 'audit_demo0001', at: '2026-11-06T03:00:00.000Z', tool: 'memory_update', action: 'update', targetId: 'mem_demo',
       title: '示例候选', layer: 'L4', status: 'needs_user', verdict: 'needs_user',
       confidence: 0.4, reason: '证据不足', enforced: true, sourceQuote: '用户原话',
+      proposed: {
+        title: '示例候选', content: '示例候选正文：统一使用 pnpm 10。', layer: 'L4', type: 'memory',
+        importance: 7, ttlDays: 30, tags: ['包管理器'],
+      },
+      before: { title: '旧示例候选', content: '旧示例候选正文：使用 npm 8。' },
       usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 0, totalTokens: 125 },
     }],
   },
@@ -253,6 +258,18 @@ const auditPanel = render('AuditPanel 审计候选', React.createElement(AuditPa
 }))
 assert.ok(auditPanel.includes('候选队列'), '审计页应显示候选队列')
 assert.ok(auditPanel.includes('125'), '审计页应显示累计 token')
+for (const token of [
+  '准备写入的记忆',
+  '示例候选正文：统一使用 pnpm 10。',
+  '重要度 7',
+  '有效期 30 天',
+  '标签 包管理器',
+  '原内容（本次更新之前）',
+  '旧示例候选正文：使用 npm 8。',
+  '用户原话',
+]) {
+  assert.ok(auditPanel.includes(token), `AuditPanel 应包含“${token}”`)
+}
 render('PitfallPanel 踩坑笔记', React.createElement(PitfallPanel, {
   api, lang: 'zh', notify: noop, onChanged: noop,
 }))

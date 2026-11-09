@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+The audit subagent used to answer one question — whether the user's own wording supported the write — and treated missing wording as the main reason to reject. It had no way to say "supported, but not worth keeping", so one-off status updates and restatements of the current turn passed whenever a quote existed. The judge now weighs two independent dimensions: evidence, and whether the entry earns a place in long-term memory. Appearing in a quote is necessary, not sufficient; noise is rejected even when it is true. On updates the prompt also carries the previous title and body, so "edited well" and "edited away the useful part" stop looking identical.
+
+Separately, the review card showed only the quoted user turn, so approving meant trusting a memory you could not see. Each candidate now renders the pending title, body, layer, importance, TTL, tags and notebook, plus the previous version on updates. The recent-runs list shows the written body, and the deny message carries both the new and the old text.
+
 ## [0.4.25] - 2026-11-08
 
 Every hourly and daily review costs tokens, and until now nothing measured whether those tokens

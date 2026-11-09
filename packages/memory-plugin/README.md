@@ -27,7 +27,7 @@ plugin_manager action=install_bundle target=<本包绝对路径>
 | `lib/storage.js` | 存储选择：Go 服务 → Node SQLite → JSON |
 | `lib/engine.js` | 记忆引擎：条目 CRUD、实体键更新、版本取代、检索路由、冲突检测、维护任务、导出导入（全 async） |
 | `lib/capture.js` | 自动记忆信号检测、回顾排队与记事本代码去重 |
-| `lib/audit.js` | 写入审计 Hook：抓取本轮用户原话与写入参数，交给独立子智能体裁决；失败放行并记录 token |
+| `lib/audit.js` | 写入审计 Hook：抓取本轮用户原话、写入参数与更新前的旧内容，按「依据 + 长期价值」交给独立子智能体裁决；失败放行并记录 token |
 | `lib/write-hooks.js` | 通用写入生命周期 Hook：before/after 可改写、拦截与失败放行 |
 | `lib/search.js` | Node 回退检索：倒排 BM25 + 余弦 + 图谱 + 融合 |
 | `lib/sqlite.js` | Node 回退存储：迁移、向量表、备份 |

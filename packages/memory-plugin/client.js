@@ -287,6 +287,11 @@ window.__ModuleLoader__.load({
       .mp-switch input { width:15px; height:15px; accent-color:var(--dsw-alias-brand-primary,#3b82f6) }
       .mp-code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
         color:var(--dsw-alias-label-secondary,#6b7280); word-break:break-all }
+      .mp-audit-block { display:flex; flex-direction:column; gap:3px; padding:6px 8px;
+        border:1px solid var(--dsw-alias-border-l2,rgba(15,23,42,.1)); border-radius:8px }
+      .mp-audit-label { font-size:11px; font-weight:600; color:var(--dsw-alias-label-secondary,#6b7280) }
+      .mp-audit-body { font-size:11px; white-space:pre-wrap; word-break:break-word; line-height:1.5;
+        color:var(--dsw-alias-label-primary,#1f2329); max-height:160px; overflow:auto }
       .mp-list-plain { display:flex; flex-direction:column; gap:6px; max-height:260px; overflow:auto }
       .mp-audit { font-size:11px; color:var(--dsw-alias-label-secondary,#6b7280);
         display:flex; gap:8px; border-bottom:1px dashed var(--dsw-alias-border-l2,rgba(15,23,42,.1)); padding:4px 0 }
@@ -1644,14 +1649,55 @@ window.__ModuleLoader__.load({
         ? 'is-bad'
         : status === 'needs_user' || status === 'running' ? 'is-warn' : ''
 
+      // 审批与复盘都要先看「准备写入什么」，只看用户原话会让人不知道要记的到底是什么。
+      const previewText = (value, limit) => {
+        const text = String(value ?? '').trim()
+        if (text === '') return ''
+        return text.length <= limit
+          ? text
+          : `${text.slice(0, limit)}\n…（共 ${text.length} 字，以上为前 ${limit} 字）`
+      }
+      const proposedMeta = (run) => {
+        const p = run?.proposed ?? {}
+        const values = []
+        if (p.type === 'note') values.push(txt('记事本条目', 'note entry'))
+        if (p.importance !== undefined) values.push(`${txt('重要度', 'importance')} ${p.importance}`)
+        if (p.ttlDays !== undefined) values.push(`${txt('有效期', 'ttl')} ${p.ttlDays} ${txt('天', 'd')}`)
+        if (p.notebook !== undefined) values.push(`${txt('记事本', 'notebook')} ${p.notebook}`)
+        if (Array.isArray(p.tags) && p.tags.length > 0) values.push(`${txt('标签', 'tags')} ${p.tags.join('、')}`)
+        if (typeof p.key === 'string' && p.key !== '') values.push(`${txt('键', 'key')} ${p.key}`)
+        return values
+      }
+      const proposedBlock = (run) => {
+        const p = run?.proposed ?? {}
+        const meta = proposedMeta(run)
+        const body = previewText(p.content, 1200)
+        const before = previewText(run?.before?.content, 800)
+        return h('div', { className: 'mp-audit-block' },
+          h('div', { className: 'mp-audit-label' }, txt('准备写入的记忆', 'Memory to be written')),
+          p.title ? h('div', null, `${txt('标题', 'Title')}：${p.title}`) : null,
+          body !== ''
+            ? h('div', { className: 'mp-audit-body' }, body)
+            : h('div', { className: 'mp-hint' }, txt('（正文为空）', '(empty content)')),
+          meta.length > 0 ? h('div', { className: 'mp-row-meta' }, meta.join(' ｜ ')) : null,
+          before !== ''
+            ? h('div', { className: 'mp-audit-label', style: { marginTop: '4px' } }, txt('原内容（本次更新之前）', 'Existing content (before this update)'))
+            : null,
+          before !== '' ? h('div', { className: 'mp-audit-body' }, before) : null,
+          run?.sourceQuote
+            ? h('div', { className: 'mp-audit-label', style: { marginTop: '4px' } }, txt('用户原话', 'User quote'))
+            : null,
+          run?.sourceQuote ? h('div', { className: 'mp-code' }, run.sourceQuote.slice(0, 600)) : null)
+      }
+
       return h('div', { className: 'mp-panel' },
         h('div', { className: 'mp-card' },
           h('div', { className: 'mp-inject-head' },
             h('div', null,
               h('div', { className: 'mp-card-title' }, txt('写入审计 Hook', 'Write audit hook')),
               h('div', { className: 'mp-hint' }, txt(
-                '每次 memory_write / memory_update 前，由一个无工具权限的干净子智能体只依据用户原话判断；失败、超时或服务缺失一律放行。',
-                'Before every memory_write / memory_update, a clean tool-less subagent judges the write against the user’s own words. Failures, timeouts and missing services always allow the write.'))),
+                '每次 memory_write / memory_update 前，由一个无工具权限的干净子智能体判断依据与长期价值；待写入的正文、元数据与更新前的原内容都会列在候选卡片里。失败、超时或服务缺失一律放行。',
+                'Before every memory_write / memory_update, a clean tool-less subagent judges both evidence and long-term value; the pending content, metadata and the previous version are shown on each candidate. Failures, timeouts and missing services always allow the write.'))),
             h('div', { className: 'mp-toolbar' },
               h('button', {
                 type: 'button',
@@ -1700,7 +1746,7 @@ window.__ModuleLoader__.load({
                 h('span', null, `${formatTime(run.at)} · ${run.tool}`),
                 h('span', null, `${txt('层级', 'layer')} ${run.layer ?? '?'}`),
                 run.usage?.totalTokens ? h('span', null, `${run.usage.totalTokens} token`) : null),
-              run.sourceQuote ? h('div', { className: 'mp-code' }, run.sourceQuote.slice(0, 600)) : null,
+              proposedBlock(run),
               h('div', { className: 'mp-hint' }, run.reason || txt('审计员未给出理由', 'No reason supplied')),
               run.error ? h('div', { className: 'mp-hint', style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)' } }, run.error) : null,
               h('div', { className: 'mp-toolbar' },
@@ -1731,6 +1777,9 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'mp-hint' }, `${formatTime(run.at)} · ${run.usage?.totalTokens ?? 0} token`)),
               h('div', { className: 'mp-hint' }, `${run.tool} · ${run.verdict ?? '-'} · ${Math.round((run.confidence ?? 0) * 100)}%${run.decision ? ` · ${run.decision.actor}` : ''}`),
               run.reason ? h('div', { className: 'mp-hint' }, run.reason) : null,
+              run.proposed?.content
+                ? h('div', { className: 'mp-audit-body' }, `${txt('写入内容', 'Written')}：${previewText(run.proposed.content, 300)}`)
+                : null,
               run.appliedItemId ? h('div', { className: 'mp-code' }, `${txt('写入条目', 'applied item')} ${run.appliedItemId}`) : null))))))
     }
 

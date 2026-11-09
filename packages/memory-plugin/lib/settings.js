@@ -957,7 +957,7 @@ export const SETTINGS_SCHEMA = [
   {
     id: 'hook',
     title: { zh: '写入审计 Hook', en: 'Write audit hook' },
-    desc: { zh: '每次 memory_write / memory_update 前，由独立子智能体对照用户原话做一次干净审计；失败时放行并记录', en: 'Before every memory write/update, an isolated subagent audits it against the user turn; failures fail open and are recorded' },
+    desc: { zh: '每次 memory_write / memory_update 前，由独立子智能体对照用户原话与长期价值做一次干净审计；更新时会对比新旧两版；失败时放行并记录', en: 'Before every memory write/update, an isolated subagent audits both evidence and long-term value, comparing old and new versions on updates; failures fail open and are recorded' },
     fields: [
       {
         path: 'hook.enabled',
