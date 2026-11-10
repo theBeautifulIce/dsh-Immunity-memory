@@ -2,7 +2,7 @@
 
 > 面向下一个接手这个仓库的人（含 AI 助手）的注意事项。
 > 本文件与 `codebasemap.md` 放在仓库根目录，随仓库一起走。
-> 最后更新：2026-11-10 15:18
+> 最后更新：2026-11-10 15:38
 
 ## 这是什么
 
@@ -14,11 +14,11 @@ DSH 的记忆插件本体，三层结构：
 
 上游仓库：`https://github.com/theBeautifulIce/dsh-Immunity-memory.git`（origin，分支 main）
 
-## 当前状态：已提交，等重启生效
+## 当前状态：已提交，已重启上线并验收通过
 
-HEAD = `613ee13`（2026-11-10 15:26 feat(memory): load notebook details on demand），20 个文件、+984/-57，含新测试 `tests/index-mode.test.mjs`、`tests/notes-index.test.mjs`，以及重新构建的 Go 服务二进制（`packages/memory-plugin/bin/win32-x64/memory-service.exe`，sha256 前缀 6df9efeb817cb05e）。
+HEAD = `2060d17`（docs: update handoff and codebasemap for progressive loading），功能提交是 `613ee13`（2026-11-10 15:26 feat(memory): load notebook details on demand）——20 个文件、+984/-57，含新测试 `tests/index-mode.test.mjs`、`tests/notes-index.test.mjs`，以及重新构建的 Go 服务二进制（`packages/memory-plugin/bin/win32-x64/memory-service.exe`，sha256 前缀 6df9efeb817cb05e）。
 
-工作区干净。版本号 0.4.29，**尚未发布**；DSH 还没重启，线上跑的还是旧注入（notesIndexCount=66 的标题清单形态）。重启后才会切成「记事本目录」形态。
+工作区干净。版本号 0.4.29，**尚未发布到远端**（本地已 commit，未 push；origin 需走本地代理 `http://127.0.0.1:7078`）。DSH 已于 2026-11-10 15:30 重启，线上跑的已是新注入：注入正文 9794 字 / 6700 token，末尾只挂「### 记事本目录（4 类，共 66 条）」分类目录（182 字），不再有 66 条标题清单（改前 13582 字 / 8466 token、清单 3967 字）。宿主 GUI 端口在重启后变为 `60893`。
 
 主线一「记忆索引模式」（indexMode）：记忆条目只留一行要点，细节放记事本，条目用 `refs` 指过去。0.4.28 起随本次提交一起落地。
 
@@ -44,6 +44,7 @@ HEAD = `613ee13`（2026-11-10 15:26 feat(memory): load notebook details on deman
 8. **要改模板层（L0/L1/L3）**：memory_write 写不了 L3，但能走宿主 API —— `POST http://127.0.0.1:59612/dsh-memory-plugin/api/v2`，method `templates.list` 导出整份模板备份、`templates.save` 只替换目标层（其余原样回传），改后逐条比对 title+content 并用 `prompt.preview` 复核注入文本。改前务必先备份。
 9. **Go 服务二进制要跟着改一起重建**：`go-service/internal/store/store.go` 改了字段（refs / indexMode）就得跑 `node scripts/build-go.mjs` 重新生成 `packages/memory-plugin/bin/<platform>-<arch>/memory-service.exe`，插件启动时才会把新二进制铺到 `<DSH_HOME>/storages/dsh-memory-plugin/service/`。不重建，Go 侧读库就丢这两个字段（Node 回退层不受影响，所以本地测试照样过）。
 10. **Go 代码改动先过 gofmt**：`D:\GO\bin\gofmt.exe -l <file>` 应输出空；缩进用 Tab，手工插行容易写成空格导致 `expected ';', found '{'` 之类的语法错。
+11. **改 Go 代码别用 PowerShell 内插字符串硬改**：`store.go` 这轮用 pwsh 写回时被中文与反引号搞坏，报 ParserError / gofmt 语法错。改法：`git checkout` 还原后用 `mcp__fstools__edit_file` 做行级编辑。
 
 ## 别做的事
 
