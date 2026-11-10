@@ -398,6 +398,7 @@ window.__ModuleLoader__.load({
       if (item.status === 'archived') chips.push(h('span', { key: 'arch', className: 'mp-chip' }, lang === 'zh' ? '已归档' : 'archived'))
       if (item.status === 'expired') chips.push(h('span', { key: 'exp', className: 'mp-chip is-warn' }, lang === 'zh' ? '已过期' : 'expired'))
       if (item.status === 'conflicted') chips.push(h('span', { key: 'con', className: 'mp-chip is-bad' }, lang === 'zh' ? '冲突' : 'conflict'))
+      if (item.indexMode === true) chips.push(h('span', { key: 'idx', className: 'mp-chip' }, lang === 'zh' ? '索引' : 'index'))
       if (chips.length === 0) return null
       return h('span', { style: { display: 'inline-flex', gap: '4px' } }, chips)
     }
@@ -1225,6 +1226,8 @@ window.__ModuleLoader__.load({
         ttlDays: item.ttlDays === null || item.ttlDays === undefined ? '' : String(item.ttlDays),
         pinned: item.pinned === true,
         status: item.status ?? 'active',
+        refs: Array.isArray(item.refs) ? item.refs.slice() : [],
+        indexMode: item.indexMode === true,
       }
     }
 
@@ -1242,10 +1245,125 @@ window.__ModuleLoader__.load({
         pinned: draft.pinned === true,
       }
       if (kind === 'note') payload.notebook = draft.notebook ?? (notebook === '' ? 'memory' : notebook)
+      if (kind === 'memory') {
+        payload.refs = Array.isArray(draft.refs) ? draft.refs.filter((id) => typeof id === 'string' && id !== '') : []
+        payload.indexMode = draft.indexMode === true
+      }
       if (ttlText !== '') payload.ttlDays = Number(ttlText)
       // 新建只给 active；已有条目的状态改动在编辑区显式提交。
       if (draft.status !== undefined) payload.status = draft.status
       return payload
+    }
+
+    /**
+     * 索引模式：这条记忆在注入时只留一行要点，细节放进关联的记事本。
+     * 需要细节时再按 id 取全文，长期留在记忆层里的内容就不会越堆越冗杂。
+     */
+    function IndexRefs({ api, lang, draft, update, notify }) {
+      const txt = (zh, en) => (lang === 'zh' ? zh : en)
+      const [titles, setTitles] = useState({})
+      const [query, setQuery] = useState('')
+      const [hits, setHits] = useState([])
+      const refs = Array.isArray(draft.refs) ? draft.refs : []
+      const refKey = refs.join(',')
+
+      useEffect(() => {
+        let alive = true
+        Promise.resolve(api('items.list', { type: 'note', limit: 50, sort: 'updated' }))
+          .then((value) => {
+            if (!alive) return
+            const list = Array.isArray(value?.items) ? value.items : []
+            setTitles((prev) => {
+              const next = { ...prev }
+              for (const entry of list) next[entry.id] = entry.title
+              return next
+            })
+          })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [api])
+
+      // 关联的记事可能不在最近一页里，单独补标题。
+      useEffect(() => {
+        const missing = refKey.split(',').filter((id) => id !== '' && titles[id] === undefined)
+        if (missing.length === 0) return undefined
+        let alive = true
+        Promise.all(missing.map((id) => Promise.resolve(api('items.get', { id }))
+          .then((value) => [id, value?.item?.title])
+          .catch(() => [id, undefined])))
+          .then((pairs) => {
+            if (!alive) return
+            setTitles((prev) => {
+              const next = { ...prev }
+              for (const pair of pairs) if (typeof pair[1] === 'string') next[pair[0]] = pair[1]
+              return next
+            })
+          })
+        return () => { alive = false }
+      }, [api, refKey])
+
+      async function search(text) {
+        setQuery(text)
+        if (String(text).trim() === '') {
+          setHits([])
+          return
+        }
+        try {
+          const value = await api('items.search', { query: String(text).trim(), limit: 8 })
+          setHits((value?.items ?? []).filter((entry) => entry.type === 'note' && entry.id !== draft.id))
+        } catch (cause) {
+          notify(cause.message, 'error')
+        }
+      }
+
+      function add(target) {
+        if (refs.includes(target.id)) return
+        update('refs', [...refs, target.id])
+        setTitles((prev) => ({ ...prev, [target.id]: target.title }))
+        setQuery('')
+        setHits([])
+      }
+
+      function remove(targetId) {
+        update('refs', refs.filter((id) => id !== targetId))
+      }
+
+      return h('div', { className: 'mp-field' },
+        h('span', { className: 'mp-label' }, txt('索引模式', 'Index mode')),
+        h('span', { className: 'mp-switch' },
+          h('input', {
+            type: 'checkbox',
+            checked: draft.indexMode === true,
+            onChange: (event) => update('indexMode', event.target.checked),
+          }),
+          h('span', null, txt('只留一行要点，细节放关联记事本', 'One line here, details in the linked notes'))),
+        h('span', { className: 'mp-hint' }, txt(
+          '打开后，注入上下文时这条只出现一行要点和指向记事本的指针；需要细节时用 memory_get(条目 id) 取全文。',
+          'When on, injection shows one line plus a pointer to the linked notes; fetch the full text with memory_get(id) when needed.')),
+        refs.length === 0
+          ? null
+          : h('div', { className: 'mp-toolbar' }, refs.map((id) => h('span', { key: id, className: 'mp-chip' },
+              `${titles[id] ?? id} `,
+              h('button', {
+                type: 'button',
+                className: 'mp-btn is-ghost',
+                onClick: () => remove(id),
+              }, '×')))),
+        h('input', {
+          className: 'mp-input',
+          value: query,
+          placeholder: txt('搜记事标题，添加为细节来源', 'Search note titles to add a detail source'),
+          onChange: (event) => search(event.target.value),
+        }),
+        hits.length === 0
+          ? null
+          : h('div', { className: 'mp-toolbar' }, hits.map((entry) => h('span', { key: entry.id, className: 'mp-chip' },
+              `${entry.title} `,
+              h('button', {
+                type: 'button',
+                className: 'mp-btn is-ghost',
+                onClick: () => add(entry),
+              }, txt('关联', 'Link'))))))
     }
 
     /**
@@ -1456,6 +1574,9 @@ window.__ModuleLoader__.load({
         creating === false && api !== undefined && api !== null && draft.id !== undefined
           ? h(ItemRelations, { api, lang, itemId: draft.id, items, notify })
           : null,
+        isNote
+          ? null
+          : h(IndexRefs, { api, lang, draft, update, notify }),
         h('label', { className: 'mp-field' },
           h('span', { className: 'mp-label' }, txt('项目空间', 'Project space')),
           h('input', {
@@ -1995,7 +2116,7 @@ window.__ModuleLoader__.load({
       const load = useCallback(async () => {
         setLoading(true)
         try {
-          const value = await api('pitfalls.list', { query, limit: 20 })
+          const value = await api('pitfalls.list', { query, limit: 200 })
           setItems(value.items ?? [])
           setAdvice('')
         } catch (error) {
@@ -2093,8 +2214,8 @@ window.__ModuleLoader__.load({
                   h(LayerBadge, { item }),
                   h('strong', null, item.title),
                   h('span', { className: 'mp-hint' }, item.updatedAt ?? '')),
-                h('div', { className: 'mp-hint' }, `${txt('现象', 'Symptom')}：${item.pitfall?.problem ?? item.content}`),
-                h('div', { className: 'mp-hint' }, `${txt('解决办法', 'Solution')}：${item.pitfall?.solution ?? '—'}`),
+                h('div', { className: 'mp-hint' }, `${txt('现象', 'Symptom')}：${item.pitfall?.problem || String(item.content ?? '').slice(0, 400)}`),
+                h('div', { className: 'mp-hint' }, `${txt('解决办法', 'Solution')}：${item.pitfall?.solution || '—'}`),
                 item.pitfall?.cause ? h('div', { className: 'mp-hint' }, `${txt('根因', 'Cause')}：${item.pitfall.cause}`) : null,
                 item.pitfall?.prevention ? h('div', { className: 'mp-hint' }, `${txt('预防', 'Prevention')}：${item.pitfall.prevention}`) : null,
                 h('div', { className: 'mp-hint' }, `id: ${item.id}`)))))
@@ -2117,8 +2238,8 @@ window.__ModuleLoader__.load({
       en: { create: 'Created', update: 'Updated', delete: 'Deleted', bulk: 'Bulk action', consolidate: 'Consolidated' },
     }
     const DIFF_LAYER_NAMES = {
-      zh: { L0: '灵魂层', L1: '思想核心', L2: '思想流动', L3: '本能行为', L4: '学习行为', L5: '目标记忆', L6: '轮转记忆', L7: '情境感知' },
-      en: { L0: 'Soul', L1: 'Core ideas', L2: 'Flowing ideas', L3: 'Instincts', L4: 'Learned behaviour', L5: 'Goals', L6: 'Rotating memory', L7: 'Session context' },
+      zh: { L0: '灵魂层', L1: '思想核心', L2: '思想流动', L3: '本能行为', L4: '学习行为', L5: '待办事项', L6: '轮转记忆', L7: '情境感知' },
+      en: { L0: 'Soul', L1: 'Core ideas', L2: 'Flowing ideas', L3: 'Instincts', L4: 'Learned behaviour', L5: 'Todos', L6: 'Rotating memory', L7: 'Session context' },
     }
     const DIFF_NOTEBOOK_NAMES = {
       zh: { memory: '记忆', daily: '日常', asset: '资产', pitfall: '踩坑' },
@@ -2783,6 +2904,19 @@ window.__ModuleLoader__.load({
               readOnly: true,
               value: prompt.text === '' ? txt('（当前没有注入内容：插件关闭、注入关闭或没有可用记忆）', '(Nothing is injected: disabled, injection off, or no usable memories)') : prompt.text,
             }))),
+          // 2026-11-09 啸春：记事本按需检索、不常驻，但索引挂在提示词末尾——单独摆出来，
+          // 免得要在一整篇注入文本里翻到最底部才看得见。
+          // 2026-11-10：索引改成「分类目录」，只列每本多少条；标题清单走 memory_notes 工具。
+          prompt === null || (prompt.notesIndex ?? '') === '' ? null : h('label', { className: 'mp-field' },
+            h('span', { className: 'mp-label' }, txt(
+              `记事本目录（${prompt.notesIndexGroups ?? 0} 类，${prompt.notesIndexCount ?? 0} 条；标题清单用 memory_notes 工具按需拉取）`,
+              `Notebook directory (${prompt.notesIndexGroups ?? 0} groups, ${prompt.notesIndexCount ?? 0} entries; pull the title list on demand with memory_notes)`)),
+            h('textarea', {
+              className: 'mp-textarea',
+              rows: 6,
+              readOnly: true,
+              value: prompt.notesIndex,
+            })),
         h('div', { className: 'mp-card' },
           h('div', { className: 'mp-card-title' }, txt('可观测性', 'Observability')),
           h('div', { className: 'mp-grid2' },
@@ -2906,7 +3040,7 @@ window.__ModuleLoader__.load({
       { id: 'L2', name: '思想流动' },
       { id: 'L3', name: { zh: '本能行为', en: 'Instincts' } },
       { id: 'L4', name: { zh: '学习行为', en: 'Learned behaviour' } },
-      { id: 'L5', name: { zh: '目标记忆', en: 'Goals' } },
+      { id: 'L5', name: { zh: '待办事项', en: 'Todos' } },
       { id: 'L6', name: { zh: '轮转记忆', en: 'Rotating memory' } },
       { id: 'L7', name: { zh: '情境感知', en: 'Session context' } },
     ]

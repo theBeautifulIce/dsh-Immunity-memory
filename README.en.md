@@ -53,7 +53,7 @@ In other words, the little context it spends buys consistency: a different sessi
 
 | Problem | Typical approach | Immunity |
 | --- | --- | --- |
-| Everything is forgotten after a session | Copy chat logs manually | 11 agent tools for write, search, update, capture, and consolidation |
+| Everything is forgotten after a session | Copy chat logs manually | 13 agent tools for write, search, notes index, update, capture, and consolidation |
 | Memory becomes a junk drawer | One flat list | Eight layers + four notebooks + type/layer/tag filters |
 | Retrieval is keyword-only | `LIKE` or a single vector search | FTS5 bm25 + 384-d vector cosine + graph BFS, fused |
 | Stale memories pollute context | Keep everything forever | Hard TTL, expiry archive, conflict detection, consolidation audit |
@@ -65,8 +65,9 @@ In other words, the little context it spends buys consistency: a different sessi
 
 | Feature | Description |
 | --- | --- |
-| **Eight layers** | L0 Soul, L1 Core Thoughts, L2 Thought Flow, L3 Instincts, L4 Learned Behavior, L5 Goals, L6 Rotating Memory, L7 Situational Awareness. L0/L1/L3 are immutable by default; the agent chooses among L2/L4-L7 for mutable memories |
+| **Eight layers** | L0 Soul, L1 Core Thoughts, L2 Thought Flow, L3 Instincts, L4 Learned Behavior, L5 Todos, L6 Rotating Memory, L7 Situational Awareness. L0/L1/L3 are immutable by default; the agent chooses among L2/L4-L7 for mutable memories |
 | **Four notebooks** | Fragments, Daily, Asset, Pitfall. Fragments holds one-line facts (who / where / what it is called / how much); anything needing context belongs in Daily. Pitfall notes use the fixed "symptom / root cause / fix / prevention" shape and support record / search / check |
+| **Index mode** | An L4/L5 entry can keep only one line in memory while the detail lives in a notebook entry linked through `refs`; injection renders the line plus a pointer `（详见：《notebook title》（id））`, referenced notebook entries are marked ★, and the full text is fetched on demand with `memory_get` |
 | **Hybrid retrieval** | FTS5 bm25 + 384-d hashed-vector cosine + graph BFS; default weights 0.4 / 0.4 / 0.2, auto-normalized and configurable |
 | **Write protection** | Minimum content length, Jaccard dedupe, immutable-layer protection (read-only for the agent, always editable by the user), L2 conflict detection; every mutable write/update must provide explicit `ttlDays`, never a silent permanent default |
 | **Conflict resolution** | L2 conflicts can keep one side or merge body/tags; the loser is archived with a supersedes link and the decision is audited |
@@ -90,7 +91,7 @@ In other words, the little context it spends buys consistency: a different sessi
 
 ```mermaid
 flowchart TB
-  A["DSH Agent / conversation"] -->|"11 memory tools"| B["Node control layer<br/>tools · injection · HTTP API · maintenance"]
+  A["DSH Agent / conversation"] -->|"13 memory tools"| B["Node control layer<br/>tools · injection · HTTP API · maintenance"]
   B -->|"loopback HTTP + JSON + random token"| C["Go memory service<br/>SQLite · FTS5 · graph · backup"]
   B -->|"JSON lines over stdio"| D["Rust compute core<br/>batch cosine · importance · dedupe"]
   C --> E[("memory.sqlite3<br/>WAL + FTS5 + vectors + graph")]
@@ -101,7 +102,7 @@ flowchart TB
 
 | Layer | Language / artifact | Responsibility |
 | --- | --- | --- |
-| Control | Node.js (host process) | `apply(ctx)`, 11 tools, prompt injection, UI HTTP API, maintenance/backup orchestration, fallback when native components are unavailable |
+| Control | Node.js (host process) | `apply(ctx)`, 13 tools, prompt injection, UI HTTP API, maintenance/backup orchestration, fallback when native components are unavailable |
 | Service | Go → `packages/memory-plugin/bin/<platform>-<arch>/memory-service` | SQLite persistence, FTS5 (bm25), vector cosine, graph BFS, audit, backup, integrity checks, graceful shutdown |
 | Compute | Rust → `packages/memory-plugin/native/<platform>-<arch>/memory-core` | Batch cosine, importance scoring, dedupe/similarity (JSON lines over stdio) |
 | UI | Browser-side JS (no build step) | Sidebar page + `settings.section`; lists, search, editor, templates, usage, consolidation, diff, maintenance |
@@ -124,11 +125,36 @@ Why this split:
 | L2 | Thought Flow | Mutable, conflict-checked | Emerging ideas, hypotheses, unverified conclusions |
 | L3 | Instincts | Immutable behavior | Fixed workflows, reaction patterns, operating rules |
 | L4 | Learned Behavior | Mutable | Project facts, lessons, pitfalls, technical details |
-| L5 | Goals | Mutable | Long-term objectives, plans, directions |
+| L5 | Todos | Mutable | Things to do, plans in progress |
 | L6 | Rotating Memory | Mutable, strict TTL | Temporary context, short-lived state, session residue |
 | L7 | Situational Awareness | Mutable | Environment, device, preferences, current scenario |
 
 L0/L1/L3 are configured through templates; switching a template replaces only these three layers. L2/L4-L7 are global shared mutable memories and are never copied or deleted by a template switch.
+
+### Index mode: one line in memory, detail in a notebook
+
+Nobody carries every detail in their head; what stays is who you are. So for a learned entry, the part that belongs in the prompt is usually one conclusion — the story behind it belongs in a notebook and is opened only when it is needed.
+
+With index mode on:
+
+- injection renders one line of summary (up to 160 characters) followed by a pointer `（详见：《notebook title》（id））`;
+- nothing is loaded until it is needed — the agent calls `memory_notes` to list the notebook index (linked entries come back flagged `referenced`), then `memory_get(entry id)` for the full text.
+
+`refs` holds the ids of the linked notebook entries. They are validated on write: only ids that exist and are notes survive, duplicates are dropped, an entry cannot point at itself, and at most twelve are kept.
+
+### Notebooks load on demand
+
+Notebook entries do not live in the system prompt. Dozens of titles stacked at the tail of the prompt push out exactly the memory that should have been used. What stays is a directory of categories:
+
+```
+### 记事本目录（3 类，共 66 条）
+记事本不常驻注入，细节都在本地：先用 memory_notes 按分类或关键词列索引，拿到 id 后用 memory_get(id) 取全文。
+- pitfall 踩坑笔记（42 条）
+- daily 日常记事本（16 条）
+- asset 资产记事本（8 条）
+```
+
+To open a detail, the agent calls `memory_notes` (filter by notebook or keyword; it returns ids, titles and a one-line summary), then `memory_get(id)` for the body. The list itself never enters the prompt — only the entry the agent picked does.
 
 ### TTL is a hard constraint
 
@@ -206,7 +232,7 @@ Override with `DSH_HOME` or Settings → Storage → Data directory. Main tables
 
 At startup the Go binary is copied to `<store-dir>\service\<platform>-<arch>\` before execution, so install directories (especially `link:` development installs) are not constrained by host sandbox or read-only policies.
 
-## The 11 agent tools
+## The 13 agent tools
 
 | Tool | Purpose |
 | --- | --- |
@@ -214,6 +240,7 @@ At startup the Go binary is copied to `<store-dir>\service\<platform>-<arch>\` b
 | `memory_capture` | Automatic capture: submit facts and notebook entries with an explicit layer/TTL; notebook entries are deduplicated by code within the same notebook; pass `pendingId` to clear a handled reminder |
 | `memory_search` | Hybrid retrieval; returns score breakdown, layer, tags, and match reasons |
 | `memory_get` | Read full content, entity key, and source quote by id |
+| `memory_notes` | List notebook entries as an index: filter by notebook or keyword, return id / title / one-line summary without long bodies; open the full text with `memory_get` |
 | `memory_update` | Change title, content, tags, questions, importance, layer, TTL; increments version; supports `key` and `supersedes` |
 | `memory_forget` | Delete an entry and clean up conflict references |
 | `memory_stats` | Entry counts, layer/type distribution, storage and health |

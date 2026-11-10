@@ -144,7 +144,7 @@ const boot = {
     itemCount: 2,
     headerTokens: 30,
     layers: [
-      { id: 'L5', name: { zh: '目标记忆', en: 'Goals' }, tokens: 80, percent: 66, count: 2 },
+      { id: 'L5', name: { zh: '待办事项', en: 'Todos' }, tokens: 80, percent: 66, count: 2 },
       { id: 'L4', name: { zh: '学习行为', en: 'Learned' }, tokens: 10, percent: 8, count: 1 },
     ],
   },
@@ -221,10 +221,10 @@ assert.ok(icon.includes('width="20"'), '图标应使用传入的尺寸')
 assert.ok(icon.includes('currentColor'), '图标应跟随主题色')
 
 const layerBadge = render('LayerBadge 层级徽章', React.createElement(LayerBadge, {
-  item: { layer: 'L5', layerName: { zh: '目标记忆', en: 'Goals' } }, large: true,
+  item: { layer: 'L5', layerName: { zh: '待办事项', en: 'Todos' } }, large: true,
 }))
 assert.ok(layerBadge.includes('mp-layer-badge'), '层级徽章应有颜色类名')
-assert.ok(layerBadge.includes('目标记忆'), '中文环境应显示层名')
+assert.ok(layerBadge.includes('待办事项'), '中文环境应显示层名')
 
 render('InjectionCard 注入统计', React.createElement(InjectionCard, {
   api, lang: 'zh', boot, notify: noop, onChanged: noop,

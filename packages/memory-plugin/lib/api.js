@@ -37,6 +37,7 @@ export const API_METHODS = [
   'items.list',
   'items.search',
   'items.get',
+  'notes.index',
   'items.create',
   'items.update',
   'items.delete',
@@ -182,6 +183,9 @@ function createMethods(engineOf, context = {}) {
       const item = engine().getItem(String(params?.id ?? ''))
       if (item === undefined) throw notFound(params?.id)
       return { item }
+    },
+    'notes.index'(params) {
+      return engine().notesIndex(params ?? {})
     },
     async 'items.create'(params) {
       const item = await engine().createItem(params ?? {}, 'user')

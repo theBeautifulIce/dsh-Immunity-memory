@@ -48,6 +48,8 @@ type Item struct {
 	Content      string   `json:"content"`
 	Tags         []string `json:"tags"`
 	Questions    []string `json:"questions,omitempty"`
+	Refs         []string `json:"refs,omitempty"`
+	IndexMode    bool     `json:"indexMode,omitempty"`
 	Importance   int      `json:"importance"`
 	Status       string   `json:"status"`
 	Pinned       bool     `json:"pinned"`
@@ -455,6 +457,8 @@ func (s *Store) loadMemories() ([]Item, error) {
 			Notebook     *string  `json:"notebook"`
 			Tags         []string `json:"tags"`
 			Questions    []string `json:"questions"`
+			Refs         []string `json:"refs"`
+			IndexMode    bool     `json:"indexMode"`
 			Pinned       bool     `json:"pinned"`
 			ExpiresAt    *string  `json:"expiresAt"`
 			Source       *Source  `json:"source"`
@@ -475,6 +479,10 @@ func (s *Store) loadMemories() ([]Item, error) {
 			if meta.Questions != nil {
 				item.Questions = meta.Questions
 			}
+			if meta.Refs != nil {
+				item.Refs = meta.Refs
+			}
+			item.IndexMode = meta.IndexMode
 			item.Pinned = meta.Pinned
 			item.ExpiresAt = meta.ExpiresAt
 			if meta.Source != nil {
@@ -691,7 +699,7 @@ func (s *Store) upsertItem(tx *sql.Tx, item Item) error {
 		}
 		metadata, _ := json.Marshal(map[string]any{
 			"notebook": item.Notebook, "tags": item.Tags, "pinned": item.Pinned,
-			"questions": questions,
+			"questions": questions, "refs": item.Refs, "indexMode": item.IndexMode,
 			"expiresAt": item.ExpiresAt, "source": item.Source, "version": item.Version,
 			"conflicts": item.Conflicts, "duplicateOf": item.DuplicateOf,
 			"key": item.Key, "supersedes": item.Supersedes, "supersededBy": item.SupersededBy,

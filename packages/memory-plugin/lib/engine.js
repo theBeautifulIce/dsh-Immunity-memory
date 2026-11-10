@@ -69,9 +69,13 @@ const MAX_CHANGE_AUDIT = 12000
 const MAX_KEY = 160
 const MAX_SOURCE_QUOTE = 2000
 const MAX_SUPERSEDES = 20
+// 一条记忆最多挂多少条记事本指针：够用，又不至于把注入撑成目录。
+const MAX_REFS = 12
+// 索引条目注入时正文只留这么多字，细节在关联记事本里。
+const INDEX_BODY_MAX_CHARS = 160
 const AUDIT_RUN_STATUSES = ['running', 'approved', 'rejected', 'needs_user', 'failed']
 const AUDIT_VERDICTS = ['approve', 'reject', 'merge', 'needs_user']
-const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'questions', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'key', 'supersedes', 'supersededBy']
+const CHANGE_FIELDS = ['title', 'content', 'layer', 'notebook', 'tags', 'questions', 'importance', 'status', 'pinned', 'ttlDays', 'expiresAt', 'key', 'supersedes', 'supersededBy', 'refs', 'indexMode']
 
 const STATUS_WEIGHT = { active: 1, conflicted: 0.85, archived: 0.6, expired: 0.4 }
 // 相关度阈值：低于它只当「背景资料」，不标命中，避免满屏都是命中。
@@ -116,6 +120,67 @@ const TOP_RANK = 3
 // 这个硬上限只防单条异常大的正文（写库时允许到 20 万字符）把会话撑爆，
 // 正常库远达不到；真触发时 truncated 会亮起，不会被悄悄吞掉。
 const FULL_INJECT_HARD_MAX = 100000
+// 啸春 2026-11-10：记事本（note）按需检索、不常驻注入，只挂一份「去哪查」的地图。
+// 早期版本把每条标题 + id 逐行列进提示词尾巴，条目一多就在每轮对话里占掉一大块上下文，
+// 而真正用到的那一两条仍然埋在一堆标题中间。现在提示词里只留「每本多少条」的分类目录，
+// 具体条目交给 memory_notes 工具按需拉，再用 memory_get(id) 取全文：渐进式加载。
+/** 可用的记事本条目：active/conflicted、未过期、未被去重或取代。 */
+function usableNotes(current, workspace, now = Date.now()) {
+  return current.items.filter((item) => {
+    if (item.type !== 'note') return false
+    if (item.status !== 'active' && item.status !== 'conflicted') return false
+    if (item.duplicateOf !== null && item.duplicateOf !== undefined) return false
+    if (item.supersededBy !== null && item.supersededBy !== undefined) return false
+    if (isExpiredItem(item, now)) return false
+    if (workspace != null && item.workspace !== null && item.workspace !== workspace) return false
+    return true
+  })
+}
+
+/** 被索引条目指到的记事 id：模型按指针找细节时，一眼知道该取哪一条。 */
+function referencedNoteIds(current) {
+  const referenced = new Set()
+  for (const candidate of current.items) {
+    if (candidate.type !== 'memory' || candidate.indexMode !== true) continue
+    for (const id of candidate.refs ?? []) referenced.add(id)
+  }
+  return referenced
+}
+
+/** 记事本分类计数：目录里只给「哪本有多少条」。 */
+function notesByNotebook(notes) {
+  const grouped = new Map()
+  for (const note of notes) {
+    const key = note.notebook ?? 'memory'
+    grouped.set(key, (grouped.get(key) ?? 0) + 1)
+  }
+  return grouped
+}
+
+/** 记事本显示名。 */
+function notebookName(id) {
+  const meta = NOTEBOOK_LIST.find((entry) => entry.id === id)
+  return meta?.name?.zh ?? id
+}
+
+/**
+ * 提示词末尾的记事本目录：只给分类与条数，不列标题。
+ * 条目清单由 memory_notes 工具按需返回，模型拿到 id 再用 memory_get 取全文。
+ */
+function notesIndexText(current, workspace, now) {
+  const notes = usableNotes(current, workspace, now)
+  if (notes.length === 0) return { text: '', total: 0, groupCount: 0 }
+  const grouped = notesByNotebook(notes)
+  const out = [`### 记事本目录（${grouped.size} 类，共 ${notes.length} 条）`,
+    '记事本不常驻注入，细节都在本地：先用 memory_notes 按分类或关键词列索引，拿到 id 后用 memory_get(id) 取全文；别凭印象返工。']
+  const order = [...NOTEBOOK_IDS, ...[...grouped.keys()].filter((key) => !NOTEBOOK_IDS.includes(key))]
+  for (const notebook of order) {
+    const count = grouped.get(notebook)
+    if (count === undefined) continue
+    out.push(`- ${notebook} ${notebookName(notebook)}（${count} 条）`)
+  }
+  return { text: out.join('\n'), total: notes.length, groupCount: grouped.size }
+}
 
 /**
  * 查询词里的虚词黑名单：中文按字+二元组切词，不滤掉这些词的话，
@@ -919,6 +984,57 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   }
 
   /**
+   * 记事本索引（渐进式加载的第一级）。
+   *
+   * 提示词里只挂「哪本有多少条」的分类目录；模型想知道哪条有用时，
+   * 先用这个接口按分类或关键词列一份清单（id / 标题 / 一行摘要 / 是否被索引条目引用），
+   * 再用 memory_get(id) 取全文。清单本身不进提示词。
+   */
+  function notesIndex(options = {}) {
+    const current = currentState()
+    const workspace = normalizeWorkspace(options.workspace)
+    const limit = clampInt(options.limit, 1, 200, 20)
+    const offset = clampInt(options.offset, 0, Number.MAX_SAFE_INTEGER, 0)
+    const notebook = NOTEBOOK_IDS.includes(options.notebook) ? options.notebook : undefined
+    const keyword = typeof options.keyword === 'string' ? options.keyword.trim().toLowerCase() : ''
+    const notes = usableNotes(current, workspace)
+    const referenced = referencedNoteIds(current)
+    const filtered = notes.filter((note) => {
+      if (notebook !== undefined && (note.notebook ?? 'memory') !== notebook) return false
+      if (keyword !== '' && !matchesQuery(note, keyword)) return false
+      return true
+    })
+    const sorted = sortItems(filtered, options.sort ?? 'updated')
+    const items = sorted.slice(offset, offset + limit).map((note) => ({
+      id: note.id,
+      type: 'note',
+      title: note.title,
+      content: truncate(String(note.content ?? '').replace(/\s+/g, ' ').trim(), 120),
+      summary: truncate(String(note.content ?? '').replace(/\s+/g, ' ').trim(), 120),
+      notebook: note.notebook ?? 'memory',
+      notebookName: notebookName(note.notebook ?? 'memory'),
+      layer: note.layer,
+      tags: Array.isArray(note.tags) ? note.tags : [],
+      updatedAt: note.updatedAt,
+      importance: note.importance,
+      referenced: referenced.has(note.id),
+    }))
+    return {
+      items,
+      total: filtered.length,
+      offset,
+      limit,
+      groups: [...notesByNotebook(notes).entries()].map(([id, count]) => ({
+        id,
+        name: notebookName(id),
+        count,
+      })),
+      totalNotes: notes.length,
+      usage: recordUsage('memory_notes', options, items),
+    }
+  }
+
+  /**
    * 混合检索（async：语义重排要等原生核心批量余弦）。
    * 返回结构兼容旧版调用方：items 里带 score，同时新增 breakdown 便于调试。
    */
@@ -1290,6 +1406,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       content,
       tags: normalizeTags(input.tags),
       questions: normalizeQuestions(input.questions),
+      refs: resolveRefIds(input.refs, current.items, null),
+      indexMode: input.indexMode === true,
       importance: clampInt(input.importance, 1, 10, active.write.defaultImportance),
       status: 'active',
       pinned: input.pinned === true,
@@ -1319,6 +1437,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       if (existing !== undefined) {
         const unchanged = existing.title === title && existing.content === content
           && JSON.stringify(existing.tags) === JSON.stringify(item.tags)
+          && JSON.stringify(existing.refs ?? []) === JSON.stringify(item.refs ?? [])
+          && existing.indexMode === item.indexMode
           && existing.importance === item.importance
         if (unchanged && supersedes.length === 0) {
           existing.source = normalizeSource({
@@ -1353,6 +1473,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
           turn: source.turn,
           confidence: source.confidence,
           supersedes,
+          refs: item.refs,
+          indexMode: item.indexMode,
         }, actor, { skipHooks: true })
         if (options.skipHooks !== true) {
           await writeHooks.runAfter({ action: 'update', actor, input, before: beforeExisting, item: updated })
@@ -1401,6 +1523,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (patch.content !== undefined) next.content = truncate(String(patch.content), MAX_CONTENT)
     if (patch.tags !== undefined) next.tags = normalizeTags(patch.tags)
     if (patch.questions !== undefined) next.questions = normalizeQuestions(patch.questions)
+    if (patch.refs !== undefined) next.refs = resolveRefIds(patch.refs, current.items, id)
+    if (patch.indexMode !== undefined) next.indexMode = patch.indexMode === true
     if (patch.importance !== undefined) next.importance = clampInt(patch.importance, 1, 10, before.importance)
     if (patch.layer !== undefined) {
       const layer = normalizeLayer(patch.layer)
@@ -1451,7 +1575,8 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       && patch.workspace === undefined
       && patch.status === undefined && patch.ttlDays === undefined && patch.notebook === undefined
       && patch.key === undefined && patch.quote === undefined && patch.turn === undefined
-      && patch.confidence === undefined && patch.source === undefined && patch.supersedes === undefined) {
+      && patch.confidence === undefined && patch.source === undefined && patch.supersedes === undefined
+      && patch.refs === undefined && patch.indexMode === undefined) {
       return decorate(before)
     }
     // 修改可修改层的内容/重要度时必须续期：老数据没有 ttlDays 时要求这次补填。
@@ -2291,6 +2416,13 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       return 0
     })
     const chosen = fullInject ? scored : scored.slice(0, budget.topN)
+    // 索引条目：正文压成一行要点，细节挂在关联记事本上，要细节时再取。
+    const indexCount = chosen.filter((entry) => entry.item.indexMode === true).length
+    // 指针要写清「细节在哪条记事本里」，标题现查即可（条目都在库里）。
+    const noteTitleMap = new Map()
+    for (const candidate of current.items) {
+      if (candidate.type === 'note') noteTitleMap.set(candidate.id, candidate.title)
+    }
     // 空库也要注入模板头部：否则新会话只剩工具描述，模型不知道有长期记忆可用。
     const coldStart = chosen.length === 0 && templateEntries.length === 0
     const lines = []
@@ -2312,18 +2444,35 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       const hit = (relevanceRaw ?? relevance) >= hitBar && matched >= MIN_HIT_TOKENS
       const limit = hit ? HIT_BODY_CHARS : rank < TOP_RANK ? TOP_BODY_CHARS : BACKGROUND_BODY_CHARS
       const raw = String(item.content).trim()
-      // 全量注入：正文原样进提示词，保留换行（代码/路径清单靠换行才读得清）。
-      const body = fullInject ? raw : truncate(raw.replace(/\s+/g, ' ').trim(), limit)
-      const mark = hit ? '·命中' : ''
-      lines.push(`- [${item.layer}·重要度${item.importance}${mark}] ${item.title}：${body}`)
-      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance: relevanceRaw ?? relevance, matched })
+      // 索引条目只留一行要点：细节在关联记事本里，模型按需再取，不占常驻上下文。
+      const indexMode = item.indexMode === true
+      let body
+      let pointer = ''
+      if (indexMode) {
+        body = truncate(raw.replace(/\s+/g, ' ').trim(), INDEX_BODY_MAX_CHARS)
+        const refs = Array.isArray(item.refs) ? item.refs : []
+        if (refs.length > 0) {
+          pointer = `（详见：${refs.map((id) => `「${noteTitleMap.get(id) ?? id}」（${id}）`).join('、')}）`
+        }
+      } else {
+        // 全量注入：正文原样进提示词，保留换行（代码/路径清单靠换行才读得清）。
+        body = fullInject ? raw : truncate(raw.replace(/\s+/g, ' ').trim(), limit)
+      }
+      const mark = `${hit ? '·命中' : ''}${indexMode ? '·索引' : ''}`
+      lines.push(`- [${item.layer}·重要度${item.importance}${mark}] ${item.title}：${body}${pointer}`)
+      lineMeta.push({ id: item.id, title: item.title, layer: item.layer, importance: item.importance, source: 'memory', relevance: relevanceRaw ?? relevance, matched, indexMode, refs: Array.isArray(item.refs) ? item.refs : [] })
     }
-    const header = coldStart
+    const headerParts = coldStart
       ? [
           template.header,
           '（当前没有已保存的相关条目。遇到值得跨会话保留的事实、偏好或决策时，请用 memory_write 保存，并填写保鲜期。）',
-        ].filter((part) => part !== '').join('\n')
-      : template.header
+        ]
+      : [template.header]
+    // 有索引条目就说一句：指针行只给位置，细节按需再取。
+    if (indexCount > 0) {
+      headerParts.push('（标「·索引」的条目只留一行要点，细节在关联记事本里；需要细节时用 memory_get(条目 id) 取全文。）')
+    }
+    const header = headerParts.filter((part) => part !== '').join('\n')
     let text = [header, ...lines].filter((part) => part !== '').join('\n')
     let truncated = false
     if (fullInject && text.length > FULL_INJECT_HARD_MAX) {
@@ -2335,6 +2484,9 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       text = `${text.slice(0, Math.max(0, budget.maxChars - 1))}…`
       truncated = true
     }
+    // 记事本目录放在截断之后拼接：它是「去哪查」的地图，不能被正文裁掉。
+    const notesIndex = notesIndexText(current, workspace, now)
+    if (notesIndex.text !== '') text = `${text}\n\n${notesIndex.text}`
     const headerTokens = estimateTokens(header)
     const lineTokens = lines.map((line) => estimateTokens(line))
     const lineTokenSum = lineTokens.reduce((sum, value) => sum + value, 0)
@@ -2384,6 +2536,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       enabled,
       text,
       preview: text.slice(0, 2000),
+      // 2026-11-09 啸春：索引挂在提示词末尾，几万字里翻不到；单独给出去一份，UI 摆成小卡片。
+      // 2026-11-10：改成「分类目录」——只给每本多少条，标题清单交给 memory_notes 工具。
+      notesIndex: notesIndex.text,
+      notesIndexCount: notesIndex.total,
+      notesIndexGroups: notesIndex.groupCount,
+      indexCount,
       tokens: totalTokens,
       chars: text.length,
       topN: budget.topN,
@@ -2995,6 +3153,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     // 读取
     status,
     listItems,
+    notesIndex,
     searchItems,
     getItem,
     stats: () => summarize(currentState(), settings()),
@@ -3910,6 +4069,23 @@ function normalizeIdList(value) {
   return out
 }
 
+/**
+ * 关联的记事本指针只认「确实存在、而且确实是记事本条目」的 id。
+ * 索引条目靠这些指针渐进加载，指向空处的指针只会把模型带偏。
+ */
+function resolveRefIds(value, items, selfId) {
+  const list = normalizeIdList(value).slice(0, MAX_REFS)
+  const out = []
+  for (const id of list) {
+    if (selfId && id === selfId) continue
+    const target = items.find((candidate) => candidate.id === id)
+    if (target === undefined || target.type !== 'note') continue
+    if (out.includes(id)) continue
+    out.push(id)
+  }
+  return out
+}
+
 function normalizeSource(raw) {
   const source = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
   return {
@@ -3943,6 +4119,8 @@ function normalizeItem(raw) {
     content,
     tags: normalizeTags(raw.tags),
     questions: normalizeQuestions(raw.questions),
+    refs: normalizeIdList(raw.refs).slice(0, MAX_REFS),
+    indexMode: raw.indexMode === true,
     importance: clampInt(raw.importance, 1, 10, 5),
     status: ITEM_STATUSES.includes(raw.status) ? raw.status : 'active',
     pinned: raw.pinned === true,
@@ -4096,6 +4274,7 @@ export const TOOL_NAMES = [
   'memory_write',
   'memory_search',
   'memory_get',
+  'memory_notes',
   'memory_update',
   'memory_forget',
   'memory_stats',

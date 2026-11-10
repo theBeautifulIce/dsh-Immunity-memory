@@ -156,10 +156,10 @@ async function test(title, run) {
 
 const dispose = registerTools(fakeCtx, engine, log)
 
-await test('注册了全部 12 个工具', () => {
+await test('注册了全部 13 个工具', () => {
   assert.deepEqual([...registered.keys()].sort(), [
     'memory_capture', 'memory_consolidate', 'memory_diff', 'memory_forget', 'memory_get', 'memory_link',
-    'memory_pitfall', 'memory_search', 'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
+    'memory_notes', 'memory_pitfall', 'memory_search', 'memory_stats', 'memory_update', 'memory_usage', 'memory_write',
   ])
 })
 

@@ -51,8 +51,10 @@ export const LAYERS = [
   },
   {
     id: 'L5',
-    name: { zh: '目标记忆', en: 'Goals' },
-    desc: { zh: '长期目标与进行中的计划', en: 'Long-running goals and plans' },
+    // 2026-11-10 啸春：L5 改叫「待办事项」。原来的「目标记忆」听起来像已经定下的
+    // 长期目标，容易让人当成既成事实；这一层装的是「现在还没做完的事」，叫待办更准。
+    name: { zh: '待办事项', en: 'Todos' },
+    desc: { zh: '近期要做的事与进行中的计划', en: 'Things to do and plans in progress' },
     immutable: false,
     order: 5,
   },
@@ -142,7 +144,7 @@ export const MEMORY_TEMPLATES = [
     header: [
       '## 长期记忆（dsh-memory-plugin）',
       '下面是从跨会话记忆里挑出的、可能相关的条目。只在确实相关时使用，不要臆造未列出的记忆。',
-      '需要更多细节时用 memory_search 检索；新的关键事实用 memory_write 保存。',
+      '需要更多细节时用 memory_notes 按分类或关键词列记事索引，再用 memory_get(id) 取全文；新的关键事实用 memory_write 保存。',
     ].join('\n'),
     topN: 6,
     maxChars: 1200,
@@ -155,7 +157,7 @@ export const MEMORY_TEMPLATES = [
     header: [
       '## 项目长期记忆（dsh-memory-plugin · 开发模板）',
       '下面是与当前开发工作相关的历史事实、命令、架构决策与踩坑记录。优先复用这些结论，避免重复试错；与当前代码冲突时以实际代码为准。',
-      '需要更多细节时用 memory_search 检索（可用 type=note 查开发记事本）；新的关键事实用 memory_write 保存，并填写保鲜期。',
+      '需要更多细节时先用 memory_notes 按分类或关键词列记事索引（可用 notebook 限定到踩坑/日常本），再用 memory_get(id) 取全文；新的关键事实用 memory_write 保存，并填写保鲜期。',
     ].join('\n'),
     topN: 10,
     maxChars: 1800,
@@ -168,7 +170,7 @@ export const MEMORY_TEMPLATES = [
     header: [
       '## 跨会话记忆（dsh-memory-plugin · QQ 机器人）',
       '下面是可能相关的用户偏好、群聊背景与稳定约定。只在当前对话确实需要时使用；不要把 A 群/私聊的内容带到 B 群，也不要编造未列出的记忆。',
-      '需要更多细节时用 memory_search 检索；新的稳定偏好用 memory_write 保存，并填写保鲜期。',
+      '需要更多细节时先用 memory_notes 按分类或关键词列记事索引，再用 memory_get(id) 取全文；新的稳定偏好用 memory_write 保存，并填写保鲜期。',
     ].join('\n'),
     topN: 8,
     maxChars: 900,
@@ -1152,7 +1154,7 @@ export const SETTINGS_SCHEMA = [
       ...[
         ['L2', 'L2 演进想法', 'L2 evolving thoughts'],
         ['L4', 'L4 项目学习', 'L4 project learnings'],
-        ['L5', 'L5 目标偏好', 'L5 goals and preferences'],
+        ['L5', 'L5 待办事项', 'L5 todos'],
         ['L6', 'L6 短期事实', 'L6 short-lived facts'],
         ['L7', 'L7 当前情境', 'L7 current context'],
       ].map(([layer, zh, en]) => ({

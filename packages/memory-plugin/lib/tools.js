@@ -80,6 +80,42 @@ const searchOutput = {
   },
 }
 
+const notesOutput = {
+  schema: {
+    type: 'object',
+    properties: {
+      total: { type: 'number' },
+      items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      groups: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      totalNotes: { type: 'number' },
+    },
+    required: ['total', 'items'],
+  },
+  render(args, value) {
+    const items = value?.items ?? []
+    if (items.length === 0) {
+      const notebook = String(args?.notebook ?? '')
+      return text(notebook === ''
+        ? '记事本里没有匹配的条目。'
+        : `记事本 ${notebook} 里没有匹配的条目。`)
+    }
+    const groups = (value?.groups ?? [])
+      .map((group) => `${group.name ?? group.id}（${group.count} 条）`)
+      .join('，')
+    const lines = items.map((item, index) => {
+      const mark = item.referenced === true ? '★ ' : ''
+      return `${index + 1}. ${mark}${item.title}\n   ${clip(item.summary, 120)}\n   id: ${item.id} · ${item.notebookName ?? item.notebook}`
+    })
+    return text([
+      `记事本共 ${value?.totalNotes ?? 0} 条；分类：${groups === '' ? '（无）' : groups}`,
+      `命中 ${value?.total ?? items.length} 条，显示前 ${items.length} 条：`,
+      ...lines,
+      '',
+      '★ 是被索引条目引用的细节。要正文就用 memory_get(id) 取全文。',
+    ].join('\n'))
+  },
+}
+
 const getOutput = {
   schema: {
     type: 'object',
@@ -243,12 +279,12 @@ const pitfallOutput = {
       const items = value?.items ?? []
       if (value?.found !== true) return text(`没有找到相关历史踩坑。\n${value?.advice ?? ''}`.trim())
       return text(`找到 ${items.length} 条相关踩坑，先复用已有解决办法：\n`
-        + items.map((item, index) => `${index + 1}. ${item.title}\n   现象：${clip(item.pitfall?.problem ?? item.content, 160)}\n   解决：${clip(item.pitfall?.solution ?? '', 220)}\n   id: ${item.id}`).join('\n'))
+        + items.map((item, index) => `${index + 1}. ${item.title}\n   现象：${clip(item.pitfall?.problem || item.content, 160)}\n   解决：${clip(item.pitfall?.solution || '（见正文）', 220)}\n   id: ${item.id}`).join('\n'))
     }
     const items = value?.items ?? []
     if (items.length === 0) return text(`没有找到与「${String(args?.query ?? '')}」相关的踩坑笔记。`)
     return text(`踩坑笔记 ${value?.total ?? items.length} 条，显示 ${items.length} 条：\n`
-      + items.map((item, index) => `${index + 1}. ${item.title} [${item.layer}]\n   现象：${clip(item.pitfall?.problem ?? item.content, 140)}\n   解决：${clip(item.pitfall?.solution ?? '', 180)}\n   id: ${item.id}`).join('\n'))
+      + items.map((item, index) => `${index + 1}. ${item.title} [${item.layer}]\n   现象：${clip(item.pitfall?.problem || item.content, 140)}\n   解决：${clip(item.pitfall?.solution || '（见正文）', 180)}\n   id: ${item.id}`).join('\n'))
   },
 }
 
@@ -358,7 +394,7 @@ export function registerTools(ctx, engine, log) {
 
   register({
     name: 'memory_write',
-    description: 'Save a durable memory or notebook entry for later sessions. Use it for user preferences, project facts, decisions and anything worth recalling after this conversation. Decide the mutable layer yourself from the meaning of the content; there is no server-side default layer. Prefer one focused fact per call.',
+    description: 'Save a durable memory or notebook entry for later sessions. Use it for user preferences, project facts, decisions and anything worth recalling after this conversation. Decide the mutable layer yourself from the meaning of the content; there is no server-side default layer. Prefer one focused fact per call. For L4 learning items and L5 todos: keep the body to one line, put the detail in a notebook entry (type=note), then link it with refs and set indexMode=true, so the detail loads only when it is needed.',
     parameters: {
       type: 'object',
       properties: {
@@ -367,7 +403,7 @@ export function registerTools(ctx, engine, log) {
         layer: {
           type: 'string',
           enum: WRITABLE_LAYER_ENUM,
-          description: 'Choose the layer yourself by meaning: L2 evolving thoughts, L4 project learnings, L5 goals/preferences, L6 short-lived facts, L7 current context. Required; immutable L0/L1/L3 are not writable.',
+          description: 'Choose the layer yourself by meaning: L2 evolving thoughts, L4 project learnings, L5 todos/in-progress work, L6 short-lived facts, L7 current context. Required; immutable L0/L1/L3 are not writable.',
         },
         type: { type: 'string', enum: ['memory', 'note'], description: 'memory = long-term memory, note = notebook entry.' },
         notebook: { type: 'string', enum: NOTEBOOKS.map((notebook) => notebook.id), description: 'Notebook id, only for type=note.' },
@@ -398,6 +434,15 @@ export function registerTools(ctx, engine, log) {
           type: 'array',
           items: { type: 'string' },
           description: 'IDs of older entries this one replaces. They are archived and hidden from normal retrieval.',
+        },
+        refs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Notebook entry ids that hold the details of this memory. An index entry keeps one line here and lets the detail load only when it is needed.',
+        },
+        indexMode: {
+          type: 'boolean',
+          description: 'Render this memory as a one-line pointer at injection time: the body stays short and the details live in the linked notebook entries (refs).',
         },
       },
       required: ['content', 'layer'],
@@ -460,6 +505,34 @@ export function registerTools(ctx, engine, log) {
   })
 
   register({
+    name: 'memory_notes',
+    description: 'List notebook entries (index only, not full bodies) so you can pick which id to open. The prompt only carries a per-notebook count, so call this first when you need a notebook detail, then use memory_get(id) for the full text. This is the first step of progressive loading.',
+    parameters: {
+      type: 'object',
+      properties: {
+        notebook: { type: 'string', enum: NOTEBOOKS.map((notebook) => notebook.id), description: 'Restrict to one notebook. Omit to list every notebook.' },
+        keyword: { type: 'string', description: 'Filter by title, body or tag, in the user\'s language.' },
+        limit: { type: 'number', description: 'How many entries to return (1-200, default 20).' },
+        offset: { type: 'number', description: 'Skip this many entries, for paging.' },
+        sort: { type: 'string', enum: ['updated', 'created', 'importance', 'title'], description: 'Sort order, default updated.' },
+        workspace: {
+          type: 'string',
+          description: 'Project space filter. Defaults to the current working directory; pass "*" to list every project.',
+        },
+      },
+    },
+    output: notesOutput,
+    async execute(args, exec) {
+      const result = engine.notesIndex({
+        ...(args ?? {}),
+        workspace: args?.workspace === undefined ? workspaceOf(exec) : args.workspace,
+        actor: 'agent',
+      })
+      return result
+    },
+  })
+
+  register({
     name: 'memory_update',
     description: 'Update an existing memory: correct a fact, change importance, move it to another layer, archive it or add tags.',
     parameters: {
@@ -485,6 +558,12 @@ export function registerTools(ctx, engine, log) {
           items: { type: 'string' },
           description: 'IDs of older entries this update replaces; they are archived and hidden.',
         },
+        refs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Replace the notebook entry ids this entry points to (the details behind an index entry).',
+        },
+        indexMode: { type: 'boolean', description: 'Turn the one-line pointer rendering of this entry on or off.' },
       },
       required: ['id'],
     },

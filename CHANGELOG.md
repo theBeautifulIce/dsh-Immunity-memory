@@ -4,6 +4,73 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.29] - 2026-11-10
+
+The notebook index had become the second-biggest thing in the prompt. It listed every note
+title and id, in order, at the tail of the system prompt — 66 entries and nearly 4,000
+characters on a store that was not even large yet. The notes themselves stayed local, but
+their *labels* were resident: every turn paid for a table of contents nobody read, and the
+one note that actually mattered was buried in the middle of it.
+
+The index is now a directory of categories instead of a list of titles. The prompt carries
+one line per notebook — how many entries it holds — and nothing else. That is enough for
+the model to know a notebook exists and roughly how much is in it, and small enough to
+ignore.
+
+Getting from "there are 42 pitfall notes" to the actual text is now a two-step, on-demand
+path. `memory_notes` returns the index: filter by notebook or keyword, get back ids,
+titles, a one-line summary, and a `referenced` flag for the notes an index entry points
+at. `memory_get(id)` then opens the one that matters. The list never enters the prompt; only
+the entry the model decided to read does.
+
+The three built-in template headers now say so: look up details with `memory_notes`, read
+them with `memory_get(id)`. The panel shows the directory as a small card, and the API
+gained `notes.index` for the same listing.
+
+## [0.4.28] - 2026-11-10
+
+A memory that keeps growing for years turns into a wall. Every learning and to-do entry
+pushed its whole body into the prompt, every turn, until the one useful line was buried
+under the paragraph it came with — and the more history a store accumulated, the less of it
+could be read. The fix is not to shorten memory. It is to stop loading everything by
+default and let the detail stay where it belongs.
+
+Learning entries (L4) and to-dos (L5) can now be *index entries*: one line of summary in
+memory, the detail in a notebook entry, the two linked. The digest renders the summary and
+a pointer — `详见：「标题」（id）` — and the notebook index marks the linked entry with ★,
+so what gets opened, and when, is a decision made at the moment of use rather than a
+decision made once when the memory was written.
+
+The layer name changed with it. L5 was 「目标记忆」/Goals, which promised goals while the
+layer actually holds to-dos and plans in progress; it is now 「待办事项」/Todos, in the
+settings, the UI, the tool descriptions and the docs.
+
+Two fields were added to every entry. `refs` holds the ids of the notebook entries an
+index entry points at; they are validated on write — only ids that exist and are notes
+survive, duplicates are dropped, an entry cannot point at itself, and at most twelve are
+kept. `indexMode` is the boolean that says "render me as an index". Both persist through
+the JSON archive, SQLite and the Go service, and both appear in the audit diff. The editor
+gained an index switch and a notebook picker, so the link is made where the entry is
+written instead of by hand-copying ids.
+
+## [0.4.27] - 2026-11-09
+
+The pitfall page looked half-empty: cards listed their titles, layers and ids, but the
+"Symptom" and "Solution" lines stayed blank, and the tab counted 26 while the page said
+"20 records". Nothing was lost — every body was still in the store.
+
+Two small mistakes added up. The reader only understands the four canonical sections
+(`## 现象`, `## 根因`, `## 解决办法`, `## 预防`); a note written as prose, or with headings
+like "症状 / 判定 / 修法", parses to empty strings. Those empty strings then fell through
+as `??` — which only catches `null`/`undefined`, not `''` — so the body fallback never
+ran. The list also asked for `limit: 20` with no paging, so the six oldest pitfalls never
+reached the page at all.
+
+The fallback is now a real fallback: when the parsed section is empty the card shows the
+beginning of the note body, and the list asks for 200 rows (the host still caps a single
+page at 50). `memory_pitfall` renders the same way, so an agent reading a pitfall sees the
+same text a person does.
+
 ## [0.4.26] - 2026-11-09
 
 Long-term memory is meant to be in the prompt whole, at every turn. The digest used to rank entries and spend a character budget on them, cut each body to a few thousand characters, and — the worst part — truncate every template layer entry at 800 characters, so a long identity or language block reached the model cut mid-sentence while the UI still reported "not truncated". Injection now has a `prompt.fullInject` mode, on by default: every enabled entry goes in verbatim, no relevance cut, no per-entry cut, no budget. `topN`/`maxChars` stay as the budgeted fallback for anyone who turns it off. A 100000-character hard cap remains only so a single pathological body (up to 200000 characters is storable) cannot blow up the session, and it sets `truncated` when it fires.

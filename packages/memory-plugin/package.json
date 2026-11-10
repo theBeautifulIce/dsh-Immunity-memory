@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory-plugin",
-  "version": "0.4.26",
-  "description": "dsh-Immunity-memory: cross-session long-term memory for DeepSeek Harness with eight layers, notebooks, hybrid retrieval, write hooks, automatic capture triggers, conflict resolution, forgetting curve, project spaces, diagnostics and a visual UI.",
+  "version": "0.4.29",
+  "description": "dsh-Immunity-memory: cross-session long-term memory for DeepSeek Harness with eight layers, notebooks, hybrid retrieval, index-mode entries that load details on demand, write hooks, automatic capture triggers, conflict resolution, forgetting curve, project spaces, diagnostics and a visual UI.",
   "type": "module",
   "main": "index.js",
   "repository": {
