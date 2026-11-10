@@ -15,7 +15,7 @@
 | 节点数 / 边数 | 1217 / 3276 |
 | 最近更新 | 2026-11-10 15:20（mode=fast 更新，原 1195/3239 → 再前 1008/2683） |
 | 持久化产物 | **无**。中文路径下 `persistence=true` 会让索引 worker 崩溃（见下「坑」） |
-| Git HEAD | `acb171d`（main，docs: mark 0.4.29 as live after restart verification；功能提交 `613ee13`，文档提交 `2060d17`） |
+| Git HEAD | `dff79ea`（main；功能提交 `613ee13`，已发布 tag `v0.4.29`） |
 
 图谱数据实际落盘在 `C:\Users\ASUS\.cache\codebase-memory-mcp\<项目名>.db`，不在仓库里。
 
