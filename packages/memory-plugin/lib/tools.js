@@ -47,6 +47,7 @@ const writeOutput = {
       item: itemSchema,
       duplicateOf: { oneOf: [{ type: 'string' }, { type: 'null' }] },
       saved: { type: 'boolean' },
+      droppedRefs: { type: 'array', items: { type: 'string' } },
     },
     required: ['saved'],
   },
@@ -54,8 +55,12 @@ const writeOutput = {
     const item = value?.item
     if (item === undefined) return text(`没有保存任何内容：${String(args?.content ?? '').slice(0, 80)}`)
     const tags = item.tags.length > 0 ? `，标签 ${item.tags.join('/')}` : ''
+    const dropped = Array.isArray(value?.droppedRefs) ? value.droppedRefs : []
     return text(`已保存到 ${item.layer}（${item.layerName}）：${item.title}（重要度 ${item.importance}${tags}）`
       + (value?.duplicateOf ? `\n注意：与已有记忆 ${value.duplicateOf} 高度相似，可能重复。` : '')
+      + (dropped.length > 0
+        ? `\n注意：${dropped.length} 个引用没有对上（${dropped.join('、')}），请用 memory_search 或 memory_notes 按标题找回真实 id 再补。`
+        : '')
       + `\nid: ${item.id}`)
   },
 }
@@ -144,13 +149,20 @@ const getOutput = {
 const updateOutput = {
   schema: {
     type: 'object',
-    properties: { item: itemSchema },
+    properties: {
+      item: itemSchema,
+      droppedRefs: { type: 'array', items: { type: 'string' } },
+    },
     required: ['item'],
   },
   render(args, value) {
     const item = value?.item
     if (item === undefined) return text(`没有更新任何内容（${String(args?.id ?? '')}）`)
-    return text(`已更新 ${item.id}：${item.title}（重要度 ${item.importance}，状态 ${item.status}）`)
+    const dropped = Array.isArray(value?.droppedRefs) ? value.droppedRefs : []
+    return text(`已更新 ${item.id}：${item.title}（重要度 ${item.importance}，状态 ${item.status}）`
+      + (dropped.length > 0
+        ? `\n注意：${dropped.length} 个引用没有对上（${dropped.join('、')}），请用 memory_search 或 memory_notes 按标题找回真实 id 再补。`
+        : ''))
   },
 }
 
@@ -449,13 +461,24 @@ export function registerTools(ctx, engine, log) {
     },
     output: writeOutput,
     async execute(args, exec) {
+      // 引用先解析一遍：手抄少一个字符的 id 纠正成真 id，认不出来的当众报出来，
+      // 不再让引擎静默吞掉。
+      const resolution = Array.isArray(args?.refs)
+        ? await engine.resolveRefs(args.refs)
+        : { refs: [], dropped: [] }
       const item = await engine.createItem({
         ...args,
+        refs: resolution.refs,
         workspace: args.workspace === undefined ? workspaceOf(exec) : args.workspace,
         sessionId: sessionIdOf(exec),
         turn: typeof exec?.turn === 'number' ? exec.turn : undefined,
       }, 'agent')
-      return { saved: true, item: toToolItem(item), duplicateOf: item.duplicateOf ?? null }
+      return {
+        saved: true,
+        item: toToolItem(item),
+        duplicateOf: item.duplicateOf ?? null,
+        droppedRefs: resolution.dropped,
+      }
     },
   })
 
@@ -499,7 +522,9 @@ export function registerTools(ctx, engine, log) {
     output: getOutput,
     async execute(args, exec) {
       const item = engine.getItem(String(args?.id ?? ''), workspaceOf(exec))
-      if (item === undefined) throw new Error(`找不到条目 ${String(args?.id ?? '')}`)
+      if (item === undefined) {
+        throw new Error(`找不到条目 ${String(args?.id ?? '')}：请整段复制 id；如果 id 是从笔记正文里抄的，请用 memory_search 或 memory_notes 按标题找回真实 id`)
+      }
       return { item: toToolItem(item) }
     },
   })
@@ -570,11 +595,21 @@ export function registerTools(ctx, engine, log) {
     output: updateOutput,
     async execute(args, exec) {
       const { id, ...patch } = args ?? {}
-      const itemId = String(id ?? '')
-      if (engine.getItem(itemId, workspaceOf(exec)) === undefined) throw new Error(`找不到条目 ${itemId}`)
+      const rawId = String(id ?? '')
+      const found = engine.getItem(rawId, workspaceOf(exec))
+      if (found === undefined) {
+        throw new Error(`找不到条目 ${rawId}：请整段复制 id；如果 id 是从笔记正文里抄的，请用 memory_search 或 memory_notes 按标题找回真实 id`)
+      }
+      const itemId = found.id
+      let droppedRefs = []
+      if (Array.isArray(patch.refs)) {
+        const resolution = await engine.resolveRefs(patch.refs)
+        patch.refs = resolution.refs
+        droppedRefs = resolution.dropped
+      }
       if (typeof exec?.turn === 'number') patch.turn = exec.turn
       const item = await engine.updateItem(itemId, patch, 'agent')
-      return { item: toToolItem(item) }
+      return { item: toToolItem(item), droppedRefs }
     },
   })
 
@@ -592,10 +627,15 @@ export function registerTools(ctx, engine, log) {
     async execute(args, exec) {
       const ids = Array.isArray(args?.ids) ? args.ids : []
       const scope = workspaceOf(exec)
+      const resolved = []
       for (const id of ids) {
-        if (engine.getItem(String(id), scope) === undefined) throw new Error(`找不到条目 ${String(id)}`)
+        const found = engine.getItem(String(id), scope)
+        if (found === undefined) {
+          throw new Error(`找不到条目 ${String(id)}：请整段复制 id；如果 id 是从笔记正文里抄的，请用 memory_search 或 memory_notes 按标题找回真实 id`)
+        }
+        resolved.push(found.id)
       }
-      return await engine.deleteItems(ids, 'agent')
+      return await engine.deleteItems(resolved, 'agent')
     },
   })
 
@@ -706,7 +746,9 @@ export function registerTools(ctx, engine, log) {
       const id = String(args?.id ?? '')
       if (id === '') throw new Error('需要 id：先用 memory_search 找到条目')
       if (action === 'list') {
-        const raw = await engine.itemLinks(id, { limit: Number(args?.limit) || 10 })
+        const self = engine.getItem(id, workspaceOf(exec))
+        const canonical = self?.id ?? id
+        const raw = await engine.itemLinks(canonical, { limit: Number(args?.limit) || 10 })
         const links = raw.map((link) => {
           const other = engine.getItem(String(link.id ?? ''), workspaceOf(exec))
           return {
@@ -717,7 +759,7 @@ export function registerTools(ctx, engine, log) {
             layer: other?.layer ?? null,
           }
         })
-        return { action, id, count: links.length, links }
+        return { action, id: canonical, count: links.length, links }
       }
       const targetId = String(args?.targetId ?? '')
       if (targetId === '') throw new Error('需要 targetId：要连到哪一条')

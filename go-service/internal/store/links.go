@@ -86,7 +86,12 @@ func (s *Store) UpsertLink(sourceID, targetID string, weight float64) (Link, err
 	defer s.mu.Unlock()
 	for _, id := range []string{sourceID, targetID} {
 		var exists int
-		err := s.db.QueryRow(`SELECT 1 FROM memories WHERE id = ?`, id).Scan(&exists)
+		// 条目分表存放：记忆行与 pitfall/memory 记事在 memories，daily 记事在 events，
+		// asset 记事在 assets。只查 memories 会让 daily/asset 记事永远判成
+		// 「条目不存在」，建引用必然失败。
+		err := s.db.QueryRow(`SELECT 1 WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)
+			OR EXISTS (SELECT 1 FROM events WHERE id = ?)
+			OR EXISTS (SELECT 1 FROM assets WHERE id = ?)`, id, id, id).Scan(&exists)
 		if err == sql.ErrNoRows {
 			return Link{}, fmt.Errorf("条目不存在：%s", id)
 		}

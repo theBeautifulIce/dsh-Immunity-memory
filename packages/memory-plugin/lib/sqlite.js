@@ -1041,7 +1041,14 @@ function writeManualLink(database, sourceId, targetId, weight) {
   if (source === '' || target === '') throw new Error('需要 sourceId 与 targetId')
   if (source === target) throw new Error('不能把条目连到自己')
   for (const id of [source, target]) {
-    const found = database.prepare('SELECT 1 AS ok FROM memories WHERE id = ?').get(id)
+    // 条目分表存放：记忆行与 pitfall/memory 记事在 memories，daily 记事在 events，
+    // asset 记事在 assets。只查 memories 会让 daily/asset 记事永远判成
+    // 「条目不存在」，建引用必然失败。
+    const found = database
+      .prepare(
+        'SELECT 1 AS ok FROM memories WHERE id = ? UNION ALL SELECT 1 FROM events WHERE id = ? UNION ALL SELECT 1 FROM assets WHERE id = ? LIMIT 1',
+      )
+      .get(id, id, id)
     if (found === undefined) throw new Error(`条目不存在：${id}`)
   }
   const left = source < target ? source : target

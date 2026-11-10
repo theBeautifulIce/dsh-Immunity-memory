@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Manual links had exactly one lookup path: the `memories` table. But a store keeps three kinds
+of notebooks, and they live in three different tables — memory rows and pitfall notes in
+`memories`, daily notes in `events`, asset notes in `assets`. Linking a daily note to
+anything was therefore impossible: the guard asked `memories`, the daily note was not there,
+and the request came back as "条目不存在" for a note that had just been read successfully.
+Both storage paths (the Go service and the Node fallback) now check all three tables, so a
+daily or asset note can be linked like any other entry.
+
+Ids are also harder to get wrong now. An id ends with an eight-character random segment,
+and that segment was often copied out of a note's prose instead of the id field, losing the
+leading `m` — which failed with the same message as a genuinely missing entry. Lookups fall
+back to the random segment, then to a case-insensitive match, then to a unique prefix, each
+only when it matches exactly one entry and never guessing between several. When a copied id
+still misses, the error text points at `memory_search` / `memory_notes` instead of leaving
+the caller stuck; and a reference that cannot be resolved is now reported as `droppedRefs`
+instead of being dropped in silence.
+
 ## [0.4.29] - 2026-11-10
 
 The notebook index had become the second-biggest thing in the prompt. It listed every note

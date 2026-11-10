@@ -1167,7 +1167,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
   }
 
   function getItem(id, workspace) {
-    const item = currentState().items.find((candidate) => candidate.id === id)
+    const item = findItemById(currentState().items, id)
     if (item === undefined) return undefined
     const scope = normalizeWorkspace(workspace)
     if (scope !== null && item.workspace !== null && item.workspace !== scope) return undefined
@@ -1406,7 +1406,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       content,
       tags: normalizeTags(input.tags),
       questions: normalizeQuestions(input.questions),
-      refs: resolveRefIds(input.refs, current.items, null),
+      refs: resolveRefIds(input.refs, current.items, null).refs,
       indexMode: input.indexMode === true,
       importance: clampInt(input.importance, 1, 10, active.write.defaultImportance),
       status: 'active',
@@ -1523,7 +1523,7 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     if (patch.content !== undefined) next.content = truncate(String(patch.content), MAX_CONTENT)
     if (patch.tags !== undefined) next.tags = normalizeTags(patch.tags)
     if (patch.questions !== undefined) next.questions = normalizeQuestions(patch.questions)
-    if (patch.refs !== undefined) next.refs = resolveRefIds(patch.refs, current.items, id)
+    if (patch.refs !== undefined) next.refs = resolveRefIds(patch.refs, current.items, id).refs
     if (patch.indexMode !== undefined) next.indexMode = patch.indexMode === true
     if (patch.importance !== undefined) next.importance = clampInt(patch.importance, 1, 10, before.importance)
     if (patch.layer !== undefined) {
@@ -3156,6 +3156,10 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
     notesIndex,
     searchItems,
     getItem,
+    resolveRefs: async (value) => {
+      const current = await ensureLoaded()
+      return resolveRefIds(value, current.items, null)
+    },
     stats: () => summarize(currentState(), settings()),
     layers: () => LAYERS,
     notebooks: () => NOTEBOOK_LIST,
@@ -3254,12 +3258,27 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       })
     },
     linkItems: async (params = {}, actor = 'user') => {
-      const sourceId = String(params.sourceId ?? '')
-      const targetId = String(params.targetId ?? '')
-      if (sourceId === '' || targetId === '') throw relationError('需要 sourceId 与 targetId')
-      if (sourceId === targetId) throw relationError('不能把条目连到自己')
+      const rawSource = String(params.sourceId ?? '')
+      const rawTarget = String(params.targetId ?? '')
+      if (rawSource === '' || rawTarget === '') throw relationError('需要 sourceId 与 targetId')
       if (typeof store.linkItems !== 'function') throw relationError('当前存储不支持人工关联')
-      const link = await store.linkItems({ sourceId, targetId, weight: params.weight })
+      const items = (await ensureLoaded()).items
+      const source = findItemById(items, rawSource)
+      const target = findItemById(items, rawTarget)
+      const sourceId = source?.id ?? rawSource
+      const targetId = target?.id ?? rawTarget
+      if (sourceId === targetId) throw relationError('不能把条目连到自己')
+      let link
+      try {
+        link = await store.linkItems({ sourceId, targetId, weight: params.weight })
+      } catch (error) {
+        const message = String(error?.message ?? error)
+        // 存了但认不出来的条目，以存储层的判断为准；只把话讲得更清楚。
+        if (/条目不存在/.test(message)) {
+          throw relationError(`${message}：请整段复制 id；如果 id 是从笔记正文里抄的，请用 memory_search 或 memory_notes 按标题找回真实 id`)
+        }
+        throw error
+      }
       const weight = Number(link?.weight)
       setManualEdge(sourceId, targetId, Number.isFinite(weight) && weight > 0 ? Math.min(1, weight) : 1)
       audit('link', `${sourceId} → ${targetId}`, actor)
@@ -3268,9 +3287,12 @@ export async function createEngine({ store, getSettings, initialSettings, log, n
       return link
     },
     unlinkItems: async (params = {}, actor = 'user') => {
-      const sourceId = String(params.sourceId ?? '')
-      const targetId = String(params.targetId ?? '')
-      if (sourceId === '' || targetId === '') throw relationError('需要 sourceId 与 targetId')
+      const rawSource = String(params.sourceId ?? '')
+      const rawTarget = String(params.targetId ?? '')
+      if (rawSource === '' || rawTarget === '') throw relationError('需要 sourceId 与 targetId')
+      const items = (await ensureLoaded()).items
+      const sourceId = findItemById(items, rawSource)?.id ?? rawSource
+      const targetId = findItemById(items, rawTarget)?.id ?? rawTarget
       if (typeof store.unlinkItems !== 'function') throw relationError('当前存储不支持人工关联')
       const removed = await store.unlinkItems({ sourceId, targetId })
       if (removed > 0) {
@@ -4070,20 +4092,58 @@ function normalizeIdList(value) {
 }
 
 /**
+ * 按 id 找条目，容忍手抄 id 时漏掉一个字符。
+ *
+ * 真实 id 形如 mem_<8 位 36 进制时间戳>_<8 位随机>（共 21 字符）；最容易漏的是时间戳
+ * 段开头的那个字母（例如 mem_mwags8yo_7931358b 被抄成 mem_wags8yo_7931358b）。
+ * 只有唯一命中才认：末 8 位随机段唯一 → 大小写不敏感唯一 → 唯一前缀唯一；
+ * 命中多个一律当没找到，绝不猜。
+ */
+function findItemById(items, id) {
+  const text = String(id ?? '').trim()
+  if (text === '') return undefined
+  const exact = items.find((candidate) => candidate.id === text)
+  if (exact !== undefined) return exact
+  const tailOf = (value) => {
+    const cut = value.lastIndexOf('_')
+    return cut < 0 ? value : value.slice(cut + 1)
+  }
+  const tail = tailOf(text).toLowerCase()
+  if (tail.length >= 6) {
+    const byTail = items.filter((candidate) => tailOf(candidate.id).toLowerCase() === tail)
+    if (byTail.length === 1) return byTail[0]
+  }
+  const lower = text.toLowerCase()
+  const byCase = items.filter((candidate) => candidate.id.toLowerCase() === lower)
+  if (byCase.length === 1) return byCase[0]
+  const head = text.slice(0, 6)
+  const byHead = items.filter((candidate) => candidate.id.startsWith(head))
+  if (byHead.length === 1) return byHead[0]
+  return undefined
+}
+
+/**
  * 关联的记事本指针只认「确实存在、而且确实是记事本条目」的 id。
  * 索引条目靠这些指针渐进加载，指向空处的指针只会把模型带偏。
+ *
+ * 手抄 id 少一个字符时按 findItemById 的唯一命中纠正成真 id；仍然认不出来的
+ * 一律记进 dropped，不再静默吞掉——调用方要能看见哪些指针没有落上。
  */
 function resolveRefIds(value, items, selfId) {
   const list = normalizeIdList(value).slice(0, MAX_REFS)
-  const out = []
+  const refs = []
+  const dropped = []
   for (const id of list) {
     if (selfId && id === selfId) continue
-    const target = items.find((candidate) => candidate.id === id)
-    if (target === undefined || target.type !== 'note') continue
-    if (out.includes(id)) continue
-    out.push(id)
+    const target = findItemById(items, id)
+    if (target === undefined || target.type !== 'note') {
+      dropped.push(id)
+      continue
+    }
+    if (refs.includes(target.id)) continue
+    refs.push(target.id)
   }
-  return out
+  return { refs, dropped }
 }
 
 function normalizeSource(raw) {
